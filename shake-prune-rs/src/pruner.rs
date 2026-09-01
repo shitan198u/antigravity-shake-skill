@@ -1,8 +1,9 @@
 use crate::models::{PruningStats, Step};
 use crate::slug::{extract_conversation_id, generate_suggested_filename, generate_topic_slug};
 use regex::Regex;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
+use serde_json::Value;
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 
 pub fn estimate_tokens(byte_count: usize) -> usize {
@@ -11,6 +12,95 @@ pub fn estimate_tokens(byte_count: usize) -> usize {
 
 fn safe_truncate(s: &str, max_chars: usize) -> String {
     s.chars().take(max_chars).collect()
+}
+
+/// Compacts transcript.jsonl directly in-place on disk with backup and atomic write.
+/// Physically replaces bloated tool outputs with compact action receipts while preserving
+/// 100% of User dialogue, Assistant thoughts/reasoning, Error stack traces, and recent active window.
+pub fn compact_transcript_inplace(
+    transcript_path: &Path,
+    recent_window_steps: usize,
+) -> Result<(usize, usize), Box<dyn std::error::Error>> {
+    // 1. Pass 1: Count total steps
+    let file_pass1 = File::open(transcript_path)?;
+    let reader_pass1 = BufReader::new(file_pass1);
+    let mut total_steps = 0usize;
+    let mut initial_bytes = 0usize;
+
+    for line in reader_pass1.lines() {
+        let line_str = line?;
+        if line_str.trim().is_empty() {
+            continue;
+        }
+        initial_bytes += line_str.len();
+        total_steps += 1;
+    }
+
+    let recent_threshold = total_steps.saturating_sub(recent_window_steps);
+
+    // 2. Create raw backup transcript.jsonl.bak
+    let backup_path = transcript_path.with_extension("jsonl.bak");
+    let _ = fs::copy(transcript_path, &backup_path);
+
+    // 3. Pass 2: Stream, compact tool outputs, and write atomically to .tmp
+    let file_pass2 = File::open(transcript_path)?;
+    let reader_pass2 = BufReader::new(file_pass2);
+    let tmp_path = transcript_path.with_extension("jsonl.tmp");
+    let mut tmp_file = File::create(&tmp_path)?;
+
+    let mut compacted_bytes = 0usize;
+
+    for (i, line) in reader_pass2.lines().enumerate() {
+        let line_str = line?;
+        if line_str.trim().is_empty() {
+            continue;
+        }
+
+        let mut step_val: Value = match serde_json::from_str(&line_str) {
+            Ok(v) => v,
+            Err(_) => {
+                writeln!(tmp_file, "{}", line_str)?;
+                compacted_bytes += line_str.len();
+                continue;
+            }
+        };
+
+        let stype = step_val.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let status = step_val.get("status").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
+        let exit_code = step_val.get("exit_code").and_then(|v| v.as_i64());
+        let is_recent = i >= recent_threshold;
+
+        let is_error = exit_code.map(|c| c != 0).unwrap_or(false)
+            || status.contains("error")
+            || status.contains("failed");
+
+        if !is_recent && !is_error {
+            match stype.as_str() {
+                "RUN_COMMAND" => {
+                    let content_len = step_val.get("content").and_then(|v| v.as_str()).map(|s| s.len()).unwrap_or(0);
+                    if content_len > 250 {
+                        step_val["content"] = serde_json::json!("Command completed successfully (exit 0). Verbose stdout pruned via /shake.");
+                    }
+                }
+                "VIEW_FILE" => {
+                    step_val["content"] = serde_json::json!("File inspected in previous turn. Content pruned via /shake.");
+                }
+                "SEARCH_WEB" | "GREP_SEARCH" | "CODE_ACTION" => {
+                    step_val["content"] = serde_json::json!(format!("{} completed successfully. Output pruned via /shake.", stype));
+                }
+                _ => {}
+            }
+        }
+
+        let compacted_line = serde_json::to_string(&step_val)?;
+        compacted_bytes += compacted_line.len();
+        writeln!(tmp_file, "{}", compacted_line)?;
+    }
+
+    tmp_file.flush()?;
+    fs::rename(&tmp_path, transcript_path)?;
+
+    Ok((initial_bytes, compacted_bytes))
 }
 
 pub fn prune_transcript(

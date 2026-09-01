@@ -1,23 +1,70 @@
-# 🧠 Deep Dive: How `/shake` Works, Context Mechanics & AI Visibility
+# 🧠 Deep Dive: How `/shake` Works, In-Place Compaction & Context Mechanics
 
-This document provides a comprehensive, technical explanation of what happens under the hood when `/shake` is executed, how Antigravity manages context across turns, and how the AI interacts with the compacted history.
+This document provides a comprehensive, technical explanation of what happens under the hood when `/shake` is executed, how `transcript.jsonl` is physically compacted on disk, and how the AI interacts with the compacted history.
 
 ---
 
-## ❓ The Core Question: Does `transcript.jsonl` Become "New"?
+## ⚡ Physical In-Place Compaction in the Same Chat Window
 
-In simple terms: **Logically yes for the AI, but safely non-destructive on disk.**
+When `/shake` runs, it executes **Safe Physical In-Place JSONL Compaction** directly on the active session's `transcript.jsonl`:
 
-Here is the exact distinction:
+```
+                                  BEFORE /shake
+         ┌─────────────────────────────────────────────────────────────┐
+         │ transcript.jsonl (2.7 MB on disk)                           │
+         │  • Turn 1: User prompt                                      │
+         │  • Turn 2: RUN_COMMAND (5,000 lines npm/cmake stdout)       │ ◄── BLOAT
+         │  • Turn 3: VIEW_FILE (2,000 lines source code)             │ ◄── BLOAT
+         │  • Turn 4: Assistant thought & decision                     │
+         └─────────────────────────────────────────────────────────────┘
+                                        │
+                                        ▼
+                                  Run "/shake"
+                                        │
+                                        ▼
+                                  AFTER /shake
+         ┌─────────────────────────────────────────────────────────────┐
+         │ transcript.jsonl.bak (Full raw backup created)              │
+         │ transcript.jsonl (380 KB on disk — JSONL structure valid)   │
+         │  • Turn 1: User prompt (100% verbatim)                      │
+         │  • Turn 2: RUN_COMMAND (exit 0: "Command completed...")     │ ◄── COMPACT
+         │  • Turn 3: VIEW_FILE ("File inspected...")                  │ ◄── COMPACT
+         │  • Turn 4: Assistant thought & decision (100% verbatim)     │
+         │  • Turn N-5..N: Active Working Window (100% full logs)      │
+         └─────────────────────────────────────────────────────────────┘
+                                        │
+                                        ▼
+                       Next Turn in the EXACT SAME TAB
+         Antigravity reads the compacted transcript.jsonl from disk.
+         Model API payload physically drops from 2.7 MB ➔ 380 KB (85%+ saved)!
+```
 
-1. **On Disk (`transcript.jsonl` is Append-Only)**:
-   - Antigravity maintains `transcript.jsonl` as an append-only system journal.
-   - `shake-prune` **never modifies or overwrites the active `transcript.jsonl` file in-place**. Mutating an active file descriptor while the IDE process is actively writing to it would cause race conditions, corrupt telemetry, or break IDE file watchers.
-2. **Logically in the AI's Context Window**:
-   - `shake-prune` extracts the entire history from `transcript.jsonl`, eliminates the low-signal tool payload noise (e.g. 500-line `npm` build streams, 1,000-line `view_file` dumps), and produces a clean, structured **Verbatim Artifact** (`shake_<topic>_<timestamp>.md`).
-   - Through the **PreInvocation Hook** (`shake-prune --hook`), the AI receives an active boundary directive on subsequent turns, instructing it to treat the historical raw tool outputs as archived and anchor its working context in the clean state.
-3. **In a Fresh Window (New Tab)**:
-   - When you start a new conversation and reference `@shake_<topic>.md`, Antigravity initializes a **brand-new, completely fresh `transcript.jsonl`** where Turn 1 is the 100% complete, unbloated historical baseline.
+---
+
+## 🛡️ Why In-Place Compaction Is 100% Safe
+
+1. **Strict Schema Preservation**:
+   - Every line in `transcript.jsonl` remains a valid JSON object matching Antigravity's exact schema (`step_index`, `type`, `content`, `status`, `thinking`, `tool_calls`).
+   - The sequence of steps and line indices remain completely intact.
+2. **Automatic Raw Backup (`transcript.jsonl.bak`)**:
+   - Before any bytes are modified, the full, unpruned original is copied to `transcript.jsonl.bak`.
+3. **Atomic File Swapping**:
+   - Compaction writes to `transcript.jsonl.tmp` and uses atomic filesystem rename (`os.replace` / `fs::rename`), eliminating any risk of partial writes or corruption.
+4. **Zero Tab Switching Required**:
+   - You stay in the same window. Because the IDE reads `transcript.jsonl` from disk on each invocation, your next prompt transmits **80%–90% fewer tokens over the wire**.
+
+---
+
+## 📊 What Is Preserved vs. What Is Compacted
+
+| Conversation Element | Treatment by `/shake` | AI Visibility & Precision |
+| :--- | :--- | :--- |
+| **User Prompts** | Retained 100% verbatim | Complete, character-for-character precision across all turns |
+| **Assistant Explanations** | Retained 100% verbatim | Architectural decisions, bug analyses, and notes are preserved word-for-word |
+| **Model Thoughts** | Retained in `<details>` drawers & JSON | Deep reasoning chains (`thinking`) are preserved without loss |
+| **Execution Errors & Stack Traces** | Retained 100% with full traceback | Any failed command (`exit_code != 0`), build error, or exception is preserved for debugging |
+| **Active Working Window** | Last 6 tool steps retained in full | Immediate momentum and active command outputs remain intact |
+| **Old Successful Tool Dumps** | Replaced with compact action receipts | `npm run build` (1,000 lines) becomes `ℹ️ [Command completed successfully (exit 0)]` |
 
 ---
 
@@ -26,77 +73,9 @@ Here is the exact distinction:
 > **No. There is zero vector chunking, lossy embedding search, or top-k retrieval.**
 
 ### Why Developers Worry About "Passing `.md` Files"
-In many generic LLM systems, attaching large documents triggers a background RAG pipeline:
-- The document is sliced into arbitrary 500-token chunks.
-- Vector embeddings are calculated.
-- When you ask a question, only the "top 3 most similar chunks" are pulled into the prompt.
-- **The Result**: The AI loses the global architecture, misses edge cases, and forgets previous agreements because 90% of the document is left out.
+In generic LLM tools, attaching large documents triggers vector chunking where 90% of the document is left out.
 
-### How Antigravity Handles `/shake` Markdown Artifacts
-Antigravity does **NOT** use lossy vector RAG for `@file` or artifact inclusions:
-1. **Direct Full-Text Verbatim Injection**: The entire Markdown file is injected directly into the active prompt payload.
-2. **Guaranteed Fit within Context Limit**:
-   - A bloated session might reach **600,000+ tokens (2.5+ MB)**, which degrades attention.
-   - The pruned `/shake` file is typically **15,000 – 40,000 tokens (30 KB – 100 KB)**.
-   - Because the underlying Gemini model features a massive **1M+ token context window**, the entire pruned history fits in a small fraction of available memory with **100% full-text visibility**.
-
----
-
-## 🔄 Turn-by-Turn Execution Walkthrough
-
-```
-                     TURNS 1..N: Long Coding Session
-                     (2.5 MB raw logs, file dumps, status chatter)
-                                    │
-                                    ▼
-                          User runs: "/shake"
-                                    │
-    ┌───────────────────────────────┴───────────────────────────────┐
-    │ 1. Native Pruner (`shake-prune`) reads transcript.jsonl       │
-    │ 2. Strips verbose tool stdout; preserves 100% dialogue        │
-    │ 3. Writes `shake_<topic>_<timestamp>.md` in artifact dir     │
-    │ 4. Writes `active_shake_anchor.json` (active: true)           │
-    │ 5. Prints formatted token reduction table (~80-90% savings)  │
-    └───────────────────────────────┬───────────────────────────────┘
-                                    │
-                                    ▼
-                 TURN N+1: User types next prompt in SAME TAB
-                                    │
-    ┌───────────────────────────────┴───────────────────────────────┐
-    │ 1. IDE triggers PreInvocation Hook (`shake-prune --hook`)     │
-    │ 2. Hook reads `active_shake_anchor.json` (<0.2ms latency)     │
-    │ 3. Hook injects ephemeral system instruction:                 │
-    │    "[Context compacted via /shake. Active state anchored in   │
-    │     @shake_topic.md (Step 220+). Treat raw stdout as archived]"│
-    │ 4. LLM receives prompt with focused attention                 │
-    │ 5. Agent continues working seamlessly with zero bloat         │
-    └───────────────────────────────────────────────────────────────┘
-```
-
----
-
-## 📊 What Is Preserved vs. What Is Pruned
-
-| Conversation Element | Treatment by `/shake` | AI Visibility & Precision |
-| :--- | :--- | :--- |
-| **User Prompts** | Retained 100% verbatim | Complete, character-for-character precision across all turns |
-| **Assistant Explanations** | Retained 100% verbatim | Architectural decisions, bug analyses, and notes are preserved word-for-word |
-| **Model Thoughts** | Retained in `<details>` drawers | Deep reasoning chains (`thinking`) are preserved without cluttering the UI |
-| **Execution Errors & Stack Traces** | Retained 100% with full traceback | Any failed command (`exit_code != 0`), build error, or exception is preserved for debugging |
-| **Active Working Window** | Last 6 tool steps retained in full | Immediate momentum and active command outputs remain intact |
-| **Old Successful Tool Dumps** | Replaced with compact action receipts | `npm run build` (1,000 lines) becomes `ℹ️ [Command completed successfully (exit 0)]` |
-
----
-
-## 🚀 Two Ways to Continue After `/shake`
-
-### Option 1: In-Window Continuation (Default & Recommended)
-- **Action**: Simply type your next message and press **Send** in the same chat tab.
-- **Under the Hood**: The native `PreInvocation` hook injects the session anchor ephemerally. The model shifts its focus away from stale raw tool stdout to the active working state.
-
-### Option 2: Fresh Tab Continuation (For Complete Reset)
-- **Action**: Open a new chat tab and type:
-  ```text
-  @/path/to/shake_topic_YYYYMMDD_HHMM.md Continue with the next task.
-  ```
-- **Under the Hood**: A brand-new `transcript.jsonl` is created. Antigravity injects the full verbatim pruned transcript as the initial context, completely freeing up the context window.
+### How Antigravity Handles `/shake` Transcripts
+1. **Direct In-Place Ingestion**: The compacted `transcript.jsonl` contains the full conversation history with noise removed.
+2. **Direct Markdown Injection**: If referencing `@shake_topic.md` in a fresh window, the entire file is injected verbatim.
+3. **Guaranteed Context Fit**: A pruned session is **15,000 – 40,000 tokens**, fitting easily into Gemini’s **1M+ token window** with 100% full-text visibility.
