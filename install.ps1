@@ -3,13 +3,14 @@
 # Installs the high-speed /shake context-pruning skill globally for Windows.
 # ==============================================================================
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "SilentlyContinue"
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $UserHome = $env:USERPROFILE
 $TargetConfigDir = Join-Path $UserHome ".gemini\config"
 $TargetSkillDir = Join-Path $TargetConfigDir "skills\shake"
 $TargetBinDir = Join-Path $UserHome ".gemini\bin"
+$RepoUrl = "https://github.com/shitan198u/antigravity-shake-skill"
 
 Write-Host "================================================================================" -ForegroundColor Cyan
 Write-Host "          ⚡ Antigravity /shake Skill & Native Hook Installation (Windows) ⚡" -ForegroundColor Cyan
@@ -32,7 +33,7 @@ if (Test-Path (Join-Path $ScriptDir "assets\artifact_preview.png")) {
     Copy-Item (Join-Path $ScriptDir "assets\artifact_preview.png") (Join-Path $TargetSkillDir "assets\artifact_preview.png") -Force
 }
 
-# 3. Binary Installation (Prebuilt -> Local Compile -> Python Fallback)
+# 3. Binary Installation (Prebuilt -> GitHub Releases Download -> Local Cargo Compile -> Python Fallback)
 $PrebuiltBin = Join-Path $ScriptDir "bin\shake-prune.exe"
 $BinaryInstalled = $false
 
@@ -41,7 +42,24 @@ if (Test-Path $PrebuiltBin) {
     Copy-Item $PrebuiltBin (Join-Path $TargetBinDir "shake-prune.exe") -Force
     Copy-Item $PrebuiltBin (Join-Path $TargetSkillDir "bin\shake-prune.exe") -Force
     $BinaryInstalled = $true
-} elseif (Get-Command cargo -ErrorAction SilentlyContinue) {
+} else {
+    # Download from GitHub Releases
+    Write-Host "• Fetching precompiled Windows binary from GitHub Releases..."
+    $WinBinUrl = "$RepoUrl/releases/latest/download/shake-prune-windows-x86_64.exe"
+    $TargetExe = Join-Path $TargetBinDir "shake-prune.exe"
+    try {
+        Invoke-WebRequest -Uri $WinBinUrl -OutFile $TargetExe -UseBasicParsing
+        if (Test-Path $TargetExe) {
+            Copy-Item $TargetExe (Join-Path $TargetSkillDir "bin\shake-prune.exe") -Force
+            Write-Host "• Downloaded and installed Windows binary to: $TargetExe"
+            $BinaryInstalled = $true
+        }
+    } catch {
+        # Fallback to local compile or python
+    }
+}
+
+if (-not $BinaryInstalled -and (Get-Command cargo -ErrorAction SilentlyContinue)) {
     Write-Host "• Compiling native binary via cargo..."
     cargo build --release --manifest-path (Join-Path $ScriptDir "shake-prune-rs\Cargo.toml")
     $CompiledBin = Join-Path $ScriptDir "shake-prune-rs\target\release\shake-prune.exe"

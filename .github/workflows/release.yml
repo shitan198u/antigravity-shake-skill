@@ -9,84 +9,88 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
-    name: Build (${{ matrix.target }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Linux x86_64
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            binary_name: shake-prune
-            asset_name: shake-prune-linux-x86_64
-
-          # macOS Apple Silicon (M1/M2/M3/M4)
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            binary_name: shake-prune
-            asset_name: shake-prune-macos-arm64
-
-          # macOS Intel (x86_64)
-          - os: macos-13
-            target: x86_64-apple-darwin
-            binary_name: shake-prune
-            asset_name: shake-prune-macos-x86_64
-
-          # Windows x86_64
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            binary_name: shake-prune.exe
-            asset_name: shake-prune-windows-x86_64.exe
-
+  # 1. Build Linux x86_64
+  build-linux:
+    name: Build (Linux x86_64)
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Build Release Binary
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build Release
+        run: cargo build --release --manifest-path shake-prune-rs/Cargo.toml
+      - name: Package Asset
         run: |
-          cargo build --release --target ${{ matrix.target }} --manifest-path shake-prune-rs/Cargo.toml
+          mkdir -p dist
+          cp shake-prune-rs/target/release/shake-prune dist/shake-prune-linux-x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shake-prune-linux-x86_64
+          path: dist/shake-prune-linux-x86_64
 
-      - name: Prepare Artifact
+  # 2. Build macOS Universal (ARM64 + Intel x86_64 via lipo on macos-latest)
+  build-macos:
+    name: Build (macOS Universal - Apple Silicon + Intel)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - name: Build Both Targets
+        run: |
+          cargo build --release --target aarch64-apple-darwin --manifest-path shake-prune-rs/Cargo.toml
+          cargo build --release --target x86_64-apple-darwin --manifest-path shake-prune-rs/Cargo.toml
+      - name: Create Universal Binary via lipo
+        run: |
+          mkdir -p dist
+          lipo -create -output dist/shake-prune-macos-universal \
+            shake-prune-rs/target/aarch64-apple-darwin/release/shake-prune \
+            shake-prune-rs/target/x86_64-apple-darwin/release/shake-prune
+          file dist/shake-prune-macos-universal
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shake-prune-macos-universal
+          path: dist/shake-prune-macos-universal
+
+  # 3. Build Windows x86_64
+  build-windows:
+    name: Build (Windows x86_64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build Release
+        run: cargo build --release --manifest-path shake-prune-rs/Cargo.toml
+      - name: Package Asset
         shell: bash
         run: |
           mkdir -p dist
-          SRC_PATH="shake-prune-rs/target/${{ matrix.target }}/release/${{ matrix.binary_name }}"
-          cp "$SRC_PATH" "dist/${{ matrix.asset_name }}"
-          ls -la dist/
-
-      - name: Upload Build Artifact
-        uses: actions/upload-artifact@v4
+          cp shake-prune-rs/target/release/shake-prune.exe dist/shake-prune-windows-x86_64.exe
+      - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset_name }}
-          path: dist/${{ matrix.asset_name }}
+          name: shake-prune-windows-x86_64.exe
+          path: dist/shake-prune-windows-x86_64.exe
 
+  # 4. Automatic GitHub Release on Tags
   release:
     name: Create GitHub Release
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-linux, build-macos, build-windows]
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
           path: release_assets/
-
-      - name: Package & Publish Release
+      - name: Package & Publish Release Assets
         uses: softprops/action-gh-release@v2
         with:
-          files: release_assets/**/*
+          files: |
+            release_assets/shake-prune-linux-x86_64/shake-prune-linux-x86_64
+            release_assets/shake-prune-macos-universal/shake-prune-macos-universal
+            release_assets/shake-prune-windows-x86_64.exe/shake-prune-windows-x86_64.exe
           draft: false
           prerelease: false
           generate_release_notes: true
