@@ -14,7 +14,6 @@ import shlex
 from pathlib import Path
 
 def estimate_tokens(text: str) -> int:
-    # Calibrated token density for Code, JSON, and Markdown transcripts (~3.3 chars/token)
     return max(1, round(len(text) / 3.3))
 
 def format_bytes(bytes_count: int) -> str:
@@ -38,16 +37,22 @@ def extract_conversation_id(path_str: str) -> str:
     match = re.search(r"brain[/\\]([a-zA-Z0-9_-]+)[/\\]", path_str)
     return match.group(1) if match else "unknown-session"
 
-def compact_tool_call_args(tool_name: str, args_map: dict):
+def compact_tool_call_args(tool_name: str, args_map: dict, step_idx: int, backup_file_name: str):
     if tool_name == "write_to_file":
         code_val = str(args_map.get("CodeContent", ""))
         if len(code_val) > 200:
             lines = len(code_val.splitlines())
-            args_map["CodeContent"] = f"[File written to disk ({lines} lines). Inspect via view_file if needed]"
+            args_map["CodeContent"] = (
+                f"[File written to disk ({lines} lines). Step {step_idx} full payload archived in {backup_file_name}. "
+                f"Inspect via view_file if needed]"
+            )
     elif tool_name == "replace_file_content":
         rep_val = str(args_map.get("ReplacementContent", ""))
         if len(rep_val) > 200:
-            args_map["ReplacementContent"] = "[Code edit applied to target file. Inspect via view_file if needed]"
+            args_map["ReplacementContent"] = (
+                f"[Code replacement applied. Step {step_idx} diff archived in {backup_file_name}. "
+                f"Inspect via view_file if needed]"
+            )
         tgt_val = str(args_map.get("TargetContent", ""))
         if len(tgt_val) > 200:
             args_map["TargetContent"] = "[Original target code snippet]"
@@ -57,7 +62,7 @@ def compact_tool_call_args(tool_name: str, args_map: dict):
             for chunk in chunks:
                 if isinstance(chunk, dict):
                     if len(str(chunk.get("ReplacementContent", ""))) > 100:
-                        chunk["ReplacementContent"] = "[Replacement chunk applied]"
+                        chunk["ReplacementContent"] = f"[Replacement chunk applied. Step {step_idx} archived in {backup_file_name}]"
                     if len(str(chunk.get("TargetContent", ""))) > 100:
                         chunk["TargetContent"] = "[Target chunk snippet]"
 
@@ -73,6 +78,8 @@ def compact_single_jsonl_file(t_file: Path, recent_window_steps: int = 6) -> boo
         shutil.copy2(t_file, bak_latest)
     except Exception:
         pass
+
+    backup_name = bak_timestamped.name
 
     try:
         with open(t_file, "r+", encoding="utf-8") as f:
@@ -93,11 +100,11 @@ def compact_single_jsonl_file(t_file: Path, recent_window_steps: int = 6) -> boo
                 stype = str(step.get("type", ""))
                 status = str(step.get("status", "")).lower()
                 exit_code = step.get("exit_code")
+                step_idx = step.get("step_index", i + 1)
                 is_recent = (i >= recent_threshold)
                 is_error = (exit_code is not None and exit_code != 0) or ("error" in status) or ("failed" in status)
 
                 if not is_recent:
-                    # Idea 2: Compact large code args in tool_calls for PLANNER_RESPONSE
                     if stype == "PLANNER_RESPONSE":
                         tool_calls = step.get("tool_calls", [])
                         if isinstance(tool_calls, list):
@@ -105,17 +112,17 @@ def compact_single_jsonl_file(t_file: Path, recent_window_steps: int = 6) -> boo
                                 name = tc.get("name", "")
                                 args = tc.get("args")
                                 if isinstance(args, dict):
-                                    compact_tool_call_args(name, args)
+                                    compact_tool_call_args(name, args, step_idx, backup_name)
 
                     if not is_error:
                         if stype == "RUN_COMMAND":
                             content = str(step.get("content", ""))
                             if len(content) > 250:
-                                step["content"] = "Command completed successfully (exit 0). Verbose stdout pruned via /shake."
+                                step["content"] = f"Command completed successfully (exit 0). Step {step_idx} stdout archived in {backup_name}."
                         elif stype == "VIEW_FILE":
-                            step["content"] = "File inspected in previous turn. Content pruned via /shake."
+                            step["content"] = f"File inspected in previous turn. Step {step_idx} content archived in {backup_name}."
                         elif stype in ("SEARCH_WEB", "GREP_SEARCH", "CODE_ACTION"):
-                            step["content"] = f"{stype} completed successfully. Output pruned via /shake."
+                            step["content"] = f"{stype} completed successfully. Step {step_idx} output archived in {backup_name}."
 
                 compacted_lines.append(json.dumps(step) + "\n")
 

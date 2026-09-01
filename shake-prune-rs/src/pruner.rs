@@ -21,9 +21,15 @@ pub fn shell_quote(path_str: &str) -> String {
     format!("'{}'", path_str.replace('\'', "'\\''"))
 }
 
-/// Compacts large tool call arguments (e.g. write_to_file CodeContent, replace_file_content)
-/// into structured receipts while preserving TargetFile, Description, and intent.
-fn compact_tool_call_args(tool_name: &str, args_map: &mut serde_json::Map<String, Value>) {
+/// Compacts large tool call arguments into progressive disclosure receipts.
+/// Preserves TargetFile, Description, Step Index, and links to the timestamped raw archive
+/// so the LLM can inspect exact historical code diffs on-demand via view_file if code ever breaks.
+fn compact_tool_call_args(
+    tool_name: &str,
+    args_map: &mut serde_json::Map<String, Value>,
+    step_idx: u64,
+    backup_file_name: &str,
+) {
     match tool_name {
         "write_to_file" => {
             if let Some(code_val) = args_map.get("CodeContent").and_then(|v| v.as_str()) {
@@ -31,7 +37,10 @@ fn compact_tool_call_args(tool_name: &str, args_map: &mut serde_json::Map<String
                     let line_count = code_val.lines().count();
                     args_map.insert(
                         "CodeContent".to_string(),
-                        Value::String(format!("[File written to disk ({} lines). Inspect via view_file if needed]", line_count)),
+                        Value::String(format!(
+                            "[File written to disk ({} lines). Step {} full payload archived in {}. Inspect via view_file if needed]",
+                            line_count, step_idx, backup_file_name
+                        )),
                     );
                 }
             }
@@ -41,7 +50,10 @@ fn compact_tool_call_args(tool_name: &str, args_map: &mut serde_json::Map<String
                 if rep_val.len() > 200 {
                     args_map.insert(
                         "ReplacementContent".to_string(),
-                        Value::String("[Code edit applied to target file. Inspect via view_file if needed]".to_string()),
+                        Value::String(format!(
+                            "[Code replacement applied. Step {} diff archived in {}. Inspect via view_file if needed]",
+                            step_idx, backup_file_name
+                        )),
                     );
                 }
             }
@@ -60,7 +72,10 @@ fn compact_tool_call_args(tool_name: &str, args_map: &mut serde_json::Map<String
                     if let Some(chunk_map) = chunk.as_object_mut() {
                         if let Some(rc) = chunk_map.get("ReplacementContent").and_then(|v| v.as_str()) {
                             if rc.len() > 100 {
-                                chunk_map.insert("ReplacementContent".to_string(), Value::String("[Replacement chunk applied]".to_string()));
+                                chunk_map.insert(
+                                    "ReplacementContent".to_string(),
+                                    Value::String(format!("[Replacement chunk applied. Step {} archived in {}]", step_idx, backup_file_name)),
+                                );
                             }
                         }
                         if let Some(tc) = chunk_map.get("TargetContent").and_then(|v| v.as_str()) {
@@ -93,6 +108,8 @@ fn compact_single_jsonl_file(
     let backup_latest = target_path.with_extension("jsonl.bak");
     let _ = fs::copy(target_path, &backup_timestamped);
     let _ = fs::copy(target_path, &backup_latest);
+
+    let backup_file_name = backup_timestamped.file_name().unwrap_or_default().to_string_lossy().to_string();
 
     // 2. Open the file in Read+Write mode (preserves original inode on disk)
     let mut file = File::options().read(true).write(true).open(target_path)?;
@@ -131,6 +148,7 @@ fn compact_single_jsonl_file(
         let stype = step_val.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let status = step_val.get("status").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
         let exit_code = step_val.get("exit_code").and_then(|v| v.as_i64());
+        let step_idx = step_val.get("step_index").and_then(|v| v.as_u64()).unwrap_or(i as u64 + 1);
         let is_recent = i >= recent_threshold;
 
         let is_error = exit_code.map(|c| c != 0).unwrap_or(false)
@@ -138,13 +156,13 @@ fn compact_single_jsonl_file(
             || status.contains("failed");
 
         if !is_recent {
-            // Idea 2: Compact large code payloads in tool_calls for PLANNER_RESPONSE
+            // Progressive Disclosure: Compact large code payloads with step index & archive backlink
             if stype == "PLANNER_RESPONSE" {
                 if let Some(tool_calls) = step_val.get_mut("tool_calls").and_then(|v| v.as_array_mut()) {
                     for tc in tool_calls {
                         let name = tc.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
                         if let Some(args_map) = tc.get_mut("args").and_then(|v| v.as_object_mut()) {
-                            compact_tool_call_args(&name, args_map);
+                            compact_tool_call_args(&name, args_map, step_idx, &backup_file_name);
                         }
                     }
                 }
@@ -155,14 +173,23 @@ fn compact_single_jsonl_file(
                     "RUN_COMMAND" => {
                         let content_len = step_val.get("content").and_then(|v| v.as_str()).map(|s| s.len()).unwrap_or(0);
                         if content_len > 250 {
-                            step_val["content"] = serde_json::json!("Command completed successfully (exit 0). Verbose stdout pruned via /shake.");
+                            step_val["content"] = serde_json::json!(format!(
+                                "Command completed successfully (exit 0). Step {} stdout archived in {}.",
+                                step_idx, backup_file_name
+                            ));
                         }
                     }
                     "VIEW_FILE" => {
-                        step_val["content"] = serde_json::json!("File inspected in previous turn. Content pruned via /shake.");
+                        step_val["content"] = serde_json::json!(format!(
+                            "File inspected in previous turn. Step {} content archived in {}.",
+                            step_idx, backup_file_name
+                        ));
                     }
                     "SEARCH_WEB" | "GREP_SEARCH" | "CODE_ACTION" => {
-                        step_val["content"] = serde_json::json!(format!("{} completed successfully. Output pruned via /shake.", stype));
+                        step_val["content"] = serde_json::json!(format!(
+                            "{} completed successfully. Step {} output archived in {}.",
+                            stype, step_idx, backup_file_name
+                        ));
                     }
                     _ => {}
                 }
