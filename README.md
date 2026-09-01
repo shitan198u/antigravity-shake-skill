@@ -36,9 +36,12 @@ When `/shake` runs, it generates an **Interactive IDE Artifact** with explicit c
 ## ⚡ Key Highlights
 
 * **🟢 Seamless In-Window Continuity (No New Tab Required!)**:
-  * Utilizes an Antigravity **`PreInvocation` Lifecycle Hook** (`hooks.json`).
+  * Utilizes a native Antigravity **`PreInvocation` Hook** (`shake-prune --hook`).
   * When `/shake` completes, it creates an active session anchor.
-  * **You stay in the exact same chat window**—when you press Send on your next turn, the hook automatically pins the model's working memory to the clean shaken artifact!
+  * **You stay in the exact same chat window**—when you press Send on your next turn, the native hook automatically pins the model's working memory to the clean shaken artifact!
+* **🦀 100% Self-Contained Native Binary**:
+  * One single binary (`shake-prune`) handles both context pruning and sub-millisecond hook execution (`<0.3ms`).
+  * **Zero Python & Zero Rust dependencies** required at runtime on Linux.
 * **80%–90% Token Reduction**: Recovers hundreds of thousands of tokens from bloated transcripts instantly.
 * **Zero Loss of Meaning**: Unlike lossy LLM summarizers, User instructions, bug investigations, Assistant architectural decisions, and Thoughts are preserved **word-for-word**.
 * **Smart Signal Preservation**:
@@ -46,10 +49,6 @@ When `/shake` runs, it generates an **Interactive IDE Artifact** with explicit c
   * 🕒 **Active Working Window**: Retains recent tool execution outputs to preserve immediate task momentum.
   * 📋 **Status Commands**: Keeps compact status checks (`git branch`, `pwd`, short checks).
   * ⚙️ **Action Receipts**: Replaces bulky file reads and terminal logs with clear single-line action receipts.
-* **Prebuilt High-Speed Engine**:
-  * **Precompiled Native Binary (`bin/shake-prune`)**: Included out-of-the-box (sub-10ms execution on multi-megabyte transcripts).
-  * **Rust Source Included (`shake-prune-rs/`)**: Ready to recompile via `cargo` on non-x86_64 systems.
-  * **Universal Python Fallback (`scripts/shake_prune.py`)**: Zero-dependency fallback for any environment.
 * **Dynamic Topic Naming**: Auto-generates clean, timestamped filenames based on the conversation topic (e.g. `shake_earbud_fit_test_20260901_2018.md`).
 
 ---
@@ -64,10 +63,10 @@ cd antigravity-shake
 ```
 
 ### 🛡️ Smart 3-Tier Installation Cascade
-The installer automatically:
-1. Installs the native Linux binary (`bin/shake-prune`) or compiles via `cargo`.
-2. Sets up the universal Python fallback engine (`scripts/shake_prune.py`).
-3. **Registers the `PreInvocation` hook in `~/.gemini/config/hooks.json`** for in-window continuity.
+The installer is written in **pure Bash** (zero Python runtime required):
+1. **Tier 1 (Instant)**: Installs the precompiled native Linux binary (`bin/shake-prune`) and registers `~/.gemini/bin/shake-prune --hook`.
+2. **Tier 2 (Source Compile)**: If the prebuilt binary is incompatible with your CPU architecture and `cargo` is present, it automatically compiles the Rust source in `--release` mode.
+3. **Tier 3 (Universal Fallback)**: If no Rust toolchain is available, it seamlessly sets up the Python 3 engine.
 
 ---
 
@@ -80,31 +79,42 @@ When a conversation gets long or starts to experience context degradation, simpl
 /shake
 ```
 
-The agent will execute the pruner, set the session anchor, and output the report:
+The agent executes the native pruner, sets the session anchor, and presents the clean report:
 
-```text
-================================================================================
-               ⚡ SHAKE CONTEXT PRUNING REPORT (RUST NATIVE) ⚡
-================================================================================
-• Session ID:           6b25943b-bbe3-48a4-9731-72f07389d0b4
-• Topic:                GOAL RELEVANT DEVICE PLUGGED
-• Original Payload:     2,678,240 bytes (~669,560 tokens)
-• Pruned Payload:       497,697 bytes (~124,424 tokens)
-• Token Savings:        81.4% reduction (~545k tokens saved!)
-• Preserved Signals:    53 user turns (100%), 70 assistant turns (100%), 14 errors
---------------------------------------------------------------------------------
-📋 RESUMPTION PATHS & QUICK-COPY
---------------------------------------------------------------------------------
-• In-Window Continuity: 🟢 ACTIVE (Next message in this tab will use clean context)
-• Absolute File Path:   /home/shsrra/.gemini/antigravity-ide/brain/.../shake_topic_YYYYMMDD_HHMM.md
-• In-Chat Mention:      @/home/shsrra/.gemini/antigravity-ide/brain/.../shake_topic_YYYYMMDD_HHMM.md
-• Copy to Project:      cp "/home/shsrra/.gemini/antigravity-ide/brain/.../shake_topic_YYYYMMDD_HHMM.md" ./
-• Copy to Clipboard:    xclip -sel clip < "/home/shsrra/.gemini/antigravity-ide/brain/.../shake_topic_YYYYMMDD_HHMM.md"
-================================================================================
+```markdown
+# ⚡ Context Compaction & Tree-Shaking Report
+
+Context for this session has been compacted and anchored in this chat window.
+All **User prompts, Assistant reasoning, Thoughts, and Error signals are 100% preserved verbatim**.
+
+---
+
+### 📊 Token Reduction Metrics
+
+| Metric | Original | Pruned | Savings |
+| :--- | :--- | :--- | :--- |
+| **Payload Size** | `2.7 MB` | `497.7 KB` | **81.4% reduction** |
+| **Estimated Tokens** | `~669,560` | `~124,424` | **~545,136 tokens saved** |
+| **Preserved Signals** | 53 User turns (100%) | 70 Assistant turns (100%) | 14 Error traces (100%) |
+
+---
+
+### 🟢 In-Window Continuity Active
+> **Ready to continue**: Your context memory is now pinned to the clean state. Simply type your next prompt and press **Send** in this chat.
+
+- **Interactive Artifact**: [📄 shake_topic_20260901_2018.md](file:///path/to/shake_topic.md) *(Click to preview in side pane)*
+
+<details>
+<summary>📋 Need to export or copy this session elsewhere?</summary>
+
+- **In-Chat Mention**: `@/path/to/shake_topic.md`
+- **Copy to Project**: `cp "/path/to/shake_topic.md" ./`
+- **Copy to Clipboard**: `xclip -sel clip < "/path/to/shake_topic.md" || wl-copy < "/path/to/shake_topic.md"`
+</details>
 ```
 
 ### 2. Keep Chatting in the Same Tab!
-You don't have to leave the window! Just type your next message and press **Send**. The `PreInvocation` hook automatically ensures the agent continues with full clarity based on the clean shaken state.
+You don't have to leave the window! Just type your next message and press **Send**. The native `PreInvocation` hook automatically ensures the agent continues with full clarity based on the clean shaken state.
 
 ---
 
@@ -115,21 +125,20 @@ antigravity-shake/
 ├── assets/
 │   └── artifact_preview.png      # Rendered preview screenshot
 ├── bin/
-│   └── shake-prune               # Precompiled native Linux binary (x86_64)
-├── hooks.json                     # PreInvocation lifecycle hook configuration
-├── install.sh                     # Automated 3-tier installer (sets up binary + hook)
+│   └── shake-prune               # Precompiled native Linux binary (x86_64, includes --hook)
+├── install.sh                     # Automated pure-Bash installer
 ├── README.md                      # Documentation & usage guide
 ├── SKILL.md                       # Antigravity skill definition
 ├── references/
 │   └── omp_comparison.md          # Technical analysis of omp vs Antigravity pruning
 ├── scripts/
-│   ├── pre_invocation_hook.py     # Seamless in-window hook interceptor
 │   └── shake_prune.py             # Universal Python fallback engine
 └── shake-prune-rs/                # High-speed Rust crate source
     ├── Cargo.toml                 # Dependencies & release profile
     └── src/
         ├── main.rs                # CLI entry point, anchor generator & report
-        ├── metadata.rs            # IDE Artifact & active_shake_anchor.json writer
+        ├── hook.rs                # Native sub-millisecond PreInvocation hook runner
+        ├── metadata.rs            # Atomic writes for IDE Artifact & active_shake_anchor.json
         ├── models.rs              # Typed Antigravity event schemas
         ├── pruner.rs              # Signal-preserving filter & markdown generator
         └── slug.rs                # Topic slug & filename generator

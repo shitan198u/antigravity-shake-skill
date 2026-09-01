@@ -1,8 +1,10 @@
+mod hook;
 mod metadata;
 mod models;
 mod pruner;
 mod slug;
 
+use hook::handle_hook;
 use metadata::{write_active_anchor, write_artifact_metadata};
 use pruner::prune_transcript;
 use std::env;
@@ -13,13 +15,16 @@ use std::process;
 
 fn print_usage() {
     println!("Usage: shake-prune <transcript.jsonl> [output_file_or_dir] [--recent-window N]");
+    println!("       shake-prune --hook");
     println!("\nOptions:");
     println!("  -h, --help           Show this help message and exit");
+    println!("  --hook               Run as Antigravity PreInvocation hook (reads stdin JSON)");
     println!("  --recent-window N    Number of recent tool execution steps to keep intact (default: 6)");
     println!("\nExamples:");
     println!("  shake-prune /path/to/transcript.jsonl");
     println!("  shake-prune /path/to/transcript.jsonl /path/to/output_dir/");
     println!("  shake-prune /path/to/transcript.jsonl /path/to/custom_name.md --recent-window 8");
+    println!("  shake-prune --hook");
 }
 
 fn format_bytes(bytes: usize) -> String {
@@ -36,6 +41,11 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 || args[1] == "--help" || args[1] == "-h" || args[1] == "help" {
         print_usage();
+        process::exit(0);
+    }
+
+    if args[1] == "--hook" {
+        handle_hook();
         process::exit(0);
     }
 

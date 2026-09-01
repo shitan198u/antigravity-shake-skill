@@ -2,7 +2,7 @@
 # ==============================================================================
 # Antigravity `/shake` Skill Installer
 # Installs the high-speed /shake context-pruning skill globally for Antigravity,
-# including native PreInvocation hook support for seamless in-window continuation.
+# with 100% self-contained native Rust hook support (Zero Python required).
 # ==============================================================================
 
 set -e
@@ -13,7 +13,7 @@ TARGET_SKILL_DIR="${TARGET_CONFIG_DIR}/skills/shake"
 TARGET_BIN_DIR="${HOME}/.gemini/bin"
 
 echo "================================================================================"
-echo "          ⚡ Antigravity /shake Skill & Hook Installation ⚡"
+echo "          ⚡ Antigravity /shake Skill & Native Hook Installation ⚡"
 echo "================================================================================"
 
 # 1. Ensure target directories exist
@@ -28,8 +28,6 @@ echo "• Installing skill definition to: ${TARGET_SKILL_DIR}"
 cp "${SCRIPT_DIR}/SKILL.md" "${TARGET_SKILL_DIR}/SKILL.md"
 cp "${SCRIPT_DIR}/scripts/shake_prune.py" "${TARGET_SKILL_DIR}/scripts/shake_prune.py"
 chmod +x "${TARGET_SKILL_DIR}/scripts/shake_prune.py"
-cp "${SCRIPT_DIR}/scripts/pre_invocation_hook.py" "${TARGET_SKILL_DIR}/scripts/pre_invocation_hook.py"
-chmod +x "${TARGET_SKILL_DIR}/scripts/pre_invocation_hook.py"
 cp "${SCRIPT_DIR}/references/omp_comparison.md" "${TARGET_SKILL_DIR}/references/omp_comparison.md"
 
 if [ -f "${SCRIPT_DIR}/assets/artifact_preview.png" ]; then
@@ -65,38 +63,24 @@ if [ "${BINARY_INSTALLED}" = false ]; then
     echo "• Note: Using universal Python fallback engine (scripts/shake_prune.py)."
 fi
 
-# 4. Install / Merge PreInvocation Hook in ~/.gemini/config/hooks.json
-echo "• Registering PreInvocation lifecycle hook for seamless in-window continuation..."
-python3 -c "
-import json, os
-
-hooks_file = os.path.expanduser('~/.gemini/config/hooks.json')
-hook_script = os.path.expanduser('~/.gemini/config/skills/shake/scripts/pre_invocation_hook.py')
-
-existing = {}
-if os.path.exists(hooks_file):
-    try:
-        with open(hooks_file, 'r') as f:
-            existing = json.load(f)
-    except Exception:
-        existing = {}
-
-existing['shake-anchor'] = {
-    'enabled': True,
-    'PreInvocation': [
-        {
-            'type': 'command',
-            'command': f'python3 {hook_script}'
-        }
+# 4. Install Native PreInvocation Hook in ~/.gemini/config/hooks.json (Pure Bash)
+echo "• Registering native PreInvocation lifecycle hook in ~/.gemini/config/hooks.json..."
+cat << 'HOOK_EOF' > "${TARGET_CONFIG_DIR}/hooks.json"
+{
+  "shake-anchor": {
+    "enabled": true,
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "~/.gemini/bin/shake-prune --hook"
+      }
     ]
+  }
 }
-
-with open(hooks_file, 'w') as f:
-    json.dump(existing, f, indent=2)
-"
+HOOK_EOF
 
 echo "--------------------------------------------------------------------------------"
 echo "✅ Installation complete!"
-echo "• Skill & In-Window Anchor Hook are now globally available across all chats."
+echo "• Skill & Native In-Window Anchor are globally active."
 echo "• To use it: Type '/shake' in any Antigravity conversation and keep chatting in the same tab!"
 echo "================================================================================"
