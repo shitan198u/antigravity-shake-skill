@@ -9,30 +9,36 @@ pub fn estimate_tokens(byte_count: usize) -> usize {
     std::cmp::max(1, byte_count / 4)
 }
 
+fn safe_truncate(s: &str, max_chars: usize) -> String {
+    s.chars().take(max_chars).collect()
+}
+
 pub fn prune_transcript(
     transcript_path: &Path,
     recent_window_steps: usize,
 ) -> Result<(String, PruningStats), Box<dyn std::error::Error>> {
-    let file = File::open(transcript_path)?;
-    let reader = BufReader::new(file);
+    // Pass 1: Count total steps & measure raw payload size efficiently (O(1) memory)
+    let file_pass1 = File::open(transcript_path)?;
+    let reader_pass1 = BufReader::new(file_pass1);
 
-    let mut steps = Vec::new();
+    let mut total_steps = 0usize;
     let mut raw_bytes = 0usize;
 
-    for line in reader.lines() {
+    for line in reader_pass1.lines() {
         let line_str = line?;
         if line_str.trim().is_empty() {
             continue;
         }
         raw_bytes += line_str.len();
-        if let Ok(step) = serde_json::from_str::<Step>(&line_str) {
-            steps.push(step);
-        }
+        total_steps += 1;
     }
 
-    let total_steps = steps.len();
     let recent_threshold = total_steps.saturating_sub(recent_window_steps);
     let conv_id = extract_conversation_id(&transcript_path.to_string_lossy());
+
+    // Pass 2: Stream, filter, and format output incrementally without storing all steps in RAM
+    let file_pass2 = File::open(transcript_path)?;
+    let reader_pass2 = BufReader::new(file_pass2);
 
     let mut output_blocks = Vec::new();
     let mut user_count = 0usize;
@@ -45,7 +51,17 @@ pub fn prune_transcript(
 
     let re_user_request = Regex::new(r"(?s)<USER_REQUEST>(.*?)</USER_REQUEST>")?;
 
-    for (i, step) in steps.iter().enumerate() {
+    for (i, line) in reader_pass2.lines().enumerate() {
+        let line_str = line?;
+        if line_str.trim().is_empty() {
+            continue;
+        }
+
+        let step: Step = match serde_json::from_str(&line_str) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
         let stype = step.step_type.as_deref().unwrap_or("");
         let content = step.content.as_deref().unwrap_or("");
         let status = step.status.as_deref().unwrap_or("");
@@ -94,8 +110,8 @@ pub fn prune_transcript(
                                     serde_json::Value::String(s) => s.replace('\n', " "),
                                     other => other.to_string().replace('\n', " "),
                                 };
-                                let v_formatted = if v_str.len() > 120 {
-                                    format!("{}... [truncated]", &v_str[..120])
+                                let v_formatted = if v_str.chars().count() > 120 {
+                                    format!("{}... [truncated]", safe_truncate(&v_str, 120))
                                 } else {
                                     v_str
                                 };
@@ -114,17 +130,17 @@ pub fn prune_transcript(
 
                 if is_recent {
                     retained_recent_steps += 1;
-                    let snippet = if content.len() > 1500 { &content[..1500] } else { content };
+                    let snippet = safe_truncate(content, 1500);
                     output_blocks.push(format!("> 🕒 **[Active Window Tool Output ({})]**:\n```\n{}\n```\n", stype, snippet));
                 } else if is_error {
                     retained_errors_count += 1;
-                    let snippet = if content.len() > 1200 { &content[..1200] } else { content };
+                    let snippet = safe_truncate(content, 1200);
                     output_blocks.push(format!(
                         "> ⚠️ **[Tool Execution Error / Failure ({}, Exit code: {:?})]**:\n```\n{}\n```\n",
                         stype, exit_code, snippet
                     ));
                 } else if stype == "RUN_COMMAND" {
-                    if content.trim().len() < 250 {
+                    if content.trim().chars().count() < 250 {
                         retained_short_cmds += 1;
                         output_blocks.push(format!("> 📋 **[Command Output (exit 0)]**:\n```\n{}\n```\n", content.trim()));
                     } else {
@@ -158,7 +174,21 @@ pub fn prune_transcript(
     let suggested_filename = generate_suggested_filename(&topic_slug);
 
     let header = format!(
-        "# Shaken & Pruned History: {}\n\n        > [!IMPORTANT]\n        > **Context Note for Assistant**:\n        > This document is a complete, verbatim transcript of earlier turns with token bloat removed via `/shake`.\n        > - **User prompts, Assistant explanations, and Thought processes are 100% complete and verbatim.**\n        > - Actions marked `[Command completed successfully]` or `[File inspected]` were already executed with success.\n        > - You do **NOT** need to re-run past successful commands unless the user explicitly requests it.\n        > - Any errors or failures encountered in past turns are explicitly preserved below with full stack traces.\n        > - The active working state and immediate recent tool outputs are preserved at the end of the transcript.\n\n        - **Session ID**: `{}`\n        - **Topic**: `{}`\n        - **Source Transcript**: `{}`\n        - **User Turns**: {} | **Assistant Turns**: {}\n        - **Tool Dumps Pruned**: {} | **Errors Preserved**: {}\n        ---\n\n",
+        "# Shaken & Pruned History: {}\n\n\
+        > [!IMPORTANT]\n\
+        > **Context Note for Assistant**:\n\
+        > This document is a complete, verbatim transcript of earlier turns with token bloat removed via `/shake`.\n\
+        > - **User prompts, Assistant explanations, and Thought processes are 100% complete and verbatim.**\n\
+        > - Actions marked `[Command completed successfully]` or `[File inspected]` were already executed with success.\n\
+        > - You do **NOT** need to re-run past successful commands unless the user explicitly requests it.\n\
+        > - Any errors or failures encountered in past turns are explicitly preserved below with full stack traces.\n\
+        > - The active working state and immediate recent tool outputs are preserved at the end of the transcript.\n\n\
+        - **Session ID**: `{}`\n\
+        - **Topic**: `{}`\n\
+        - **Source Transcript**: `{}`\n\
+        - **User Turns**: {} | **Assistant Turns**: {}\n\
+        - **Tool Dumps Pruned**: {} | **Errors Preserved**: {}\n\
+        ---\n\n",
         topic_slug.replace('_', " ").to_uppercase(),
         conv_id,
         topic_slug.replace('_', " "),

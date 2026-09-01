@@ -28,8 +28,13 @@ def main():
     candidate_paths = []
     if artifact_dir:
         candidate_paths.append(Path(artifact_dir) / "active_shake_anchor.json")
+
+    # Transcript path navigation: <conv_id>/.system_generated/logs/transcript.jsonl -> 3 parents up
     if transcript_path:
-        candidate_paths.append(Path(transcript_path).parent.parent / "active_shake_anchor.json")
+        t_p = Path(transcript_path)
+        if len(t_p.parents) >= 3:
+            candidate_paths.append(t_p.parents[2] / "active_shake_anchor.json")
+
     if conv_id:
         for base in ["~/.gemini/antigravity-ide/brain", "~/.gemini/antigravity/brain", "~/.gemini/antigravity-cli/brain"]:
             candidate_paths.append(Path(os.path.expanduser(base)) / conv_id / "active_shake_anchor.json")
@@ -53,7 +58,6 @@ def main():
     shaken_file = anchor_data.get("shaken_file", "")
     anchored_step = anchor_data.get("anchored_at_step", "")
 
-    # Ultra-concise, zero-token-waste anchor directive
     ephemeral_msg = (
         f"[Context compacted via /shake. Active state anchored in @{shaken_file} "
         f"(Step {anchored_step}+). Treat prior raw tool stdout as archived.]"

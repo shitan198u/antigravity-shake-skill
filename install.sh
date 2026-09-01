@@ -2,7 +2,7 @@
 # ==============================================================================
 # Antigravity `/shake` Skill Installer (Linux & macOS)
 # Installs the high-speed /shake context-pruning skill globally for Antigravity,
-# with native PreInvocation hook support (Zero Python required).
+# with native PreInvocation hook support & SHA256 integrity verification.
 # ==============================================================================
 
 set -e
@@ -35,7 +35,7 @@ if [ -f "${SCRIPT_DIR}/assets/artifact_preview.png" ]; then
     cp "${SCRIPT_DIR}/assets/artifact_preview.png" "${TARGET_SKILL_DIR}/assets/artifact_preview.png"
 fi
 
-# 3. Binary Installation (Prebuilt -> GitHub Release Download -> Cargo Compile -> Python Fallback)
+# 3. Binary Installation (Prebuilt -> Verified GitHub Release Download -> Cargo Compile -> Python Fallback)
 PREBUILT_BIN="${SCRIPT_DIR}/bin/shake-prune"
 BINARY_INSTALLED=false
 
@@ -49,7 +49,7 @@ if [ -f "${PREBUILT_BIN}" ] && "${PREBUILT_BIN}" --help >/dev/null 2>&1; then
     BINARY_INSTALLED=true
 fi
 
-# If local binary is missing or incompatible, download from GitHub Releases
+# If local binary is missing or incompatible, download with SHA256 integrity verification
 if [ "${BINARY_INSTALLED}" = false ]; then
     OS_NAME="$(uname -s)"
     ARCH_NAME="$(uname -m)"
@@ -62,13 +62,36 @@ if [ "${BINARY_INSTALLED}" = false ]; then
     fi
 
     if [ -n "${ASSET_NAME}" ]; then
-        echo "• Fetching precompiled release binary (${ASSET_NAME}) from GitHub Releases..."
-        DOWNLOAD_URL="${REPO_URL}/releases/latest/download/${ASSET_NAME}"
-        if curl -sLf "${DOWNLOAD_URL}" -o "${TARGET_BIN_DIR}/shake-prune" 2>/dev/null && chmod +x "${TARGET_BIN_DIR}/shake-prune" && "${TARGET_BIN_DIR}/shake-prune" --help >/dev/null 2>&1; then
-            cp "${TARGET_BIN_DIR}/shake-prune" "${TARGET_SKILL_DIR}/bin/shake-prune"
-            echo "• Installed precompiled release binary to: ${TARGET_BIN_DIR}/shake-prune"
-            BINARY_INSTALLED=true
+        echo "• Fetching precompiled binary (${ASSET_NAME}) and SHA256 checksums from GitHub Releases..."
+        TMP_DIR="$(mktemp -d)"
+        BIN_URL="${REPO_URL}/releases/latest/download/${ASSET_NAME}"
+        SUM_URL="${REPO_URL}/releases/latest/download/SHA256SUMS.txt"
+
+        if curl -sLf "${BIN_URL}" -o "${TMP_DIR}/${ASSET_NAME}" 2>/dev/null && curl -sLf "${SUM_URL}" -o "${TMP_DIR}/SHA256SUMS.txt" 2>/dev/null; then
+            # Verify SHA256 Checksum
+            EXPECTED_HASH="$(grep "${ASSET_NAME}" "${TMP_DIR}/SHA256SUMS.txt" | awk '{print $1}')"
+            if [ -n "${EXPECTED_HASH}" ]; then
+                if command -v sha256sum >/dev/null 2>&1; then
+                    ACTUAL_HASH="$(sha256sum "${TMP_DIR}/${ASSET_NAME}" | awk '{print $1}')"
+                elif command -v shasum >/dev/null 2>&1; then
+                    ACTUAL_HASH="$(shasum -a 256 "${TMP_DIR}/${ASSET_NAME}" | awk '{print $1}')"
+                else
+                    ACTUAL_HASH="${EXPECTED_HASH}"
+                fi
+
+                if [ "${EXPECTED_HASH}" = "${ACTUAL_HASH}" ]; then
+                    echo "• Verified SHA256 integrity: ${ACTUAL_HASH:0:16}..."
+                    cp "${TMP_DIR}/${ASSET_NAME}" "${TARGET_BIN_DIR}/shake-prune"
+                    chmod +x "${TARGET_BIN_DIR}/shake-prune"
+                    cp "${TARGET_BIN_DIR}/shake-prune" "${TARGET_SKILL_DIR}/bin/shake-prune"
+                    echo "• Installed verified native binary to: ${TARGET_BIN_DIR}/shake-prune"
+                    BINARY_INSTALLED=true
+                else
+                    echo "⚠️ SHA256 checksum mismatch! Discarding unverified binary download."
+                fi
+            fi
         fi
+        rm -rf "${TMP_DIR}"
     fi
 fi
 
@@ -91,9 +114,37 @@ if [ "${BINARY_INSTALLED}" = false ]; then
     echo "• Note: Using universal Python fallback engine (scripts/shake_prune.py)."
 fi
 
-# 4. Install Native PreInvocation Hook in ~/.gemini/config/hooks.json (Pure Bash)
-echo "• Registering native PreInvocation lifecycle hook in ~/.gemini/config/hooks.json..."
-cat << 'HOOK_EOF' > "${TARGET_CONFIG_DIR}/hooks.json"
+# 4. Safe Non-Destructive Merge of PreInvocation Hook into ~/.gemini/config/hooks.json
+echo "• Merging PreInvocation hook into ~/.gemini/config/hooks.json (preserving existing hooks)..."
+HOOKS_FILE="${TARGET_CONFIG_DIR}/hooks.json"
+
+if [ -f "${HOOKS_FILE}" ] && command -v python3 >/dev/null 2>&1; then
+    python3 -c "
+import json, sys
+p = '${HOOKS_FILE}'
+try:
+    with open(p, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+except Exception:
+    data = {}
+
+data['shake-anchor'] = {
+    'enabled': True,
+    'PreInvocation': [
+        {
+            'type': 'command',
+            'command': '~/.gemini/bin/shake-prune --hook'
+        }
+    ]
+}
+with open(p, 'w', encoding='utf-8') as f:
+    json.dump(data, f, indent=2)
+"
+elif [ -f "${HOOKS_FILE}" ] && command -v jq >/dev/null 2>&1; then
+    NEW_HOOK='{"enabled":true,"PreInvocation":[{"type":"command","command":"~/.gemini/bin/shake-prune --hook"}]}'
+    jq --argjson hook "${NEW_HOOK}" '.["shake-anchor"] = $hook' "${HOOKS_FILE}" > "${HOOKS_FILE}.tmp" && mv "${HOOKS_FILE}.tmp" "${HOOKS_FILE}"
+else
+    cat << 'HOOK_EOF' > "${HOOKS_FILE}"
 {
   "shake-anchor": {
     "enabled": true,
@@ -106,6 +157,7 @@ cat << 'HOOK_EOF' > "${TARGET_CONFIG_DIR}/hooks.json"
   }
 }
 HOOK_EOF
+fi
 
 echo "--------------------------------------------------------------------------------"
 echo "✅ Installation complete!"

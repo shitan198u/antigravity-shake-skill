@@ -9,6 +9,7 @@ import os
 import json
 import re
 import datetime
+import tempfile
 from pathlib import Path
 
 def estimate_tokens(text: str) -> int:
@@ -26,13 +27,13 @@ def generate_topic_slug(first_user_text: str) -> str:
     clean = re.sub(r"<[^>]+>", " ", first_user_text)
     clean = re.sub(r"https?://\S+", "", clean)
     clean = re.sub(r"[^a-zA-Z0-9\s]", " ", clean)
-    stop_words = {"please", "want", "also", "this", "that", "with", "from", "have", "need", "make", "check", "the", "and", "for"}
+    stop_words = {"please", "want", "also", "this", "that", "with", "from", "have", "need", "make", "check", "the", "and", "for", "you", "are", "how", "what", "why"}
     words = [w.lower() for w in clean.split() if len(w) > 2 and w.lower() not in stop_words]
     slug = "_".join(words[:4]) if words else "session"
     return slug
 
 def extract_conversation_id(path_str: str) -> str:
-    match = re.search(r"brain/([a-zA-Z0-9_-]+)/", path_str)
+    match = re.search(r"brain[/\\]([a-zA-Z0-9_-]+)[/\\]", path_str)
     return match.group(1) if match else "unknown-session"
 
 def prune_transcript(transcript_path: str, recent_window_steps: int = 6) -> tuple[str, dict, str]:
@@ -40,9 +41,19 @@ def prune_transcript(transcript_path: str, recent_window_steps: int = 6) -> tupl
     if not transcript_file.exists():
         raise FileNotFoundError(f"Transcript file not found: {transcript_path}")
 
+    # Pass 1: Count total steps and measure raw byte size (O(1) memory)
+    total_steps = 0
+    raw_bytes = 0
     with open(transcript_file, "r", encoding="utf-8") as f:
-        lines = [json.loads(line) for line in f if line.strip()]
+        for line in f:
+            if line.strip():
+                raw_bytes += len(line.encode("utf-8"))
+                total_steps += 1
 
+    recent_threshold = max(0, total_steps - recent_window_steps)
+    conv_id = extract_conversation_id(str(transcript_file.resolve()))
+
+    # Pass 2: Stream, filter, and format incrementally
     output_blocks = []
     user_count = 0
     assistant_count = 0
@@ -50,74 +61,77 @@ def prune_transcript(transcript_path: str, recent_window_steps: int = 6) -> tupl
     retained_errors_count = 0
     retained_short_cmds = 0
     retained_recent_steps = 0
-    raw_json_str = ""
     first_user_prompt = ""
 
-    total_steps = len(lines)
-    recent_threshold = max(0, total_steps - recent_window_steps)
-    conv_id = extract_conversation_id(str(transcript_file.resolve()))
+    with open(transcript_file, "r", encoding="utf-8") as f:
+        for i, line in enumerate(f):
+            if not line.strip():
+                continue
+            try:
+                step = json.loads(line)
+            except Exception:
+                continue
 
-    for i, step in enumerate(lines):
-        raw_json_str += json.dumps(step)
-        stype = step.get("type")
-        content = step.get("content", "")
-        thinking = step.get("thinking", "")
-        status = step.get("status", "")
-        exit_code = step.get("exit_code")
-        is_recent = (i >= recent_threshold)
+            stype = step.get("type")
+            content = step.get("content", "")
+            thinking = step.get("thinking", "")
+            status = step.get("status", "")
+            exit_code = step.get("exit_code")
+            is_recent = (i >= recent_threshold)
 
-        if stype == "USER_INPUT":
-            user_count += 1
-            match = re.search(r"<USER_REQUEST>(.*?)</USER_REQUEST>", content, re.DOTALL)
-            user_text = match.group(1).strip() if match else content.strip()
-            if not first_user_prompt:
-                first_user_prompt = user_text
-            output_blocks.append(f"### 👤 User (Turn {user_count})\n\n{user_text}\n")
+            if stype == "USER_INPUT":
+                user_count += 1
+                match = re.search(r"<USER_REQUEST>(.*?)</USER_REQUEST>", content, re.DOTALL)
+                user_text = match.group(1).strip() if match else content.strip()
+                if not first_user_prompt:
+                    first_user_prompt = user_text
+                output_blocks.append(f"### 👤 User (Turn {user_count})\n\n{user_text}\n")
 
-        elif stype == "PLANNER_RESPONSE":
-            tool_calls = step.get("tool_calls", [])
-            assistant_text = content.strip() if content else ""
-            thinking_text = thinking.strip() if thinking else ""
+            elif stype == "PLANNER_RESPONSE":
+                tool_calls = step.get("tool_calls", [])
+                assistant_text = content.strip() if content else ""
+                thinking_text = thinking.strip() if thinking else ""
 
-            if assistant_text or thinking_text:
-                assistant_count += 1
-                block = "### 🤖 Assistant\n\n"
-                if thinking_text:
-                    block += f"<details>\n<summary>💭 Thought Process</summary>\n\n{thinking_text}\n\n</details>\n\n"
-                if assistant_text:
-                    block += f"{assistant_text}\n"
-                output_blocks.append(block)
+                if assistant_text or thinking_text:
+                    assistant_count += 1
+                    block = "### 🤖 Assistant\n\n"
+                    if thinking_text:
+                        block += f"<details>\n<summary>💭 Thought Process</summary>\n\n{thinking_text}\n\n</details>\n\n"
+                    if assistant_text:
+                        block += f"{assistant_text}\n"
+                    output_blocks.append(block)
 
-            if tool_calls:
-                for tc in tool_calls:
-                    name = tc.get("name", "")
-                    args = tc.get("args", {})
-                    arg_items = []
-                    for k, v in args.items():
-                        v_str = str(v).replace("\n", " ")
-                        if len(v_str) > 120:
-                            v_str = v_str[:120] + "... [truncated]"
-                        arg_items.append(f"{k}={v_str}")
-                    arg_summary = ", ".join(arg_items)
-                    output_blocks.append(f"- ⚙️ **Action Executed**: `{name}({arg_summary})`")
+                if tool_calls:
+                    for tc in tool_calls:
+                        name = tc.get("name", "")
+                        args = tc.get("args", {})
+                        arg_items = []
+                        if isinstance(args, dict):
+                            for k, v in args.items():
+                                v_str = str(v).replace("\n", " ")
+                                if len(v_str) > 120:
+                                    v_str = v_str[:120] + "... [truncated]"
+                                arg_items.append(f"{k}={v_str}")
+                        arg_summary = ", ".join(arg_items)
+                        output_blocks.append(f"- ⚙️ **Action Executed**: `{name}({arg_summary})`")
 
-        elif stype in ("RUN_COMMAND", "VIEW_FILE", "SEARCH_WEB", "GREP_SEARCH", "CODE_ACTION"):
-            is_error = (exit_code is not None and exit_code != 0) or ("error" in status.lower()) or ("failed" in status.lower())
+            elif stype in ("RUN_COMMAND", "VIEW_FILE", "SEARCH_WEB", "GREP_SEARCH", "CODE_ACTION"):
+                is_error = (exit_code is not None and exit_code != 0) or ("error" in str(status).lower()) or ("failed" in str(status).lower())
 
-            if is_recent:
-                retained_recent_steps += 1
-                output_blocks.append(f"> 🕒 **[Active Window Tool Output ({stype})]**:\n```\n{content[:1500]}\n```\n")
-            elif is_error:
-                retained_errors_count += 1
-                output_blocks.append(f"> ⚠️ **[Tool Execution Error / Failure ({stype}, Exit code: {exit_code})]**:\n```\n{content[:1200]}\n```\n")
-            elif stype == "RUN_COMMAND":
-                if len(content.strip()) < 250:
-                    retained_short_cmds += 1
-                    output_blocks.append(f"> 📋 **[Command Output (exit 0)]**:\n```\n{content.strip()}\n```\n")
-                else:
-                    line_count = len(content.splitlines())
-                    pruned_tools_count += 1
-                    output_blocks.append(f"> ℹ️ *[Command completed successfully (exit 0). {line_count} lines of verbose stdout pruned for token efficiency]*\n")
+                if is_recent:
+                    retained_recent_steps += 1
+                    output_blocks.append(f"> 🕒 **[Active Window Tool Output ({stype})]**:\n```\n{content[:1500]}\n```\n")
+                elif is_error:
+                    retained_errors_count += 1
+                    output_blocks.append(f"> ⚠️ **[Tool Execution Error / Failure ({stype}, Exit code: {exit_code})]**:\n```\n{content[:1200]}\n```\n")
+                elif stype == "RUN_COMMAND":
+                    if len(content.strip()) < 250:
+                        retained_short_cmds += 1
+                        output_blocks.append(f"> 📋 **[Command Output (exit 0)]**:\n```\n{content.strip()}\n```\n")
+                    else:
+                        line_count = len(content.splitlines())
+                        pruned_tools_count += 1
+                        output_blocks.append(f"> ℹ️ *[Command completed successfully (exit 0). {line_count} lines of verbose stdout pruned for token efficiency]*\n")
             elif stype == "VIEW_FILE":
                 line_count = len(content.splitlines())
                 pruned_tools_count += 1
@@ -152,9 +166,8 @@ def prune_transcript(transcript_path: str, recent_window_steps: int = 6) -> tupl
 
     pruned_content = "\n".join(header) + "\n\n".join(output_blocks)
     
-    raw_bytes = len(raw_json_str.encode("utf-8"))
     pruned_bytes = len(pruned_content.encode("utf-8"))
-    raw_tokens = estimate_tokens(raw_json_str)
+    raw_tokens = estimate_tokens(str(raw_bytes))
     pruned_tokens = estimate_tokens(pruned_content)
     reduction_pct = (1.0 - (pruned_bytes / max(raw_bytes, 1))) * 100.0
 
@@ -177,6 +190,13 @@ def prune_transcript(transcript_path: str, recent_window_steps: int = 6) -> tupl
 
     return pruned_content, stats, suggested_filename
 
+def atomic_write_json(target_path: str, data: dict):
+    target = Path(target_path)
+    tmp_path = target.with_suffix(".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp_path, target)
+
 def write_artifact_metadata(markdown_path: str, summary: str):
     meta_path = markdown_path + ".metadata.json"
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
@@ -185,8 +205,7 @@ def write_artifact_metadata(markdown_path: str, summary: str):
         "summary": summary,
         "updatedAt": now_iso
     }
-    with open(meta_path, "w", encoding="utf-8") as f:
-        json.dump(meta_data, f, indent=2)
+    atomic_write_json(meta_path, meta_data)
 
 def write_active_anchor(markdown_path: str, stats: dict):
     parent_dir = os.path.dirname(markdown_path)
@@ -202,8 +221,7 @@ def write_active_anchor(markdown_path: str, stats: dict):
         "pruned_tokens": stats["pruned_tokens"],
         "timestamp": now_iso
     }
-    with open(anchor_path, "w", encoding="utf-8") as f:
-        json.dump(anchor_data, f, indent=2)
+    atomic_write_json(anchor_path, anchor_data)
 
 def main():
     if len(sys.argv) < 2:
@@ -224,8 +242,10 @@ def main():
 
     abs_output_path = os.path.abspath(output_path)
 
-    with open(abs_output_path, "w", encoding="utf-8") as f:
+    tmp_md = abs_output_path + ".tmp"
+    with open(tmp_md, "w", encoding="utf-8") as f:
         f.write(pruned_markdown)
+    os.replace(tmp_md, abs_output_path)
 
     summary_text = (
         f"Shaken & pruned verbatim history for topic '{stats['topic_slug'].replace('_', ' ')}'. "

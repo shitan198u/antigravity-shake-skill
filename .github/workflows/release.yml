@@ -84,13 +84,17 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: release_assets/
+      - name: Flatten and Generate Checksums
+        run: |
+          mkdir -p final_assets
+          find release_assets/ -type f -exec cp {} final_assets/ \;
+          cd final_assets
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
       - name: Package & Publish Release Assets
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            release_assets/shake-prune-linux-x86_64/shake-prune-linux-x86_64
-            release_assets/shake-prune-macos-universal/shake-prune-macos-universal
-            release_assets/shake-prune-windows-x86_64.exe/shake-prune-windows-x86_64.exe
+          files: final_assets/*
           draft: false
           prerelease: false
           generate_release_notes: true

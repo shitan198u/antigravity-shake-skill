@@ -1,6 +1,7 @@
 # ==============================================================================
 # Antigravity `/shake` Skill Installer (Windows PowerShell)
-# Installs the high-speed /shake context-pruning skill globally for Windows.
+# Installs the high-speed /shake context-pruning skill globally for Windows,
+# with native PreInvocation hook support & SHA256 integrity verification.
 # ==============================================================================
 
 $ErrorActionPreference = "SilentlyContinue"
@@ -33,7 +34,7 @@ if (Test-Path (Join-Path $ScriptDir "assets\artifact_preview.png")) {
     Copy-Item (Join-Path $ScriptDir "assets\artifact_preview.png") (Join-Path $TargetSkillDir "assets\artifact_preview.png") -Force
 }
 
-# 3. Binary Installation (Prebuilt -> GitHub Releases Download -> Local Cargo Compile -> Python Fallback)
+# 3. Binary Installation (Prebuilt -> Verified GitHub Releases Download -> Local Cargo Compile -> Python Fallback)
 $PrebuiltBin = Join-Path $ScriptDir "bin\shake-prune.exe"
 $BinaryInstalled = $false
 
@@ -43,24 +44,37 @@ if (Test-Path $PrebuiltBin) {
     Copy-Item $PrebuiltBin (Join-Path $TargetSkillDir "bin\shake-prune.exe") -Force
     $BinaryInstalled = $true
 } else {
-    # Download from GitHub Releases
-    Write-Host "• Fetching precompiled Windows binary from GitHub Releases..."
+    Write-Host "• Fetching precompiled Windows binary & checksums from GitHub Releases..."
     $WinBinUrl = "$RepoUrl/releases/latest/download/shake-prune-windows-x86_64.exe"
+    $SumsUrl = "$RepoUrl/releases/latest/download/SHA256SUMS.txt"
     $TargetExe = Join-Path $TargetBinDir "shake-prune.exe"
+    $TmpSums = Join-Path $env:TEMP "shake_SHA256SUMS.txt"
+
     try {
         Invoke-WebRequest -Uri $WinBinUrl -OutFile $TargetExe -UseBasicParsing
-        if (Test-Path $TargetExe) {
-            Copy-Item $TargetExe (Join-Path $TargetSkillDir "bin\shake-prune.exe") -Force
-            Write-Host "• Downloaded and installed Windows binary to: $TargetExe"
-            $BinaryInstalled = $true
+        Invoke-WebRequest -Uri $SumsUrl -OutFile $TmpSums -UseBasicParsing
+
+        if ((Test-Path $TargetExe) -and (Test-Path $TmpSums)) {
+            $ActualHash = (Get-FileHash -Path $TargetExe -Algorithm SHA256).Hash.ToLower()
+            $ExpectedLine = Get-Content $TmpSums | Select-String "shake-prune-windows-x86_64.exe"
+            $ExpectedHash = ($ExpectedLine -split "\s+")[0].ToLower()
+
+            if ($ActualHash -eq $ExpectedHash) {
+                Copy-Item $TargetExe (Join-Path $TargetSkillDir "bin\shake-prune.exe") -Force
+                Write-Host "• Verified SHA256 and installed Windows binary to: $TargetExe"
+                $BinaryInstalled = $true
+            } else {
+                Write-Warning "SHA256 hash mismatch! Discarding downloaded binary."
+                Remove-Item $TargetExe -Force
+            }
         }
     } catch {
-        # Fallback to local compile or python
+        # Fallback
     }
 }
 
 if (-not $BinaryInstalled -and (Get-Command cargo -ErrorAction SilentlyContinue)) {
-    Write-Host "• Compiling native binary via cargo..."
+    Write-Host "• Compiling native binary from source via cargo..."
     cargo build --release --manifest-path (Join-Path $ScriptDir "shake-prune-rs\Cargo.toml")
     $CompiledBin = Join-Path $ScriptDir "shake-prune-rs\target\release\shake-prune.exe"
     if (Test-Path $CompiledBin) {
@@ -74,20 +88,27 @@ if (-not $BinaryInstalled) {
     Write-Host "• Note: Using universal Python fallback engine (scripts/shake_prune.py)."
 }
 
-# 4. Register PreInvocation Hook in hooks.json
+# 4. Safe Non-Destructive Merge of PreInvocation Hook in hooks.json
 $HooksFile = Join-Path $TargetConfigDir "hooks.json"
 $HookCommand = "$TargetBinDir\shake-prune.exe --hook"
 
-$HooksObj = @{
-    "shake-anchor" = @{
-        "enabled" = $true
-        "PreInvocation" = @(
-            @{
-                "type" = "command"
-                "command" = $HookCommand
-            }
-        )
+$HooksObj = @{}
+if (Test-Path $HooksFile) {
+    try {
+        $HooksObj = Get-Content $HooksFile -Raw | ConvertFrom-Json -AsHashtable
+    } catch {
+        $HooksObj = @{}
     }
+}
+
+$HooksObj["shake-anchor"] = @{
+    "enabled" = $true
+    "PreInvocation" = @(
+        @{
+            "type" = "command"
+            "command" = $HookCommand
+        }
+    )
 }
 
 $HooksObj | ConvertTo-Json -Depth 5 | Set-Content $HooksFile -Encoding UTF8

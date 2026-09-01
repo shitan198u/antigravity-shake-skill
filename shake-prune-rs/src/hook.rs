@@ -22,7 +22,7 @@ struct AnchorData {
 }
 
 pub fn handle_hook() {
-    // Fail-open guarantee: any failure must cleanly output empty JSON with exit 0
+    // Fail-open guarantee: any failure cleanly outputs empty JSON with exit 0
     if let Err(_) = run_hook_safely() {
         println!("{{}}");
     }
@@ -38,19 +38,23 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let payload: HookPayload = serde_json::from_str(&stdin_buffer).unwrap_or_default();
-
     let mut candidate_paths: Vec<PathBuf> = Vec::new();
 
+    // 1. Direct artifact directory
     if let Some(art_dir) = &payload.artifact_directory_path {
         candidate_paths.push(Path::new(art_dir).join("active_shake_anchor.json"));
     }
 
+    // 2. Transcript path traversal:
+    // transcript is at: <conv_id>/.system_generated/logs/transcript.jsonl
+    // parent 1 = logs, parent 2 = .system_generated, parent 3 = <conv_id>
     if let Some(t_path) = &payload.transcript_path {
-        if let Some(parent2) = Path::new(t_path).parent().and_then(|p| p.parent()) {
-            candidate_paths.push(parent2.join("active_shake_anchor.json"));
+        if let Some(conv_dir) = Path::new(t_path).parent().and_then(|p| p.parent()).and_then(|p| p.parent()) {
+            candidate_paths.push(conv_dir.join("active_shake_anchor.json"));
         }
     }
 
+    // 3. Fallback discovery across known global brain directories
     if let Some(conv_id) = &payload.conversation_id {
         let mut home_dirs = Vec::new();
         if let Ok(home) = std::env::var("HOME") {
