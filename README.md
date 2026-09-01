@@ -5,14 +5,10 @@
 
 ---
 
-## 📸 Live UI Showcase
-
-<p align="center">
-  <img src="assets/shake_showcase.gif" alt="Antigravity /shake and /full-shake UI Showcase" width="700">
-</p>
+## 📸 Visual Gallery
 
 <details open>
-<summary>🔍 <b>Side-by-Side Visual Gallery: Standard <code>/shake</code> vs. Deep <code>/full-shake</code></b></summary>
+<summary>🔍 <b>Side-by-Side Comparison: Standard <code>/shake</code> vs. Deep <code>/full-shake</code></b></summary>
 <br/>
 
 | 🟢 Standard `/shake` (100% Thoughts Retained) | ⚡ Deep `/full-shake` (20-Turn Thought Window) |
