@@ -1,6 +1,6 @@
 # Antigravity `/shake` Context Compaction & Verbatim Pruning Skill
 
-A high-performance context management, compaction, and tree-shaking skill for the **Google Antigravity AI Agent** platform (CLI, IDE, and 2.0).
+A high-performance context management, compaction, and tree-shaking skill for the **Google Antigravity AI Agent** platform (CLI, IDE, and 2.0) across **Linux, macOS, and Windows**.
 
 Inspired by the `/shake` context compaction mechanism in **omp (Oh-My-Pi)**, this tool solves "context rot" and token exhaustion in long-running coding sessions by **deterministically stripping verbose command outputs, file views, and tool payloads** while preserving **100% of User prompts, Assistant reasoning, and Thought processes verbatim**.
 
@@ -40,8 +40,14 @@ When `/shake` runs, it generates an **Interactive IDE Artifact** with explicit c
   * When `/shake` completes, it creates an active session anchor.
   * **You stay in the exact same chat window**—when you press Send on your next turn, the native hook automatically pins the model's working memory to the clean shaken artifact!
 * **🦀 100% Self-Contained Native Binary**:
-  * One single binary (`shake-prune`) handles both context pruning and sub-millisecond hook execution (`<0.2ms`).
-  * **Zero Python & Zero Rust dependencies** required at runtime on Linux.
+  * One single binary (`shake-prune` / `shake-prune.exe`) handles both context pruning and sub-millisecond hook execution (`<0.2ms`).
+  * **Zero Python & Zero Rust dependencies** required at runtime.
+* **🌐 Cross-Platform Support (Linux, macOS, Windows)**:
+  * Pure Bash installer (`install.sh`) for Linux and macOS.
+  * Native PowerShell installer (`install.ps1`) for Windows.
+  * Automated GitHub Actions multi-platform binary compilation.
+* **🤖 Agent-Friendly (`AGENTS.md`)**:
+  * Built-in instructions for other AI coding agents to auto-configure and adapt this skill on unsupported machines.
 * **80%–90% Token Reduction**: Recovers hundreds of thousands of tokens from bloated transcripts instantly.
 * **Zero Loss of Meaning**: Unlike lossy LLM summarizers, User instructions, bug investigations, Assistant architectural decisions, and Thoughts are preserved **word-for-word**.
 * **Smart Signal Preservation**:
@@ -55,18 +61,19 @@ When `/shake` runs, it generates an **Interactive IDE Artifact** with explicit c
 
 ## 🚀 Quick Installation
 
-Clone or copy this folder to your machine, then run the installer:
-
+### 🐧 Linux & 🍎 macOS
 ```bash
-cd antigravity-shake
+git clone https://github.com/shitan198u/antigravity-shake-skill.git
+cd antigravity-shake-skill
 ./install.sh
 ```
 
-### 🛡️ Smart 3-Tier Installation Cascade
-The installer is written in **pure Bash** (zero Python runtime required):
-1. **Tier 1 (Instant)**: Installs the precompiled native Linux binary (`bin/shake-prune`) and registers `~/.gemini/bin/shake-prune --hook`.
-2. **Tier 2 (Source Compile)**: If the prebuilt binary is incompatible with your CPU architecture and `cargo` is present, it automatically compiles the Rust source in `--release` mode.
-3. **Tier 3 (Universal Fallback)**: If no Rust toolchain is available, it seamlessly sets up the Python 3 engine.
+### 🪟 Windows (PowerShell)
+```powershell
+git clone https://github.com/shitan198u/antigravity-shake-skill.git
+cd antigravity-shake-skill
+.\install.ps1
+```
 
 ---
 
@@ -122,12 +129,17 @@ You don't have to leave the window! Just type your next message and press **Send
 
 ```text
 antigravity-shake/
+├── .github/
+│   └── workflows/
+│       └── release.yml           # Multi-platform CI/CD (Linux, macOS, Windows)
 ├── assets/
 │   └── artifact_preview.png      # Rendered preview screenshot
 ├── bin/
-│   └── shake-prune               # Precompiled native Linux binary (x86_64, includes --hook)
-├── install.sh                     # Automated pure-Bash installer
-├── README.md                      # Documentation & usage guide
+│   └── shake-prune               # Precompiled native binary (x86_64, includes --hook)
+├── install.sh                     # Automated installer for Linux & macOS
+├── install.ps1                    # Automated installer for Windows (PowerShell)
+├── AGENTS.md                      # Cross-platform adaptation guide for AI agents
+├── README.md                      # Comprehensive documentation
 ├── SKILL.md                       # Antigravity skill definition (Zero-guesswork workflow)
 ├── references/
 │   └── omp_comparison.md          # Technical analysis of omp vs Antigravity pruning

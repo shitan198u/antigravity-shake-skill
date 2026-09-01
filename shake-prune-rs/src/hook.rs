@@ -52,14 +52,22 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Some(conv_id) = &payload.conversation_id {
+        let mut home_dirs = Vec::new();
         if let Ok(home) = std::env::var("HOME") {
-            let base_dirs = [
-                ".gemini/antigravity-ide/brain",
-                ".gemini/antigravity/brain",
-                ".gemini/antigravity-cli/brain",
-            ];
+            home_dirs.push(PathBuf::from(home));
+        }
+        if let Ok(uprof) = std::env::var("USERPROFILE") {
+            home_dirs.push(PathBuf::from(uprof));
+        }
+
+        let base_dirs = [
+            ".gemini/antigravity-ide/brain",
+            ".gemini/antigravity/brain",
+            ".gemini/antigravity-cli/brain",
+        ];
+        for h in &home_dirs {
             for base in &base_dirs {
-                candidate_paths.push(Path::new(&home).join(base).join(conv_id).join("active_shake_anchor.json"));
+                candidate_paths.push(h.join(base).join(conv_id).join("active_shake_anchor.json"));
             }
         }
     }

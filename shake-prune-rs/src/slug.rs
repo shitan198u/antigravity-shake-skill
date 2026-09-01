@@ -37,7 +37,7 @@ pub fn generate_suggested_filename(topic_slug: &str) -> String {
 }
 
 pub fn extract_conversation_id(path_str: &str) -> String {
-    let re = Regex::new(r"brain/([a-zA-Z0-9_-]+)/").unwrap();
+    let re = Regex::new(r"brain[/\\]([a-zA-Z0-9_-]+)[/\\]").unwrap();
     if let Some(caps) = re.captures(path_str) {
         caps.get(1).map(|m| m.as_str().to_string()).unwrap_or_else(|| "unknown-session".to_string())
     } else {
