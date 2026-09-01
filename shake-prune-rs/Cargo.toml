@@ -1,7 +1,9 @@
 [package]
 name = "shake-prune"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
+description = "High-performance context compaction and tree-shaking tool for Google Antigravity Agent"
+license = "MIT"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
