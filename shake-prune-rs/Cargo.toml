@@ -1,6 +1,6 @@
 [package]
 name = "shake-prune"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 description = "High-performance in-place context compaction and tree-shaking tool for Google Antigravity Agent"
 license = "MIT"
@@ -10,6 +10,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 regex = "1.10"
 chrono = { version = "0.4", features = ["clock"] }
+tempfile = "3.10"
 
 [profile.release]
 opt-level = 3

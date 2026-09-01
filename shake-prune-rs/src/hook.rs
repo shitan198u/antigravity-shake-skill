@@ -1,15 +1,18 @@
 use crate::metadata::{write_active_anchor, write_artifact_metadata};
 use crate::pruner::{compact_transcript_inplace, prune_transcript};
+use chrono::Utc;
 use serde::Deserialize;
 use serde_json::json;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // 200k tokens * ~3.3 bytes/token = 660,000 bytes
 const AUTO_SHAKE_TOKEN_THRESHOLD_BYTES: u64 = 660_000;
 // Minimum new unpruned growth (50 KB) required before triggering another auto-compaction
 const AUTO_SHAKE_GROWTH_DELTA_BYTES: u64 = 50_000;
+// Minimum seconds between auto-compaction attempts to prevent CPU loops in failure cases
+const AUTO_SHAKE_COOLDOWN_SECONDS: i64 = 180;
 
 #[derive(Deserialize, Debug, Default)]
 struct HookPayload {
@@ -27,10 +30,17 @@ struct AnchorData {
     shaken_file: Option<String>,
     anchored_at_step: Option<serde_json::Value>,
     last_compacted_bytes: Option<u64>,
+    last_attempt_timestamp: Option<i64>,
+}
+
+/// Validates that a directory path is a trusted system-managed storage location
+/// (e.g. under ~/.gemini or containing a brain directory) to prevent context poisoning from project repos.
+fn is_trusted_storage_path(p: &Path) -> bool {
+    let p_str = p.to_string_lossy();
+    p_str.contains(".gemini") || p_str.contains("brain/") || p_str.contains("brain\\")
 }
 
 pub fn handle_hook() {
-    // Fail-open guarantee: any failure cleanly outputs empty JSON with exit 0
     if let Err(_) = run_hook_safely() {
         println!("{{}}");
     }
@@ -47,26 +57,27 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
 
     let payload: HookPayload = serde_json::from_str(&stdin_buffer).unwrap_or_default();
     
-    // Resolve conversation directory, transcript path, and artifact directory
     let mut resolved_transcript: Option<PathBuf> = None;
     let mut resolved_art_dir: Option<PathBuf> = None;
 
     if let Some(art_dir) = &payload.artifact_directory_path {
         let p = PathBuf::from(art_dir);
-        resolved_art_dir = Some(p.clone());
-        let possible_t = p.join(".system_generated/logs/transcript.jsonl");
-        if possible_t.exists() {
-            resolved_transcript = Some(possible_t);
+        if is_trusted_storage_path(&p) {
+            resolved_art_dir = Some(p.clone());
+            let possible_t = p.join(".system_generated/logs/transcript.jsonl");
+            if possible_t.exists() {
+                resolved_transcript = Some(possible_t);
+            }
         }
     }
 
     if resolved_transcript.is_none() {
         if let Some(t_path) = &payload.transcript_path {
             let p = PathBuf::from(t_path);
-            if p.exists() {
+            if p.exists() && is_trusted_storage_path(&p) {
                 resolved_transcript = Some(p.clone());
                 if let Some(conv_dir) = p.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) {
-                    if resolved_art_dir.is_none() {
+                    if resolved_art_dir.is_none() && is_trusted_storage_path(conv_dir) {
                         resolved_art_dir = Some(conv_dir.to_path_buf());
                     }
                 }
@@ -74,7 +85,6 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Fallback discovery across known global brain directories if conversation_id is provided
     if resolved_transcript.is_none() {
         if let Some(conv_id) = &payload.conversation_id {
             let mut home_dirs = Vec::new();
@@ -107,10 +117,12 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Check existing anchor state
+    // Candidate anchor paths (strictly restricted to trusted system directories)
     let mut candidate_paths: Vec<PathBuf> = Vec::new();
     if let Some(art_dir) = &resolved_art_dir {
-        candidate_paths.push(art_dir.join("active_shake_anchor.json"));
+        if is_trusted_storage_path(art_dir) {
+            candidate_paths.push(art_dir.join("active_shake_anchor.json"));
+        }
     }
 
     let mut found_anchor: Option<AnchorData> = None;
@@ -127,17 +139,18 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // ⚡ PROACTIVE AUTO-SHAKE WITH GROWTH DELTA GUARD:
-    // Only triggers if:
-    // 1. Transcript exceeds 200k tokens (660 KB)
-    // 2. AND (has never been shaken OR has grown by at least 50 KB of new tool logs since last shake)
+    // ⚡ PROACTIVE AUTO-SHAKE WITH GROWTH DELTA & COOLDOWN GUARDS
     if let (Some(t_path), Some(art_dir)) = (&resolved_transcript, &resolved_art_dir) {
         if let Ok(meta) = fs::metadata(t_path) {
             if meta.len() >= AUTO_SHAKE_TOKEN_THRESHOLD_BYTES {
+                let now_ts = Utc::now().timestamp();
                 let should_auto_shake = match &found_anchor {
                     Some(anchor) => {
                         let last_bytes = anchor.last_compacted_bytes.unwrap_or(0);
-                        meta.len() > last_bytes + AUTO_SHAKE_GROWTH_DELTA_BYTES
+                        let last_attempt = anchor.last_attempt_timestamp.unwrap_or(0);
+                        let cooldown_ok = (now_ts - last_attempt).abs() >= AUTO_SHAKE_COOLDOWN_SECONDS;
+                        let growth_ok = meta.len() > last_bytes + AUTO_SHAKE_GROWTH_DELTA_BYTES;
+                        cooldown_ok && growth_ok
                     }
                     None => true,
                 };
@@ -179,7 +192,7 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Normal anchor message injection if already compacted or under threshold
+    // Normal anchor message injection if under threshold or already compacted
     match found_anchor {
         Some(anchor) => {
             let shaken_file = anchor.shaken_file.unwrap_or_default();

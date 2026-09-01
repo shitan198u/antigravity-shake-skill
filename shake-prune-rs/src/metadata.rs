@@ -1,24 +1,15 @@
 use crate::models::PruningStats;
 use chrono::Utc;
 use serde_json::json;
-use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
-
-fn get_secure_tmp_path(target: &Path) -> std::path::PathBuf {
-    let pid = std::process::id();
-    let nanos = Utc::now().timestamp_nanos_opt().unwrap_or(0);
-    target.with_extension(format!("{}.{}.tmp", pid, nanos))
-}
+use tempfile::Builder;
 
 pub fn write_artifact_metadata(markdown_path: &Path, summary: &str) -> std::io::Result<()> {
+    let parent_dir = markdown_path.parent().unwrap_or_else(|| Path::new("."));
     let filename_str = markdown_path.file_name().unwrap_or_default().to_string_lossy();
     let meta_filename = format!("{}.metadata.json", filename_str);
-    let meta_path = match markdown_path.parent() {
-        Some(p) => p.join(meta_filename),
-        None => Path::new(&meta_filename).to_path_buf(),
-    };
-    let tmp_path = get_secure_tmp_path(&meta_path);
+    let meta_path = parent_dir.join(meta_filename);
     let now_iso = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
 
     let meta_data = json!({
@@ -28,21 +19,21 @@ pub fn write_artifact_metadata(markdown_path: &Path, summary: &str) -> std::io::
         "requestFeedback": false
     });
 
-    {
-        let mut file = File::create(&tmp_path)?;
-        file.write_all(serde_json::to_string_pretty(&meta_data)?.as_bytes())?;
-        file.flush()?;
-    }
+    let mut tmp_file = Builder::new()
+        .prefix(".shake_meta_")
+        .tempfile_in(parent_dir)?;
 
-    // Atomic rename
-    fs::rename(&tmp_path, &meta_path)?;
+    tmp_file.write_all(serde_json::to_string_pretty(&meta_data)?.as_bytes())?;
+    tmp_file.flush()?;
+
+    // Atomic persist with exclusive permissions
+    tmp_file.persist(&meta_path).map_err(|e| e.error)?;
     Ok(())
 }
 
 pub fn write_active_anchor(markdown_path: &Path, stats: &PruningStats) -> std::io::Result<()> {
     if let Some(parent_dir) = markdown_path.parent() {
         let anchor_path = parent_dir.join("active_shake_anchor.json");
-        let tmp_path = get_secure_tmp_path(&anchor_path);
         let now_iso = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
 
         let t_size = parent_dir.join(".system_generated/logs/transcript.jsonl")
@@ -55,6 +46,7 @@ pub fn write_active_anchor(markdown_path: &Path, stats: &PruningStats) -> std::i
             "shaken_file": markdown_path.to_string_lossy(),
             "anchored_at_step": stats.user_turns + stats.assistant_turns + stats.pruned_tools,
             "last_compacted_bytes": t_size,
+            "last_attempt_timestamp": Utc::now().timestamp(),
             "topic": stats.topic_slug,
             "token_savings_pct": stats.reduction_pct,
             "raw_tokens": stats.raw_tokens,
@@ -62,14 +54,14 @@ pub fn write_active_anchor(markdown_path: &Path, stats: &PruningStats) -> std::i
             "timestamp": now_iso
         });
 
-        {
-            let mut file = File::create(&tmp_path)?;
-            file.write_all(serde_json::to_string_pretty(&anchor_data)?.as_bytes())?;
-            file.flush()?;
-        }
+        let mut tmp_file = Builder::new()
+            .prefix(".shake_anchor_")
+            .tempfile_in(parent_dir)?;
 
-        // Atomic rename
-        fs::rename(&tmp_path, &anchor_path)?;
+        tmp_file.write_all(serde_json::to_string_pretty(&anchor_data)?.as_bytes())?;
+        tmp_file.flush()?;
+
+        tmp_file.persist(&anchor_path).map_err(|e| e.error)?;
     }
     Ok(())
 }

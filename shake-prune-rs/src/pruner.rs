@@ -1,7 +1,6 @@
 use crate::models::{PruningStats, Step};
 use crate::slug::{extract_conversation_id, generate_suggested_filename, generate_topic_slug};
 use chrono::Local;
-use regex::Regex;
 use serde_json::Value;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
@@ -16,9 +15,33 @@ fn safe_truncate(s: &str, max_chars: usize) -> String {
     s.chars().take(max_chars).collect()
 }
 
-/// Escapes triple backticks to prevent premature Markdown block termination and UI injection.
+/// Escapes HTML entities and triple backticks to prevent XSS in IDE webviews and Markdown block termination.
 fn sanitize_markdown_snippet(s: &str) -> String {
-    s.replace("```", "` ` `")
+    let mut out = String::with_capacity(s.len() + 32);
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(c),
+        }
+    }
+    out.replace("```", "` ` `")
+}
+
+/// Extracts text inside <USER_REQUEST>...</USER_REQUEST> using linear scan (O(N), 100% immune to ReDoS).
+fn extract_user_request_text(content: &str) -> &str {
+    let tag_open = "<USER_REQUEST>";
+    let tag_close = "</USER_REQUEST>";
+    if let Some(start_pos) = content.find(tag_open) {
+        let after_open = &content[start_pos + tag_open.len()..];
+        if let Some(end_pos) = after_open.find(tag_close) {
+            return after_open[..end_pos].trim();
+        }
+        return after_open.trim();
+    }
+    content.trim()
 }
 
 /// Safely quotes a file path for POSIX shell output to prevent command injection.
@@ -27,8 +50,6 @@ pub fn shell_quote(path_str: &str) -> String {
 }
 
 /// Compacts large tool call arguments into progressive disclosure receipts with FULL ABSOLUTE PATHS.
-/// Preserves TargetFile, Description, Step Index, and absolute link to the timestamped raw archive
-/// so the LLM can inspect exact historical code diffs on-demand via view_file if code ever breaks.
 fn compact_tool_call_args(
     tool_name: &str,
     args_map: &mut serde_json::Map<String, Value>,
@@ -97,8 +118,6 @@ fn compact_tool_call_args(
 }
 
 /// Compacts a JSONL file in-place while PRESERVING the exact same filesystem Inode.
-/// Uses truncate-and-rewrite on the existing open file handle so Antigravity IDE's
-/// active append file descriptors are never orphaned or desynced.
 fn compact_single_jsonl_file(
     target_path: &Path,
     recent_window_steps: usize,
@@ -163,7 +182,6 @@ fn compact_single_jsonl_file(
             || status.contains("failed");
 
         if !is_recent {
-            // Progressive Disclosure: Compact large code payloads with step index & FULL ABSOLUTE PATH archive backlink
             if stype == "PLANNER_RESPONSE" {
                 if let Some(tool_calls) = step_val.get_mut("tool_calls").and_then(|v| v.as_array_mut()) {
                     for tc in tool_calls {
@@ -210,7 +228,7 @@ fn compact_single_jsonl_file(
 
     let compacted_bytes = compacted_output.len();
 
-    // 3. Truncate the file in-place and rewind to Start(0) (Inode preserved!)
+    // 3. Truncate in-place and rewind (Inode preserved!)
     file.set_len(0)?;
     file.seek(SeekFrom::Start(0))?;
     file.write_all(compacted_output.as_bytes())?;
@@ -219,8 +237,6 @@ fn compact_single_jsonl_file(
     Ok((initial_bytes, compacted_bytes))
 }
 
-/// Compacts both transcript.jsonl (AI context) AND transcript_full.jsonl (UI visual render)
-/// in-place with inode preservation and timestamped backups.
 pub fn compact_transcript_inplace(
     transcript_path: &Path,
     recent_window_steps: usize,
@@ -228,12 +244,10 @@ pub fn compact_transcript_inplace(
     let mut total_init = 0usize;
     let mut total_compacted = 0usize;
 
-    // Compact transcript.jsonl in-place
     let (i1, c1) = compact_single_jsonl_file(transcript_path, recent_window_steps)?;
     total_init += i1;
     total_compacted += c1;
 
-    // Also compact transcript_full.jsonl if present in the same logs directory
     if let Some(parent) = transcript_path.parent() {
         let full_transcript = parent.join("transcript_full.jsonl");
         if full_transcript.exists() && full_transcript != transcript_path {
@@ -271,7 +285,7 @@ pub fn prune_transcript(
     let file_pass2 = File::open(transcript_path)?;
     let reader_pass2 = BufReader::new(file_pass2);
 
-    let mut output_blocks = Vec::new();
+    let mut output_blocks = Vec::with_capacity(total_steps);
     let mut user_count = 0usize;
     let mut assistant_count = 0usize;
     let mut pruned_tools_count = 0usize;
@@ -279,8 +293,6 @@ pub fn prune_transcript(
     let mut retained_short_cmds = 0usize;
     let mut retained_recent_steps = 0usize;
     let mut first_user_prompt = String::new();
-
-    let re_user_request = Regex::new(r"(?s)<USER_REQUEST>(.*?)</USER_REQUEST>")?;
 
     for (i, line) in reader_pass2.lines().enumerate() {
         let line_str = line?;
@@ -302,11 +314,7 @@ pub fn prune_transcript(
         match stype {
             "USER_INPUT" => {
                 user_count += 1;
-                let user_text = if let Some(caps) = re_user_request.captures(content) {
-                    caps.get(1).map(|m| m.as_str().trim()).unwrap_or(content.trim())
-                } else {
-                    content.trim()
-                };
+                let user_text = extract_user_request_text(content);
                 if first_user_prompt.is_empty() {
                     first_user_prompt = user_text.to_string();
                 }
