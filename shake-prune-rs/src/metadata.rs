@@ -6,14 +6,20 @@ use std::io::Write;
 use std::path::Path;
 
 pub fn write_artifact_metadata(markdown_path: &Path, summary: &str) -> std::io::Result<()> {
-    let meta_path = markdown_path.with_extension("md.metadata.json");
+    let filename_str = markdown_path.file_name().unwrap_or_default().to_string_lossy();
+    let meta_filename = format!("{}.metadata.json", filename_str);
+    let meta_path = match markdown_path.parent() {
+        Some(p) => p.join(meta_filename),
+        None => Path::new(&meta_filename).to_path_buf(),
+    };
     let tmp_path = meta_path.with_extension("tmp");
-    let now_iso = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let now_iso = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
 
     let meta_data = json!({
-        "artifactType": "ARTIFACT_TYPE_OTHER",
         "summary": summary,
-        "updatedAt": now_iso
+        "updatedAt": now_iso,
+        "userFacing": true,
+        "requestFeedback": false
     });
 
     {
@@ -31,7 +37,7 @@ pub fn write_active_anchor(markdown_path: &Path, stats: &PruningStats) -> std::i
     if let Some(parent_dir) = markdown_path.parent() {
         let anchor_path = parent_dir.join("active_shake_anchor.json");
         let tmp_path = parent_dir.join("active_shake_anchor.json.tmp");
-        let now_iso = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let now_iso = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
 
         let anchor_data = json!({
             "active": true,

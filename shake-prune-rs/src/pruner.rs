@@ -14,15 +14,16 @@ fn safe_truncate(s: &str, max_chars: usize) -> String {
     s.chars().take(max_chars).collect()
 }
 
-/// Compacts transcript.jsonl directly in-place on disk with backup and atomic write.
-/// Physically replaces bloated tool outputs with compact action receipts while preserving
-/// 100% of User dialogue, Assistant thoughts/reasoning, Error stack traces, and recent active window.
-pub fn compact_transcript_inplace(
-    transcript_path: &Path,
+fn compact_single_jsonl_file(
+    target_path: &Path,
     recent_window_steps: usize,
 ) -> Result<(usize, usize), Box<dyn std::error::Error>> {
+    if !target_path.exists() {
+        return Ok((0, 0));
+    }
+
     // 1. Pass 1: Count total steps
-    let file_pass1 = File::open(transcript_path)?;
+    let file_pass1 = File::open(target_path)?;
     let reader_pass1 = BufReader::new(file_pass1);
     let mut total_steps = 0usize;
     let mut initial_bytes = 0usize;
@@ -38,14 +39,14 @@ pub fn compact_transcript_inplace(
 
     let recent_threshold = total_steps.saturating_sub(recent_window_steps);
 
-    // 2. Create raw backup transcript.jsonl.bak
-    let backup_path = transcript_path.with_extension("jsonl.bak");
-    let _ = fs::copy(transcript_path, &backup_path);
+    // 2. Backup target.jsonl -> target.jsonl.bak
+    let backup_path = target_path.with_extension("jsonl.bak");
+    let _ = fs::copy(target_path, &backup_path);
 
     // 3. Pass 2: Stream, compact tool outputs, and write atomically to .tmp
-    let file_pass2 = File::open(transcript_path)?;
+    let file_pass2 = File::open(target_path)?;
     let reader_pass2 = BufReader::new(file_pass2);
-    let tmp_path = transcript_path.with_extension("jsonl.tmp");
+    let tmp_path = target_path.with_extension("jsonl.tmp");
     let mut tmp_file = File::create(&tmp_path)?;
 
     let mut compacted_bytes = 0usize;
@@ -98,16 +99,42 @@ pub fn compact_transcript_inplace(
     }
 
     tmp_file.flush()?;
-    fs::rename(&tmp_path, transcript_path)?;
+    fs::rename(&tmp_path, target_path)?;
 
     Ok((initial_bytes, compacted_bytes))
+}
+
+/// Compacts both transcript.jsonl (AI context) AND transcript_full.jsonl (UI visual render)
+/// directly in-place on disk with backups created.
+pub fn compact_transcript_inplace(
+    transcript_path: &Path,
+    recent_window_steps: usize,
+) -> Result<(usize, usize), Box<dyn std::error::Error>> {
+    let mut total_init = 0usize;
+    let mut total_compacted = 0usize;
+
+    // Compact transcript.jsonl
+    let (i1, c1) = compact_single_jsonl_file(transcript_path, recent_window_steps)?;
+    total_init += i1;
+    total_compacted += c1;
+
+    // Also compact transcript_full.jsonl if present in the same logs directory (used by IDE UI rendering)
+    if let Some(parent) = transcript_path.parent() {
+        let full_transcript = parent.join("transcript_full.jsonl");
+        if full_transcript.exists() && full_transcript != transcript_path {
+            let (i2, c2) = compact_single_jsonl_file(&full_transcript, recent_window_steps)?;
+            total_init += i2;
+            total_compacted += c2;
+        }
+    }
+
+    Ok((total_init, total_compacted))
 }
 
 pub fn prune_transcript(
     transcript_path: &Path,
     recent_window_steps: usize,
 ) -> Result<(String, PruningStats), Box<dyn std::error::Error>> {
-    // Pass 1: Count total steps & measure raw payload size efficiently (O(1) memory)
     let file_pass1 = File::open(transcript_path)?;
     let reader_pass1 = BufReader::new(file_pass1);
 
@@ -126,7 +153,6 @@ pub fn prune_transcript(
     let recent_threshold = total_steps.saturating_sub(recent_window_steps);
     let conv_id = extract_conversation_id(&transcript_path.to_string_lossy());
 
-    // Pass 2: Stream, filter, and format output incrementally without storing all steps in RAM
     let file_pass2 = File::open(transcript_path)?;
     let reader_pass2 = BufReader::new(file_pass2);
 

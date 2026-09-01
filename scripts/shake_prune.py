@@ -36,12 +36,10 @@ def extract_conversation_id(path_str: str) -> str:
     match = re.search(r"brain[/\\]([a-zA-Z0-9_-]+)[/\\]", path_str)
     return match.group(1) if match else "unknown-session"
 
-def compact_transcript_inplace(transcript_path: str, recent_window_steps: int = 6):
-    t_file = Path(transcript_path)
+def compact_single_jsonl_file(t_file: Path, recent_window_steps: int = 6):
     if not t_file.exists():
         return
 
-    # Pass 1: count lines
     total_steps = 0
     with open(t_file, "r", encoding="utf-8") as f:
         for line in f:
@@ -57,7 +55,7 @@ def compact_transcript_inplace(transcript_path: str, recent_window_steps: int = 
     except Exception:
         pass
 
-    # Pass 2: Stream compact to tmp file
+    # Stream compact to tmp file
     tmp_file = t_file.with_suffix(".jsonl.tmp")
     with open(t_file, "r", encoding="utf-8") as in_f, open(tmp_file, "w", encoding="utf-8") as out_f:
         for i, line in enumerate(in_f):
@@ -88,6 +86,16 @@ def compact_transcript_inplace(transcript_path: str, recent_window_steps: int = 
             out_f.write(json.dumps(step) + "\n")
 
     os.replace(tmp_file, t_file)
+
+def compact_transcript_inplace(transcript_path: str, recent_window_steps: int = 6):
+    t_file = Path(transcript_path)
+    compact_single_jsonl_file(t_file, recent_window_steps)
+
+    # Also compact transcript_full.jsonl for IDE UI rendering
+    if t_file.parent:
+        full_transcript = t_file.parent / "transcript_full.jsonl"
+        if full_transcript.exists() and full_transcript != t_file:
+            compact_single_jsonl_file(full_transcript, recent_window_steps)
 
 def prune_transcript(transcript_path: str, recent_window_steps: int = 6) -> tuple[str, dict, str]:
     transcript_file = Path(transcript_path)
@@ -251,9 +259,10 @@ def write_artifact_metadata(markdown_path: str, summary: str):
     meta_path = markdown_path + ".metadata.json"
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
     meta_data = {
-        "artifactType": "ARTIFACT_TYPE_OTHER",
         "summary": summary,
-        "updatedAt": now_iso
+        "updatedAt": now_iso,
+        "userFacing": True,
+        "requestFeedback": False
     }
     atomic_write_json(meta_path, meta_data)
 
@@ -331,7 +340,7 @@ def main():
     print(f"| **Preserved Signals** | {stats['user_turns']} User turns (100%) | {stats['assistant_turns']} Assistant turns (100%) | {stats['retained_errors']} Error traces (100%) |\n")
     
     if in_place:
-        print(f"> 💾 **In-Place JSONL Compaction**: `transcript.jsonl` was physically pruned on disk with backup created (`transcript.jsonl.bak`). Subsequent turns in **this exact window** now transmit the compact payload over the wire.\n")
+        print(f"> 💾 **In-Place JSONL Compaction**: `transcript.jsonl` and `transcript_full.jsonl` were physically pruned on disk with backups created. Subsequent turns in **this exact window** now transmit the compact payload over the wire.\n")
 
     print(f"---\n")
     print(f"### 🟢 In-Window Fresh Slate Active")
