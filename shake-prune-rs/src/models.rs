@@ -13,6 +13,7 @@ pub struct Step {
     #[allow(dead_code)]
     pub source: Option<String>,
     pub content: Option<String>,
+    pub thinking: Option<String>,
     pub status: Option<String>,
     pub exit_code: Option<i32>,
     pub tool_calls: Option<Vec<ToolCall>>,

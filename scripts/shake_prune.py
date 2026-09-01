@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
 Smart Deterministic Transcript Pruner for Antigravity Agent (/shake).
-Implements signal-preserving, zero-loss context pruning with:
-- Dynamic topic naming
-- Automatic Antigravity Artifact (.metadata.json) registration
-- Clickable links and quick-copy terminal commands
+Implements signal-preserving, zero-loss context pruning:
+- 100% verbatim User prompts, Assistant reasoning, and Thought processes
+- Preserves internal thinking blocks inside collapsible details
+- Preserves all error messages, non-zero exits, and stack traces
+- Preserves recent working window (last N tool steps)
+- Preserves short command outputs (<250 chars)
+- Prunes verbose successful file dumps, compiler dumps, and grep traces
 """
 
 import sys
@@ -15,11 +18,9 @@ import datetime
 from pathlib import Path
 
 def estimate_tokens(text: str) -> int:
-    """Standard rule-of-thumb: ~4 characters per token for English/code mix."""
     return max(1, len(text) // 4)
 
 def generate_topic_slug(first_user_text: str) -> str:
-    """Generates a clean, descriptive slug from the user's initial prompt."""
     clean = re.sub(r"<[^>]+>", " ", first_user_text)
     clean = re.sub(r"https?://\S+", "", clean)
     clean = re.sub(r"[^a-zA-Z0-9\s]", " ", clean)
@@ -29,7 +30,6 @@ def generate_topic_slug(first_user_text: str) -> str:
     return slug
 
 def extract_conversation_id(path_str: str) -> str:
-    """Attempts to extract UUID-like or folder-based conversation ID from path."""
     match = re.search(r"brain/([a-zA-Z0-9_-]+)/", path_str)
     return match.group(1) if match else "unknown-session"
 
@@ -59,6 +59,7 @@ def prune_transcript(transcript_path: str, recent_window_steps: int = 6) -> tupl
         raw_json_str += json.dumps(step)
         stype = step.get("type")
         content = step.get("content", "")
+        thinking = step.get("thinking", "")
         status = step.get("status", "")
         exit_code = step.get("exit_code")
         is_recent = (i >= recent_threshold)
@@ -74,10 +75,16 @@ def prune_transcript(transcript_path: str, recent_window_steps: int = 6) -> tupl
         elif stype == "PLANNER_RESPONSE":
             tool_calls = step.get("tool_calls", [])
             assistant_text = content.strip() if content else ""
+            thinking_text = thinking.strip() if thinking else ""
 
-            if assistant_text:
+            if assistant_text or thinking_text:
                 assistant_count += 1
-                output_blocks.append(f"### 🤖 Assistant\n\n{assistant_text}\n")
+                block = "### 🤖 Assistant\n\n"
+                if thinking_text:
+                    block += f"<details>\n<summary>💭 Thought Process</summary>\n\n{thinking_text}\n\n</details>\n\n"
+                if assistant_text:
+                    block += f"{assistant_text}\n"
+                output_blocks.append(block)
 
             if tool_calls:
                 for tc in tool_calls:
@@ -127,7 +134,7 @@ def prune_transcript(transcript_path: str, recent_window_steps: int = 6) -> tupl
         "> [!IMPORTANT]",
         "> **Context Note for Assistant**:",
         "> This document is a complete, verbatim transcript of earlier turns with token bloat removed via `/shake`.",
-        "> - **User prompts and Assistant explanations are 100% complete and verbatim.**",
+        "> - **User prompts, Assistant explanations, and Thought processes are 100% complete and verbatim.**",
         "> - Actions marked `[Command completed successfully]` or `[File inspected]` were already executed with success.",
         "> - You do **NOT** need to re-run past successful commands unless the user explicitly requests it.",
         "> - Any errors or failures encountered in past turns are explicitly preserved below with full stack traces.",
@@ -169,7 +176,6 @@ def prune_transcript(transcript_path: str, recent_window_steps: int = 6) -> tupl
     return pruned_content, stats, suggested_filename
 
 def write_artifact_metadata(markdown_path: str, summary: str):
-    """Generates the accompanying .metadata.json so Antigravity renders it as an interactive Artifact in the IDE."""
     meta_path = markdown_path + ".metadata.json"
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
     meta_data = {
@@ -202,7 +208,6 @@ def main():
     with open(abs_output_path, "w", encoding="utf-8") as f:
         f.write(pruned_markdown)
 
-    # Register as an interactive IDE Artifact
     summary_text = (
         f"Shaken & pruned verbatim history for topic '{stats['topic_slug'].replace('_', ' ')}'. "
         f"Saved {stats['reduction_pct']:.1f}% context tokens ({stats['pruned_tokens']:,} tokens vs {stats['raw_tokens']:,} raw). "

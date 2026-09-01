@@ -67,9 +67,22 @@ pub fn prune_transcript(
             }
             "PLANNER_RESPONSE" => {
                 let assistant_text = content.trim();
-                if !assistant_text.is_empty() {
+                let thinking_text = step.thinking.as_deref().unwrap_or("").trim();
+
+                if !assistant_text.is_empty() || !thinking_text.is_empty() {
                     assistant_count += 1;
-                    output_blocks.push(format!("### 🤖 Assistant\n\n{}\n", assistant_text));
+                    let mut assistant_block = String::from("### 🤖 Assistant\n\n");
+                    if !thinking_text.is_empty() {
+                        assistant_block.push_str(&format!(
+                            "<details>\n<summary>💭 Thought Process</summary>\n\n{}\n\n</details>\n\n",
+                            thinking_text
+                        ));
+                    }
+                    if !assistant_text.is_empty() {
+                        assistant_block.push_str(assistant_text);
+                        assistant_block.push('\n');
+                    }
+                    output_blocks.push(assistant_block);
                 }
 
                 if let Some(tool_calls) = &step.tool_calls {
@@ -145,21 +158,7 @@ pub fn prune_transcript(
     let suggested_filename = generate_suggested_filename(&topic_slug);
 
     let header = format!(
-        "# Shaken & Pruned History: {}\n\n\
-        > [!IMPORTANT]\n\
-        > **Context Note for Assistant**:\n\
-        > This document is a complete, verbatim transcript of earlier turns with token bloat removed via `/shake`.\n\
-        > - **User prompts and Assistant explanations are 100% complete and verbatim.**\n\
-        > - Actions marked `[Command completed successfully]` or `[File inspected]` were already executed with success.\n\
-        > - You do **NOT** need to re-run past successful commands unless the user explicitly requests it.\n\
-        > - Any errors or failures encountered in past turns are explicitly preserved below with full stack traces.\n\
-        > - The active working state and immediate recent tool outputs are preserved at the end of the transcript.\n\n\
-        - **Session ID**: `{}`\n\
-        - **Topic**: `{}`\n\
-        - **Source Transcript**: `{}`\n\
-        - **User Turns**: {} | **Assistant Turns**: {}\n\
-        - **Tool Dumps Pruned**: {} | **Errors Preserved**: {}\n\
-        ---\n\n",
+        "# Shaken & Pruned History: {}\n\n        > [!IMPORTANT]\n        > **Context Note for Assistant**:\n        > This document is a complete, verbatim transcript of earlier turns with token bloat removed via `/shake`.\n        > - **User prompts, Assistant explanations, and Thought processes are 100% complete and verbatim.**\n        > - Actions marked `[Command completed successfully]` or `[File inspected]` were already executed with success.\n        > - You do **NOT** need to re-run past successful commands unless the user explicitly requests it.\n        > - Any errors or failures encountered in past turns are explicitly preserved below with full stack traces.\n        > - The active working state and immediate recent tool outputs are preserved at the end of the transcript.\n\n        - **Session ID**: `{}`\n        - **Topic**: `{}`\n        - **Source Transcript**: `{}`\n        - **User Turns**: {} | **Assistant Turns**: {}\n        - **Tool Dumps Pruned**: {} | **Errors Preserved**: {}\n        ---\n\n",
         topic_slug.replace('_', " ").to_uppercase(),
         conv_id,
         topic_slug.replace('_', " "),
