@@ -14,18 +14,19 @@ In the **Oh-My-Pi (omp)** CLI coding agent, `/shake` is a context-management com
 
 ## How It Is Mapped to Google Antigravity
 
-Antigravity operates with a rich suite of artifacts, knowledge items, transcripts, and progressive disclosure skills. In Antigravity, `/shake` is realized as a high-performance **deterministic transcript pruner**:
+Antigravity operates with a rich suite of artifacts, knowledge items, transcripts, and progressive disclosure skills. In Antigravity, `/shake` is realized as a high-performance **deterministic transcript pruner & native in-window hook**:
 
 | Feature | `omp` Agent (CLI Runtime) | Antigravity Implementation (`antigravity-shake`) |
 | :--- | :--- | :--- |
 | **Invocation** | `/shake` terminal command | `/shake` slash command / skill trigger (`SKILL.md`) |
-| **Execution Engine** | In-memory JavaScript/Python loop | Native Rust binary (`shake-prune`, ~10ms) + Python fallback |
-| **Message Handling** | In-place mutation of RAM array | Deterministic stream pruning of `transcript.jsonl` |
-| **Lossy Summarization?** | No (strips tool outputs only) | **No** (100% verbatim dialogue, 0% loss of nuance) |
+| **Execution Engine** | In-memory JavaScript/Python loop | Native compiled Rust binary (`shake-prune`, sub-10ms) |
+| **Message Handling** | In-place mutation of RAM array | Deterministic stream pruning + Native `PreInvocation` hook |
+| **In-Window Continuity** | Retains terminal scrollback | **Seamless in-window continuity** (`shake-prune --hook`) |
+| **Lossy Summarization?** | No (strips tool outputs only) | **No** (100% verbatim dialogue, thoughts, & diffs) |
 | **Error Handling** | May prune errors unless recent | **Strict signal preservation** (all error traces retained) |
 | **Active Momentum** | Last N messages kept | Configurable active working window (default: last 6 tool steps) |
 | **IDE Integration** | Terminal output only | Automatic **Interactive IDE Artifact** (`.metadata.json`) |
-| **Resumption** | Continues in same terminal | One-click `@artifact.md` mention in new chat or active session |
+| **Platform Portability** | Node / Bun runtime | Self-contained ELF binary (0 Python/Rust runtime dependencies) |
 
 ---
 
@@ -36,4 +37,4 @@ Many agent harnesses attempt to solve context bloat by asking an LLM to "summari
 2. **Token Waste & Latency**: LLM summarization consumes hundreds of tokens and introduces 5–15 seconds of latency.
 3. **Hallucination Risk**: Summaries can unintentionally rewrite previous agreements or omit unresolved bugs.
 
-The `/shake` engine uses **purely deterministic, zero-LLM parsing** to strip only low-signal tool noise (compilation streams, file cat dumps, repeated status queries) while preserving 100% of the original developer dialogue and model reasoning.
+The `/shake` engine uses **purely deterministic, zero-LLM parsing** to strip only low-signal tool noise (compilation streams, file cat dumps, repeated status queries) while preserving 100% of the original developer dialogue, thoughts, and model reasoning.
