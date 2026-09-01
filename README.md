@@ -40,7 +40,7 @@ When `/shake` runs, it generates an **Interactive IDE Artifact** with explicit c
   * When `/shake` completes, it creates an active session anchor.
   * **You stay in the exact same chat window**—when you press Send on your next turn, the native hook automatically pins the model's working memory to the clean shaken artifact!
 * **🦀 100% Self-Contained Native Binary**:
-  * One single binary (`shake-prune`) handles both context pruning and sub-millisecond hook execution (`<0.3ms`).
+  * One single binary (`shake-prune`) handles both context pruning and sub-millisecond hook execution (`<0.2ms`).
   * **Zero Python & Zero Rust dependencies** required at runtime on Linux.
 * **80%–90% Token Reduction**: Recovers hundreds of thousands of tokens from bloated transcripts instantly.
 * **Zero Loss of Meaning**: Unlike lossy LLM summarizers, User instructions, bug investigations, Assistant architectural decisions, and Thoughts are preserved **word-for-word**.
@@ -128,7 +128,7 @@ antigravity-shake/
 │   └── shake-prune               # Precompiled native Linux binary (x86_64, includes --hook)
 ├── install.sh                     # Automated pure-Bash installer
 ├── README.md                      # Documentation & usage guide
-├── SKILL.md                       # Antigravity skill definition
+├── SKILL.md                       # Antigravity skill definition (Zero-guesswork workflow)
 ├── references/
 │   └── omp_comparison.md          # Technical analysis of omp vs Antigravity pruning
 ├── scripts/
