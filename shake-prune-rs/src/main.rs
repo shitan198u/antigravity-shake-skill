@@ -65,27 +65,55 @@ fn validate_transcript_path(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Validates that an output path is not pointed at sensitive system directories
-/// to prevent arbitrary file overwrite vulnerabilities via prompt injection.
-fn validate_output_path(target: &Path) -> Result<(), String> {
-    let p_str = target.to_string_lossy();
-    let lower = p_str.to_lowercase();
+/// Strict ALLOWLIST Validation:
+/// Ensures output files can ONLY be written within:
+/// 1. The transcript's parent directory (session brain folder)
+/// 2. The active workspace directory (current_dir)
+/// 3. The user's system ~/.gemini directory
+fn validate_output_path_allowlist(target: &Path, transcript_path: &Path) -> Result<PathBuf, String> {
+    let target_parent = if target.is_dir() {
+        target.to_path_buf()
+    } else {
+        target.parent().unwrap_or_else(|| Path::new(".")).to_path_buf()
+    };
 
-    let forbidden_prefixes = [
-        "/etc", "/root", "/bin", "/sbin", "/usr", "/boot", "/sys", "/proc", "/dev",
-        "c:\\windows", "c:\\program files", "\\windows", "\\system32"
-    ];
+    let canonical_target = target_parent.canonicalize().map_err(|_| {
+        format!("Output target directory does not exist or is invalid: {}", target_parent.display())
+    })?;
 
-    for prefix in forbidden_prefixes {
-        if lower.starts_with(prefix) {
-            return Err(format!(
-                "Security Error: Output path '{}' is within restricted system directory '{}'",
-                p_str, prefix
-            ));
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default();
+
+    let mut allowed_roots: Vec<PathBuf> = Vec::new();
+
+    if let Some(t_parent) = transcript_path.parent() {
+        if let Ok(c) = t_parent.canonicalize() {
+            allowed_roots.push(c);
         }
     }
 
-    Ok(())
+    if let Ok(curr) = env::current_dir().and_then(|p| p.canonicalize()) {
+        allowed_roots.push(curr);
+    }
+
+    if !home.is_empty() {
+        let gemini_dir = Path::new(&home).join(".gemini");
+        if let Ok(c) = gemini_dir.canonicalize() {
+            allowed_roots.push(c);
+        }
+    }
+
+    let is_allowed = allowed_roots.iter().any(|root| canonical_target.starts_with(root));
+
+    if !is_allowed {
+        return Err(format!(
+            "Security Error: Output path '{}' is outside allowed session, workspace, and ~/.gemini directories.",
+            target.display()
+        ));
+    }
+
+    Ok(canonical_target.join(target.file_name().unwrap_or_default()))
 }
 
 fn main() {
@@ -145,7 +173,7 @@ fn main() {
         }
     };
 
-    let output_path: PathBuf = if !raw_target.is_empty() && !Path::new(&raw_target).is_dir() && raw_target.ends_with(".md") {
+    let initial_output_path: PathBuf = if !raw_target.is_empty() && !Path::new(&raw_target).is_dir() && raw_target.ends_with(".md") {
         PathBuf::from(&raw_target)
     } else if !raw_target.is_empty() && Path::new(&raw_target).is_dir() {
         Path::new(&raw_target).join(&stats.suggested_filename)
@@ -153,19 +181,11 @@ fn main() {
         PathBuf::from(&stats.suggested_filename)
     };
 
-    if let Err(err_msg) = validate_output_path(&output_path) {
-        eprintln!("{}", err_msg);
-        process::exit(1);
-    }
-
-    let abs_output_path = match std::fs::canonicalize(&output_path) {
+    let abs_output_path = match validate_output_path_allowlist(&initial_output_path, &transcript_path) {
         Ok(p) => p,
-        Err(_) => {
-            if let Ok(curr) = env::current_dir() {
-                curr.join(&output_path)
-            } else {
-                output_path.clone()
-            }
+        Err(err_msg) => {
+            eprintln!("{}", err_msg);
+            process::exit(1);
         }
     };
 

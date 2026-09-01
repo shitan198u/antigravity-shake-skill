@@ -20,7 +20,8 @@ pub fn generate_topic_slug(first_user_text: &str) -> String {
 
     let stop_words: HashSet<&'static str> = [
         "please", "want", "also", "this", "that", "with", "from", "have", "need",
-        "make", "check", "the", "and", "for", "you", "are", "how", "what", "why"
+        "make", "check", "the", "and", "for", "you", "are", "how", "what", "why",
+        "code", "file", "error", "output", "script", "test", "run", "help"
     ].into_iter().collect();
 
     let words: Vec<String> = clean

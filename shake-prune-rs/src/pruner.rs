@@ -120,7 +120,7 @@ fn compact_tool_call_args(
 }
 
 /// Compacts a JSONL file in-place while PRESERVING the exact same filesystem Inode
-/// and holding an exclusive file lock to eliminate cross-process write race conditions.
+/// and holding an exclusive file lock BEFORE creating backups to eliminate torn writes.
 /// Returns (bytes_before, bytes_after, backup_abs_path).
 pub fn compact_single_jsonl_file(
     target_path: &Path,
@@ -133,7 +133,11 @@ pub fn compact_single_jsonl_file(
 
     let abs_target = fs::canonicalize(target_path).unwrap_or_else(|_| target_path.to_path_buf());
 
-    // 1. Create a timestamped backup first
+    // 1. Open the file in Read+Write mode and ACQUIRE EXCLUSIVE LOCK FIRST
+    let mut file = File::options().read(true).write(true).open(&abs_target)?;
+    file.lock_exclusive()?;
+
+    // 2. Safely create timestamped backup while holding exclusive lock (prevents torn writes)
     let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
     let backup_timestamped = abs_target.with_extension(format!("jsonl.bak_{}", timestamp));
     let backup_latest = abs_target.with_extension("jsonl.bak");
@@ -141,10 +145,6 @@ pub fn compact_single_jsonl_file(
     let _ = fs::copy(&abs_target, &backup_latest);
 
     let backup_abs_str = backup_timestamped.to_string_lossy().to_string();
-
-    // 2. Open the file in Read+Write mode and acquire an exclusive file lock
-    let mut file = File::options().read(true).write(true).open(&abs_target)?;
-    file.lock_exclusive()?;
 
     // Read and count steps + assistant turns
     let mut lines_buffer: Vec<String> = Vec::new();
@@ -405,7 +405,6 @@ pub fn prune_transcript(
 
                 if !assistant_text.is_empty() || !thinking_text.is_empty() {
                     let mut assistant_block = String::from("### 🤖 Assistant\n\n");
-                    // Show thoughts if thought window is disabled OR if this assistant turn is within the recent window
                     let show_thoughts = thought_window_turns.is_none() || assistant_count > thought_threshold;
 
                     if show_thoughts && !thinking_text.is_empty() {

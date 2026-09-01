@@ -25,15 +25,28 @@ struct HookPayload {
     artifact_directory_path: Option<String>,
 }
 
-/// Validates that a directory path is a trusted system-managed storage location
-/// (e.g. under ~/.gemini or containing a brain directory) to prevent context poisoning from project repos.
+/// Strictly validates that a directory path is within the user's system-managed ~/.gemini directory
+/// to completely prevent context poisoning from arbitrary workspace git repositories.
 fn is_trusted_storage_path(p: &Path) -> bool {
-    let p_str = p.to_string_lossy();
-    p_str.contains(".gemini") || p_str.contains("brain/") || p_str.contains("brain\\")
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default();
+    if home.is_empty() {
+        return false;
+    }
+    let trusted_gemini = Path::new(&home).join(".gemini");
+    
+    if let Ok(canonical) = p.canonicalize() {
+        if let Ok(trusted_canonical) = trusted_gemini.canonicalize() {
+            return canonical.starts_with(trusted_canonical);
+        }
+        return canonical.starts_with(&trusted_gemini);
+    }
+    p.starts_with(&trusted_gemini)
 }
 
 pub fn handle_hook() {
-    // Panic-safe & Error-safe fail-open guarantee: always outputs valid JSON with exit 0
+    // True Panic-Safe Fail-Open: catch_unwind active with unwind panic strategy
     let result = panic::catch_unwind(|| {
         if let Err(_) = run_hook_safely() {
             println!("{{}}");
@@ -103,7 +116,7 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
                 for base in &base_dirs {
                     let conv_dir = h.join(base).join(conv_id);
                     let t_path = conv_dir.join(".system_generated/logs/transcript.jsonl");
-                    if t_path.exists() {
+                    if t_path.exists() && is_trusted_storage_path(&t_path) {
                         resolved_transcript = Some(t_path);
                         resolved_art_dir = Some(conv_dir);
                         break;
