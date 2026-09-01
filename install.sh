@@ -49,15 +49,26 @@ if [ -f "${PREBUILT_BIN}" ] && "${PREBUILT_BIN}" --help >/dev/null 2>&1; then
     BINARY_INSTALLED=true
 fi
 
-# If on macOS and local binary failed (likely Linux binary), try downloading macOS universal binary from GitHub Releases
-OS_NAME="$(uname -s)"
-if [ "${BINARY_INSTALLED}" = false ] && [ "${OS_NAME}" = "Darwin" ]; then
-    echo "• macOS detected. Fetching universal precompiled release binary from GitHub..."
-    MAC_BIN_URL="${REPO_URL}/releases/latest/download/shake-prune-macos-universal"
-    if curl -sLf "${MAC_BIN_URL}" -o "${TARGET_BIN_DIR}/shake-prune" 2>/dev/null && chmod +x "${TARGET_BIN_DIR}/shake-prune" && "${TARGET_BIN_DIR}/shake-prune" --help >/dev/null 2>&1; then
-        cp "${TARGET_BIN_DIR}/shake-prune" "${TARGET_SKILL_DIR}/bin/shake-prune"
-        echo "• Installed macOS universal binary from release to: ${TARGET_BIN_DIR}/shake-prune"
-        BINARY_INSTALLED=true
+# If local binary is missing or incompatible, download from GitHub Releases
+if [ "${BINARY_INSTALLED}" = false ]; then
+    OS_NAME="$(uname -s)"
+    ARCH_NAME="$(uname -m)"
+    ASSET_NAME=""
+
+    if [ "${OS_NAME}" = "Darwin" ]; then
+        ASSET_NAME="shake-prune-macos-universal"
+    elif [ "${OS_NAME}" = "Linux" ] && [ "${ARCH_NAME}" = "x86_64" ]; then
+        ASSET_NAME="shake-prune-linux-x86_64"
+    fi
+
+    if [ -n "${ASSET_NAME}" ]; then
+        echo "• Fetching precompiled release binary (${ASSET_NAME}) from GitHub Releases..."
+        DOWNLOAD_URL="${REPO_URL}/releases/latest/download/${ASSET_NAME}"
+        if curl -sLf "${DOWNLOAD_URL}" -o "${TARGET_BIN_DIR}/shake-prune" 2>/dev/null && chmod +x "${TARGET_BIN_DIR}/shake-prune" && "${TARGET_BIN_DIR}/shake-prune" --help >/dev/null 2>&1; then
+            cp "${TARGET_BIN_DIR}/shake-prune" "${TARGET_SKILL_DIR}/bin/shake-prune"
+            echo "• Installed precompiled release binary to: ${TARGET_BIN_DIR}/shake-prune"
+            BINARY_INSTALLED=true
+        fi
     fi
 fi
 
