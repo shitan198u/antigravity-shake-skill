@@ -16,6 +16,11 @@ fn safe_truncate(s: &str, max_chars: usize) -> String {
     s.chars().take(max_chars).collect()
 }
 
+/// Escapes triple backticks to prevent premature Markdown block termination and UI injection.
+fn sanitize_markdown_snippet(s: &str) -> String {
+    s.replace("```", "` ` `")
+}
+
 /// Safely quotes a file path for POSIX shell output to prevent command injection.
 pub fn shell_quote(path_str: &str) -> String {
     format!("'{}'", path_str.replace('\'', "'\\''"))
@@ -358,11 +363,11 @@ pub fn prune_transcript(
 
                 if is_recent {
                     retained_recent_steps += 1;
-                    let snippet = safe_truncate(content, 1500);
+                    let snippet = sanitize_markdown_snippet(&safe_truncate(content, 1500));
                     output_blocks.push(format!("> 🕒 **[Active Window Tool Output ({})]**:\n```\n{}\n```\n", stype, snippet));
                 } else if is_error {
                     retained_errors_count += 1;
-                    let snippet = safe_truncate(content, 1200);
+                    let snippet = sanitize_markdown_snippet(&safe_truncate(content, 1200));
                     output_blocks.push(format!(
                         "> ⚠️ **[Tool Execution Error / Failure ({}, Exit code: {:?})]**:\n```\n{}\n```\n",
                         stype, exit_code, snippet
@@ -370,7 +375,8 @@ pub fn prune_transcript(
                 } else if stype == "RUN_COMMAND" {
                     if content.trim().chars().count() < 250 {
                         retained_short_cmds += 1;
-                        output_blocks.push(format!("> 📋 **[Command Output (exit 0)]**:\n```\n{}\n```\n", content.trim()));
+                        let safe_cmd = sanitize_markdown_snippet(content.trim());
+                        output_blocks.push(format!("> 📋 **[Command Output (exit 0)]**:\n```\n{}\n```\n", safe_cmd));
                     } else {
                         let line_count = content.lines().count();
                         pruned_tools_count += 1;

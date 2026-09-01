@@ -52,11 +52,18 @@ if (-not $InstalledBinary) {
         Invoke-WebRequest -Uri "$BaseReleaseUrl/SHA256SUMS.txt" -OutFile $TempSums -UseBasicParsing
 
         Write-Host "• Verifying SHA256 integrity checksum..."
-        $SumsContent = Get-Content $TempSums
-        $ExpectedHash = ($SumsContent | Select-String $DownloadFile).ToString().Split(" ")[0].Trim().ToLower()
+        $SumsLines = Get-Content $TempSums
+        $ExpectedHash = ""
+        foreach ($line in $SumsLines) {
+            if ($line -match "^([a-fA-F0-9]{64})\s+(\*)?shake-prune-windows-x86_64\.exe$") {
+                $ExpectedHash = $Matches[1].ToLower()
+                break
+            }
+        }
+
         $ActualHash = (Get-FileHash $TempExe -Algorithm SHA256).Hash.ToLower()
 
-        if ($ExpectedHash -eq $ActualHash) {
+        if ($ExpectedHash -and ($ExpectedHash -eq $ActualHash)) {
             Write-Host "  ✓ SHA256 checksum verified: $ActualHash" -ForegroundColor Green
             Copy-Item $TempExe $TargetExe -Force
             Copy-Item $TempExe (Join-Path $GlobalSkillsDir "bin\shake-prune.exe") -Force

@@ -5,6 +5,12 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
 
+fn get_secure_tmp_path(target: &Path) -> std::path::PathBuf {
+    let pid = std::process::id();
+    let nanos = Utc::now().timestamp_nanos_opt().unwrap_or(0);
+    target.with_extension(format!("{}.{}.tmp", pid, nanos))
+}
+
 pub fn write_artifact_metadata(markdown_path: &Path, summary: &str) -> std::io::Result<()> {
     let filename_str = markdown_path.file_name().unwrap_or_default().to_string_lossy();
     let meta_filename = format!("{}.metadata.json", filename_str);
@@ -12,7 +18,7 @@ pub fn write_artifact_metadata(markdown_path: &Path, summary: &str) -> std::io::
         Some(p) => p.join(meta_filename),
         None => Path::new(&meta_filename).to_path_buf(),
     };
-    let tmp_path = meta_path.with_extension("tmp");
+    let tmp_path = get_secure_tmp_path(&meta_path);
     let now_iso = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
 
     let meta_data = json!({
@@ -36,7 +42,7 @@ pub fn write_artifact_metadata(markdown_path: &Path, summary: &str) -> std::io::
 pub fn write_active_anchor(markdown_path: &Path, stats: &PruningStats) -> std::io::Result<()> {
     if let Some(parent_dir) = markdown_path.parent() {
         let anchor_path = parent_dir.join("active_shake_anchor.json");
-        let tmp_path = parent_dir.join("active_shake_anchor.json.tmp");
+        let tmp_path = get_secure_tmp_path(&anchor_path);
         let now_iso = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
 
         let t_size = parent_dir.join(".system_generated/logs/transcript.jsonl")
