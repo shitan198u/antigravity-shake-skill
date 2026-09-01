@@ -21,14 +21,14 @@ pub fn shell_quote(path_str: &str) -> String {
     format!("'{}'", path_str.replace('\'', "'\\''"))
 }
 
-/// Compacts large tool call arguments into progressive disclosure receipts.
-/// Preserves TargetFile, Description, Step Index, and links to the timestamped raw archive
+/// Compacts large tool call arguments into progressive disclosure receipts with FULL ABSOLUTE PATHS.
+/// Preserves TargetFile, Description, Step Index, and absolute link to the timestamped raw archive
 /// so the LLM can inspect exact historical code diffs on-demand via view_file if code ever breaks.
 fn compact_tool_call_args(
     tool_name: &str,
     args_map: &mut serde_json::Map<String, Value>,
     step_idx: u64,
-    backup_file_name: &str,
+    backup_abs_path: &str,
 ) {
     match tool_name {
         "write_to_file" => {
@@ -39,7 +39,7 @@ fn compact_tool_call_args(
                         "CodeContent".to_string(),
                         Value::String(format!(
                             "[File written to disk ({} lines). Step {} full payload archived in {}. Inspect via view_file if needed]",
-                            line_count, step_idx, backup_file_name
+                            line_count, step_idx, backup_abs_path
                         )),
                     );
                 }
@@ -52,7 +52,7 @@ fn compact_tool_call_args(
                         "ReplacementContent".to_string(),
                         Value::String(format!(
                             "[Code replacement applied. Step {} diff archived in {}. Inspect via view_file if needed]",
-                            step_idx, backup_file_name
+                            step_idx, backup_abs_path
                         )),
                     );
                 }
@@ -74,7 +74,7 @@ fn compact_tool_call_args(
                             if rc.len() > 100 {
                                 chunk_map.insert(
                                     "ReplacementContent".to_string(),
-                                    Value::String(format!("[Replacement chunk applied. Step {} archived in {}]", step_idx, backup_file_name)),
+                                    Value::String(format!("[Replacement chunk applied. Step {} archived in {}]", step_idx, backup_abs_path)),
                                 );
                             }
                         }
@@ -102,17 +102,19 @@ fn compact_single_jsonl_file(
         return Ok((0, 0));
     }
 
+    let abs_target = fs::canonicalize(target_path).unwrap_or_else(|_| target_path.to_path_buf());
+
     // 1. Create a timestamped backup first (never overwrite prior backups)
     let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
-    let backup_timestamped = target_path.with_extension(format!("jsonl.bak_{}", timestamp));
-    let backup_latest = target_path.with_extension("jsonl.bak");
-    let _ = fs::copy(target_path, &backup_timestamped);
-    let _ = fs::copy(target_path, &backup_latest);
+    let backup_timestamped = abs_target.with_extension(format!("jsonl.bak_{}", timestamp));
+    let backup_latest = abs_target.with_extension("jsonl.bak");
+    let _ = fs::copy(&abs_target, &backup_timestamped);
+    let _ = fs::copy(&abs_target, &backup_latest);
 
-    let backup_file_name = backup_timestamped.file_name().unwrap_or_default().to_string_lossy().to_string();
+    let backup_abs_str = backup_timestamped.to_string_lossy().to_string();
 
     // 2. Open the file in Read+Write mode (preserves original inode on disk)
-    let mut file = File::options().read(true).write(true).open(target_path)?;
+    let mut file = File::options().read(true).write(true).open(&abs_target)?;
 
     // Pass 1: Read and count steps
     let mut lines_buffer: Vec<String> = Vec::new();
@@ -156,13 +158,13 @@ fn compact_single_jsonl_file(
             || status.contains("failed");
 
         if !is_recent {
-            // Progressive Disclosure: Compact large code payloads with step index & archive backlink
+            // Progressive Disclosure: Compact large code payloads with step index & FULL ABSOLUTE PATH archive backlink
             if stype == "PLANNER_RESPONSE" {
                 if let Some(tool_calls) = step_val.get_mut("tool_calls").and_then(|v| v.as_array_mut()) {
                     for tc in tool_calls {
                         let name = tc.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
                         if let Some(args_map) = tc.get_mut("args").and_then(|v| v.as_object_mut()) {
-                            compact_tool_call_args(&name, args_map, step_idx, &backup_file_name);
+                            compact_tool_call_args(&name, args_map, step_idx, &backup_abs_str);
                         }
                     }
                 }
@@ -175,20 +177,20 @@ fn compact_single_jsonl_file(
                         if content_len > 250 {
                             step_val["content"] = serde_json::json!(format!(
                                 "Command completed successfully (exit 0). Step {} stdout archived in {}.",
-                                step_idx, backup_file_name
+                                step_idx, backup_abs_str
                             ));
                         }
                     }
                     "VIEW_FILE" => {
                         step_val["content"] = serde_json::json!(format!(
                             "File inspected in previous turn. Step {} content archived in {}.",
-                            step_idx, backup_file_name
+                            step_idx, backup_abs_str
                         ));
                     }
                     "SEARCH_WEB" | "GREP_SEARCH" | "CODE_ACTION" => {
                         step_val["content"] = serde_json::json!(format!(
                             "{} completed successfully. Step {} output archived in {}.",
-                            stype, step_idx, backup_file_name
+                            stype, step_idx, backup_abs_str
                         ));
                     }
                     _ => {}
@@ -408,7 +410,8 @@ pub fn prune_transcript(
         > - Actions marked `[Command completed successfully]` or `[File inspected]` were already executed with success.\n\
         > - You do **NOT** need to re-run past successful commands unless the user explicitly requests it.\n\
         > - Any errors or failures encountered in past turns are explicitly preserved below with full stack traces.\n\
-        > - The active working state and immediate recent tool outputs are preserved at the end of the transcript.\n\n\
+        > - The active working state and immediate recent tool outputs are preserved at the end of the transcript.\n\
+        > - If exact historical diffs or raw outputs are ever required, inspect the timestamped `.bak` log on disk.\n\n\
         - **Session ID**: `{}`\n\
         - **Topic**: `{}`\n\
         - **Source Transcript**: `{}`\n\
