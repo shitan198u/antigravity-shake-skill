@@ -1,17 +1,17 @@
-# 🧠 Deep Dive: How `/shake` Works, In-Place Compaction & Context Mechanics
+# 🧠 Deep Dive: How `/shake` Works, Inode-Preserving Compaction & Context Mechanics
 
-This document provides a comprehensive, technical explanation of what happens under the hood when `/shake` is executed, how `transcript.jsonl` is physically compacted on disk, and how the AI interacts with the compacted history.
+This document provides a comprehensive, technical explanation of what happens under the hood when `/shake` is executed, how `transcript.jsonl` is physically compacted on disk without breaking open file handles, and how the AI interacts with the compacted history.
 
 ---
 
 ## ⚡ Physical In-Place Compaction in the Same Chat Window
 
-When `/shake` runs, it executes **Safe Physical In-Place JSONL Compaction** directly on the active session's `transcript.jsonl`:
+When `/shake` runs, it executes **Safe Inode-Preserving In-Place JSONL Compaction** directly on the active session's `transcript.jsonl`:
 
 ```
                                   BEFORE /shake
          ┌─────────────────────────────────────────────────────────────┐
-         │ transcript.jsonl (2.7 MB on disk)                           │
+         │ transcript.jsonl (2.7 MB on disk, Inode: 4698)              │
          │  • Turn 1: User prompt                                      │
          │  • Turn 2: RUN_COMMAND (5,000 lines npm/cmake stdout)       │ ◄── BLOAT
          │  • Turn 3: VIEW_FILE (2,000 lines source code)             │ ◄── BLOAT
@@ -24,8 +24,8 @@ When `/shake` runs, it executes **Safe Physical In-Place JSONL Compaction** dire
                                         ▼
                                   AFTER /shake
          ┌─────────────────────────────────────────────────────────────┐
-         │ transcript.jsonl.bak (Full raw backup created)              │
-         │ transcript.jsonl (380 KB on disk — JSONL structure valid)   │
+         │ transcript.jsonl.bak_20260901_235144 (Timestamped backup)   │
+         │ transcript.jsonl (380 KB on disk, Inode: 4698 [SAME INODE]) │
          │  • Turn 1: User prompt (100% verbatim)                      │
          │  • Turn 2: RUN_COMMAND (exit 0: "Command completed...")     │ ◄── COMPACT
          │  • Turn 3: VIEW_FILE ("File inspected...")                  │ ◄── COMPACT
@@ -35,23 +35,27 @@ When `/shake` runs, it executes **Safe Physical In-Place JSONL Compaction** dire
                                         │
                                         ▼
                        Next Turn in the EXACT SAME TAB
-         Antigravity reads the compacted transcript.jsonl from disk.
+         Antigravity's active file descriptor continues writing seamlessly.
          Model API payload physically drops from 2.7 MB ➔ 380 KB (85%+ saved)!
 ```
 
 ---
 
-## 🛡️ Why In-Place Compaction Is 100% Safe
+## 🛡️ The "Inode Swap" Solution & File Descriptor Safety
 
-1. **Strict Schema Preservation**:
-   - Every line in `transcript.jsonl` remains a valid JSON object matching Antigravity's exact schema (`step_index`, `type`, `content`, `status`, `thinking`, `tool_calls`).
-   - The sequence of steps and line indices remain completely intact.
-2. **Automatic Raw Backup (`transcript.jsonl.bak`)**:
-   - Before any bytes are modified, the full, unpruned original is copied to `transcript.jsonl.bak`.
-3. **Atomic File Swapping**:
-   - Compaction writes to `transcript.jsonl.tmp` and uses atomic filesystem rename (`os.replace` / `fs::rename`), eliminating any risk of partial writes or corruption.
-4. **Zero Tab Switching Required**:
-   - You stay in the same window. Because the IDE reads `transcript.jsonl` from disk on each invocation, your next prompt transmits **80%–90% fewer tokens over the wire**.
+### Why Atomic Rename Fails on Active Logs (POSIX Inode Traps)
+In Unix-like systems (Linux & macOS), when a process like Antigravity opens a file for appending (`O_WRONLY | O_APPEND`), the operating system binds the file descriptor to the **filesystem Inode**, not the file path string.
+* If a tool uses `fs::rename` or `os.replace` to swap a `.tmp` file over the original, the directory entry points to a new Inode, but the IDE’s open file descriptor remains attached to the *unlinked old Inode*.
+* **The Result**: Subsequent turns written by the IDE would be appended to the unlinked file, causing silent data loss on disk.
+
+### How `/shake` Preserves the Inode (Truncate-and-Rewrite)
+1. **Timestamped Backup**: Copies the file to `transcript.jsonl.bak_YYYYMMDD_HHMMSS` before any modification.
+2. **Open Existing Inode in Read+Write Mode**: Opens the active file path with read and write permissions.
+3. **In-Memory Transformation**: Compiles the noise-reduced stream.
+4. **In-Place Truncation (`file.set_len(0)` / `truncate(0)`)**: Truncates the file to 0 bytes and rewinds to offset 0 on the **exact same open file descriptor**.
+5. **Flush & Sync**: Writes the compacted JSONL lines and flushes to disk.
+
+👉 **The Inode number never changes**. Antigravity IDE continues appending subsequent turns to the compacted file with zero desync or data loss.
 
 ---
 
@@ -72,10 +76,6 @@ When `/shake` runs, it executes **Safe Physical In-Place JSONL Compaction** dire
 
 > **No. There is zero vector chunking, lossy embedding search, or top-k retrieval.**
 
-### Why Developers Worry About "Passing `.md` Files"
-In generic LLM tools, attaching large documents triggers vector chunking where 90% of the document is left out.
-
-### How Antigravity Handles `/shake` Transcripts
-1. **Direct In-Place Ingestion**: The compacted `transcript.jsonl` contains the full conversation history with noise removed.
-2. **Direct Markdown Injection**: If referencing `@shake_topic.md` in a fresh window, the entire file is injected verbatim.
-3. **Guaranteed Context Fit**: A pruned session is **15,000 – 40,000 tokens**, fitting easily into Gemini’s **1M+ token window** with 100% full-text visibility.
+* **Direct In-Place Ingestion**: The compacted `transcript.jsonl` contains the full conversation history with noise removed.
+* **Direct Markdown Injection**: If referencing `@shake_topic.md` in a fresh window, the entire file is injected verbatim.
+* **Guaranteed Context Fit**: A pruned session is **15,000 – 40,000 tokens**, fitting easily into Gemini’s **1M+ token window** with 100% full-text visibility.
