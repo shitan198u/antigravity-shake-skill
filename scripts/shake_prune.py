@@ -1,14 +1,7 @@
 #!/usr/bin/env python3
 """
 Smart Deterministic Transcript Pruner for Antigravity Agent (/shake).
-Implements signal-preserving, zero-loss context pruning:
-- 100% verbatim User prompts, Assistant reasoning, and Thought processes
-- Preserves internal thinking blocks inside collapsible details
-- Preserves all error messages, non-zero exits, and stack traces
-- Preserves recent working window (last N tool steps)
-- Preserves short command outputs (<250 chars)
-- Prunes verbose successful file dumps, compiler dumps, and grep traces
-- Automatically registers IDE Artifact (.metadata.json) & In-Window Anchor (active_shake_anchor.json)
+Implements signal-preserving, zero-loss context pruning with clean in-window report.
 """
 
 import sys
@@ -20,6 +13,14 @@ from pathlib import Path
 
 def estimate_tokens(text: str) -> int:
     return max(1, len(text) // 4)
+
+def format_bytes(bytes_count: int) -> str:
+    if bytes_count >= 1024 * 1024:
+        return f"{bytes_count / (1024 * 1024):.1f} MB"
+    elif bytes_count >= 1024:
+        return f"{bytes_count / 1024:.1f} KB"
+    else:
+        return f"{bytes_count} B"
 
 def generate_topic_slug(first_user_text: str) -> str:
     clean = re.sub(r"<[^>]+>", " ", first_user_text)
@@ -229,7 +230,7 @@ def main():
     summary_text = (
         f"Shaken & pruned verbatim history for topic '{stats['topic_slug'].replace('_', ' ')}'. "
         f"Saved {stats['reduction_pct']:.1f}% context tokens ({stats['pruned_tokens']:,} tokens vs {stats['raw_tokens']:,} raw). "
-        f"Preserved {stats['user_turns']} user prompts and all reasoning."
+        f"Preserved {stats['user_turns']} user prompts, all reasoning, and thoughts."
     )
     try:
         write_artifact_metadata(abs_output_path, summary_text)
@@ -237,24 +238,30 @@ def main():
     except Exception as e:
         pass
 
-    print(f"\n================================================================================")
-    print(f"               ⚡ SHAKE CONTEXT PRUNING REPORT ⚡")
-    print(f"================================================================================")
-    print(f"• Session ID:           {stats['conv_id']}")
-    print(f"• Topic:                {stats['topic_slug'].replace('_', ' ').title()}")
-    print(f"• Original Payload:     {stats['raw_bytes']:,} bytes (~{stats['raw_tokens']:,} tokens)")
-    print(f"• Pruned Payload:       {stats['pruned_bytes']:,} bytes (~{stats['pruned_tokens']:,} tokens)")
-    print(f"• Token Savings:        {stats['reduction_pct']:.1f}% reduction")
-    print(f"• Preserved Signals:    {stats['user_turns']} user turns (100%), {stats['assistant_turns']} assistant turns (100%), {stats['retained_errors']} errors")
-    print(f"--------------------------------------------------------------------------------")
-    print(f"📋 RESUMPTION PATHS & QUICK-COPY")
-    print(f"--------------------------------------------------------------------------------")
-    print(f"• In-Window Continuity: 🟢 ACTIVE (Next message in this tab will use clean context)")
-    print(f"• Absolute File Path:   {abs_output_path}")
-    print(f"• In-Chat Mention:      @{abs_output_path}")
-    print(f"• Copy to Project:      cp \"{abs_output_path}\" ./")
-    print(f"• Copy to Clipboard:    xclip -sel clip < \"{abs_output_path}\" || wl-copy < \"{abs_output_path}\"")
-    print(f"================================================================================\n")
+    raw_formatted = format_bytes(stats["raw_bytes"])
+    pruned_formatted = format_bytes(stats["pruned_bytes"])
+    tokens_saved = max(0, stats["raw_tokens"] - stats["pruned_tokens"])
+
+    print(f"\n# ⚡ Context Compaction & Tree-Shaking Report\n")
+    print(f"Context for this session has been compacted and anchored in this chat window.")
+    print(f"All **User prompts, Assistant reasoning, Thoughts, and Error signals are 100% preserved verbatim**.\n")
+    print(f"---\n")
+    print(f"### 📊 Token Reduction Metrics\n")
+    print(f"| Metric | Original | Pruned | Savings |")
+    print(f"| :--- | :--- | :--- | :--- |")
+    print(f"| **Payload Size** | `{raw_formatted}` | `{pruned_formatted}` | **{stats['reduction_pct']:.1f}% reduction** |")
+    print(f"| **Estimated Tokens** | `~{stats['raw_tokens']:,}` | `~{stats['pruned_tokens']:,}` | **~{tokens_saved:,} tokens saved** |")
+    print(f"| **Preserved Signals** | {stats['user_turns']} User turns (100%) | {stats['assistant_turns']} Assistant turns (100%) | {stats['retained_errors']} Error traces (100%) |\n")
+    print(f"---\n")
+    print(f"### 🟢 In-Window Continuity Active")
+    print(f"> **Ready to continue**: Your context memory is now pinned to the clean state. Simply type your next prompt and press **Send** in this chat.\n")
+    print(f"- **Interactive Artifact**: [📄 {suggested_name}](file://{abs_output_path}) *(Click to preview in side pane)*\n")
+    print(f"<details>")
+    print(f"<summary>📋 Need to export or copy this session elsewhere?</summary>\n")
+    print(f"- **In-Chat Mention**: `@{abs_output_path}`")
+    print(f"- **Copy to Project**: `cp \"{abs_output_path}\" ./`")
+    print(f"- **Copy to Clipboard**: `xclip -sel clip < \"{abs_output_path}\" || wl-copy < \"{abs_output_path}\"`")
+    print(f"</details>\n")
 
 if __name__ == "__main__":
     main()

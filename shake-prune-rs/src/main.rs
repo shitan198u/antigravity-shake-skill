@@ -22,6 +22,16 @@ fn print_usage() {
     println!("  shake-prune /path/to/transcript.jsonl /path/to/custom_name.md --recent-window 8");
 }
 
+fn format_bytes(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 || args[1] == "--help" || args[1] == "-h" || args[1] == "help" {
@@ -93,26 +103,28 @@ fn main() {
     let _ = write_active_anchor(&abs_output_path, &stats);
 
     let abs_str = abs_output_path.display().to_string();
+    let raw_formatted = format_bytes(stats.raw_bytes);
+    let pruned_formatted = format_bytes(stats.pruned_bytes);
+    let tokens_saved = stats.raw_tokens.saturating_sub(stats.pruned_tokens);
 
-    println!("\n================================================================================");
-    println!("               ⚡ SHAKE CONTEXT PRUNING REPORT (RUST NATIVE) ⚡");
-    println!("================================================================================");
-    println!("• Session ID:       {}", stats.conv_id);
-    println!("• Topic:            {}", stats.topic_slug.replace('_', " ").to_uppercase());
-    println!("• Original Payload: {} bytes (~{} tokens)", stats.raw_bytes, stats.raw_tokens);
-    println!("• Pruned Payload:   {} bytes (~{} tokens)", stats.pruned_bytes, stats.pruned_tokens);
-    println!("• Token Savings:    {:.1}% reduction", stats.reduction_pct);
-    println!(
-        "• Preserved Signals: {} user turns (100%), {} assistant turns (100%), {} errors",
-        stats.user_turns, stats.assistant_turns, stats.retained_errors
-    );
-    println!("--------------------------------------------------------------------------------");
-    println!("📋 RESUMPTION PATHS & QUICK-COPY");
-    println!("--------------------------------------------------------------------------------");
-    println!("• In-Window Continuity: 🟢 ACTIVE (Next message in this tab will use clean context)");
-    println!("• Absolute File Path:   {}", abs_str);
-    println!("• In-Chat Mention:      @{}", abs_str);
-    println!("• Copy to Project:      cp \"{}\" ./", abs_str);
-    println!("• Copy to Clipboard:    xclip -sel clip < \"{}\" || wl-copy < \"{}\"", abs_str, abs_str);
-    println!("================================================================================\n");
+    println!("\n# ⚡ Context Compaction & Tree-Shaking Report\n");
+    println!("Context for this session has been compacted and anchored in this chat window.");
+    println!("All **User prompts, Assistant reasoning, Thoughts, and Error signals are 100% preserved verbatim**.\n");
+    println!("---\n");
+    println!("### 📊 Token Reduction Metrics\n");
+    println!("| Metric | Original | Pruned | Savings |");
+    println!("| :--- | :--- | :--- | :--- |");
+    println!("| **Payload Size** | `{}` | `{}` | **{:.1}% reduction** |", raw_formatted, pruned_formatted, stats.reduction_pct);
+    println!("| **Estimated Tokens** | `~{}` | `~{}` | **~{} tokens saved** |", stats.raw_tokens, stats.pruned_tokens, tokens_saved);
+    println!("| **Preserved Signals** | {} User turns (100%) | {} Assistant turns (100%) | {} Error traces (100%) |\n", stats.user_turns, stats.assistant_turns, stats.retained_errors);
+    println!("---\n");
+    println!("### 🟢 In-Window Continuity Active");
+    println!("> **Ready to continue**: Your context memory is now pinned to the clean state. Simply type your next prompt and press **Send** in this chat.\n");
+    println!("- **Interactive Artifact**: [📄 {}](file://{}) *(Click to preview in side pane)*\n", stats.suggested_filename, abs_str);
+    println!("<details>");
+    println!("<summary>📋 Need to export or copy this session elsewhere?</summary>\n");
+    println!("- **In-Chat Mention**: `@{}`", abs_str);
+    println!("- **Copy to Project**: `cp \"{}\" ./`", abs_str);
+    println!("- **Copy to Clipboard**: `xclip -sel clip < \"{}\" || wl-copy < \"{}\"`", abs_str, abs_str);
+    println!("</details>\n");
 }
