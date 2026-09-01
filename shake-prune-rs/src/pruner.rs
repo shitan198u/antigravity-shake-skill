@@ -1,9 +1,10 @@
 use crate::models::{PruningStats, Step};
 use crate::slug::{extract_conversation_id, generate_suggested_filename, generate_topic_slug};
+use chrono::Local;
 use regex::Regex;
 use serde_json::Value;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::Path;
 
 pub fn estimate_tokens(byte_count: usize) -> usize {
@@ -14,6 +15,14 @@ fn safe_truncate(s: &str, max_chars: usize) -> String {
     s.chars().take(max_chars).collect()
 }
 
+/// Safely quotes a file path for POSIX shell output to prevent command injection.
+pub fn shell_quote(path_str: &str) -> String {
+    format!("'{}'", path_str.replace('\'', "'\\''"))
+}
+
+/// Compacts a JSONL file in-place while PRESERVING the exact same filesystem Inode.
+/// Uses truncate-and-rewrite on the existing open file handle so Antigravity IDE's
+/// active append file descriptors are never orphaned or desynced.
 fn compact_single_jsonl_file(
     target_path: &Path,
     recent_window_steps: usize,
@@ -22,46 +31,43 @@ fn compact_single_jsonl_file(
         return Ok((0, 0));
     }
 
-    // 1. Pass 1: Count total steps
-    let file_pass1 = File::open(target_path)?;
-    let reader_pass1 = BufReader::new(file_pass1);
-    let mut total_steps = 0usize;
-    let mut initial_bytes = 0usize;
+    // 1. Create a timestamped backup first (never overwrite prior backups)
+    let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let backup_timestamped = target_path.with_extension(format!("jsonl.bak_{}", timestamp));
+    let backup_latest = target_path.with_extension("jsonl.bak");
+    let _ = fs::copy(target_path, &backup_timestamped);
+    let _ = fs::copy(target_path, &backup_latest);
 
-    for line in reader_pass1.lines() {
-        let line_str = line?;
-        if line_str.trim().is_empty() {
-            continue;
+    // 2. Open the file in Read+Write mode (preserves original inode on disk)
+    let mut file = File::options().read(true).write(true).open(target_path)?;
+
+    // Pass 1: Read and count steps
+    let mut lines_buffer: Vec<String> = Vec::new();
+    let mut initial_bytes = 0usize;
+    {
+        let reader = BufReader::new(&file);
+        for line in reader.lines() {
+            let line_str = line?;
+            if line_str.trim().is_empty() {
+                continue;
+            }
+            initial_bytes += line_str.len();
+            lines_buffer.push(line_str);
         }
-        initial_bytes += line_str.len();
-        total_steps += 1;
     }
 
+    let total_steps = lines_buffer.len();
     let recent_threshold = total_steps.saturating_sub(recent_window_steps);
 
-    // 2. Backup target.jsonl -> target.jsonl.bak
-    let backup_path = target_path.with_extension("jsonl.bak");
-    let _ = fs::copy(target_path, &backup_path);
+    // Pass 2: Compact lines in memory
+    let mut compacted_output = String::with_capacity(initial_bytes / 2);
 
-    // 3. Pass 2: Stream, compact tool outputs, and write atomically to .tmp
-    let file_pass2 = File::open(target_path)?;
-    let reader_pass2 = BufReader::new(file_pass2);
-    let tmp_path = target_path.with_extension("jsonl.tmp");
-    let mut tmp_file = File::create(&tmp_path)?;
-
-    let mut compacted_bytes = 0usize;
-
-    for (i, line) in reader_pass2.lines().enumerate() {
-        let line_str = line?;
-        if line_str.trim().is_empty() {
-            continue;
-        }
-
+    for (i, line_str) in lines_buffer.into_iter().enumerate() {
         let mut step_val: Value = match serde_json::from_str(&line_str) {
             Ok(v) => v,
             Err(_) => {
-                writeln!(tmp_file, "{}", line_str)?;
-                compacted_bytes += line_str.len();
+                compacted_output.push_str(&line_str);
+                compacted_output.push('\n');
                 continue;
             }
         };
@@ -94,18 +100,23 @@ fn compact_single_jsonl_file(
         }
 
         let compacted_line = serde_json::to_string(&step_val)?;
-        compacted_bytes += compacted_line.len();
-        writeln!(tmp_file, "{}", compacted_line)?;
+        compacted_output.push_str(&compacted_line);
+        compacted_output.push('\n');
     }
 
-    tmp_file.flush()?;
-    fs::rename(&tmp_path, target_path)?;
+    let compacted_bytes = compacted_output.len();
+
+    // 3. Truncate the file in-place and rewind to Start(0) (Inode preserved!)
+    file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(compacted_output.as_bytes())?;
+    file.flush()?;
 
     Ok((initial_bytes, compacted_bytes))
 }
 
 /// Compacts both transcript.jsonl (AI context) AND transcript_full.jsonl (UI visual render)
-/// directly in-place on disk with backups created.
+/// in-place with inode preservation and timestamped backups.
 pub fn compact_transcript_inplace(
     transcript_path: &Path,
     recent_window_steps: usize,
@@ -113,12 +124,12 @@ pub fn compact_transcript_inplace(
     let mut total_init = 0usize;
     let mut total_compacted = 0usize;
 
-    // Compact transcript.jsonl
+    // Compact transcript.jsonl in-place
     let (i1, c1) = compact_single_jsonl_file(transcript_path, recent_window_steps)?;
     total_init += i1;
     total_compacted += c1;
 
-    // Also compact transcript_full.jsonl if present in the same logs directory (used by IDE UI rendering)
+    // Also compact transcript_full.jsonl if present in the same logs directory
     if let Some(parent) = transcript_path.parent() {
         let full_transcript = parent.join("transcript_full.jsonl");
         if full_transcript.exists() && full_transcript != transcript_path {

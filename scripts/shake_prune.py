@@ -10,6 +10,7 @@ import json
 import re
 import datetime
 import shutil
+import shlex
 from pathlib import Path
 
 def estimate_tokens(text: str) -> int:
@@ -36,66 +37,75 @@ def extract_conversation_id(path_str: str) -> str:
     match = re.search(r"brain[/\\]([a-zA-Z0-9_-]+)[/\\]", path_str)
     return match.group(1) if match else "unknown-session"
 
-def compact_single_jsonl_file(t_file: Path, recent_window_steps: int = 6):
+def compact_single_jsonl_file(t_file: Path, recent_window_steps: int = 6) -> bool:
     if not t_file.exists():
-        return
+        return False
 
-    total_steps = 0
-    with open(t_file, "r", encoding="utf-8") as f:
-        for line in f:
-            if line.strip():
-                total_steps += 1
-
-    recent_threshold = max(0, total_steps - recent_window_steps)
-
-    # Backup
-    bak_file = t_file.with_suffix(".jsonl.bak")
+    # 1. Create timestamped backup (preserves history across multiple shakes)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    bak_timestamped = t_file.with_suffix(f".jsonl.bak_{timestamp}")
+    bak_latest = t_file.with_suffix(".jsonl.bak")
     try:
-        shutil.copy2(t_file, bak_file)
+        shutil.copy2(t_file, bak_timestamped)
+        shutil.copy2(t_file, bak_latest)
     except Exception:
         pass
 
-    # Stream compact to tmp file
-    tmp_file = t_file.with_suffix(".jsonl.tmp")
-    with open(t_file, "r", encoding="utf-8") as in_f, open(tmp_file, "w", encoding="utf-8") as out_f:
-        for i, line in enumerate(in_f):
-            if not line.strip():
-                continue
-            try:
-                step = json.loads(line)
-            except Exception:
-                out_f.write(line)
-                continue
+    # 2. Open in r+ mode to PRESERVE original filesystem inode
+    try:
+        with open(t_file, "r+", encoding="utf-8") as f:
+            lines = f.readlines()
+            total_steps = len([l for l in lines if l.strip()])
+            recent_threshold = max(0, total_steps - recent_window_steps)
 
-            stype = str(step.get("type", ""))
-            status = str(step.get("status", "")).lower()
-            exit_code = step.get("exit_code")
-            is_recent = (i >= recent_threshold)
-            is_error = (exit_code is not None and exit_code != 0) or ("error" in status) or ("failed" in status)
+            compacted_lines = []
+            for i, line in enumerate(lines):
+                if not line.strip():
+                    continue
+                try:
+                    step = json.loads(line)
+                except Exception:
+                    compacted_lines.append(line)
+                    continue
 
-            if not is_recent and not is_error:
-                if stype == "RUN_COMMAND":
-                    content = str(step.get("content", ""))
-                    if len(content) > 250:
-                        step["content"] = "Command completed successfully (exit 0). Verbose stdout pruned via /shake."
-                elif stype == "VIEW_FILE":
-                    step["content"] = "File inspected in previous turn. Content pruned via /shake."
-                elif stype in ("SEARCH_WEB", "GREP_SEARCH", "CODE_ACTION"):
-                    step["content"] = f"{stype} completed successfully. Output pruned via /shake."
+                stype = str(step.get("type", ""))
+                status = str(step.get("status", "")).lower()
+                exit_code = step.get("exit_code")
+                is_recent = (i >= recent_threshold)
+                is_error = (exit_code is not None and exit_code != 0) or ("error" in status) or ("failed" in status)
 
-            out_f.write(json.dumps(step) + "\n")
+                if not is_recent and not is_error:
+                    if stype == "RUN_COMMAND":
+                        content = str(step.get("content", ""))
+                        if len(content) > 250:
+                            step["content"] = "Command completed successfully (exit 0). Verbose stdout pruned via /shake."
+                    elif stype == "VIEW_FILE":
+                        step["content"] = "File inspected in previous turn. Content pruned via /shake."
+                    elif stype in ("SEARCH_WEB", "GREP_SEARCH", "CODE_ACTION"):
+                        step["content"] = f"{stype} completed successfully. Output pruned via /shake."
 
-    os.replace(tmp_file, t_file)
+                compacted_lines.append(json.dumps(step) + "\n")
 
-def compact_transcript_inplace(transcript_path: str, recent_window_steps: int = 6):
+            # Inode-preserving truncate and rewrite
+            f.seek(0)
+            f.truncate(0)
+            f.writelines(compacted_lines)
+            f.flush()
+        return True
+    except Exception:
+        return False
+
+def compact_transcript_inplace(transcript_path: str, recent_window_steps: int = 6) -> bool:
     t_file = Path(transcript_path)
-    compact_single_jsonl_file(t_file, recent_window_steps)
+    ok1 = compact_single_jsonl_file(t_file, recent_window_steps)
 
     # Also compact transcript_full.jsonl for IDE UI rendering
     if t_file.parent:
         full_transcript = t_file.parent / "transcript_full.jsonl"
         if full_transcript.exists() and full_transcript != t_file:
             compact_single_jsonl_file(full_transcript, recent_window_steps)
+
+    return ok1
 
 def prune_transcript(transcript_path: str, recent_window_steps: int = 6) -> tuple[str, dict, str]:
     transcript_file = Path(transcript_path)
@@ -318,15 +328,14 @@ def main():
     except Exception:
         pass
 
+    compact_success = False
     if in_place:
-        try:
-            compact_transcript_inplace(transcript_path)
-        except Exception:
-            pass
+        compact_success = compact_transcript_inplace(transcript_path)
 
     raw_formatted = format_bytes(stats["raw_bytes"])
     pruned_formatted = format_bytes(stats["pruned_bytes"])
     tokens_saved = max(0, stats["raw_tokens"] - stats["pruned_tokens"])
+    quoted_path = shlex.quote(abs_output_path)
 
     print(f"\n# ⚡ Context Compaction & Tree-Shaking Report\n")
     print(f"Context for this session has been **physically compacted and anchored in this chat window**.")
@@ -339,8 +348,8 @@ def main():
     print(f"| **Estimated Tokens** | `~{stats['raw_tokens']:,}` | `~{stats['pruned_tokens']:,}` | **~{tokens_saved:,} tokens saved** |")
     print(f"| **Preserved Signals** | {stats['user_turns']} User turns (100%) | {stats['assistant_turns']} Assistant turns (100%) | {stats['retained_errors']} Error traces (100%) |\n")
     
-    if in_place:
-        print(f"> 💾 **In-Place JSONL Compaction**: `transcript.jsonl` and `transcript_full.jsonl` were physically pruned on disk with backups created. Subsequent turns in **this exact window** now transmit the compact payload over the wire.\n")
+    if compact_success:
+        print(f"> 💾 **In-Place JSONL Compaction**: `transcript.jsonl` was physically pruned on disk (Inode preserved) with timestamped backup created. Subsequent turns in **this exact window** now transmit the compact payload over the wire.\n")
 
     print(f"---\n")
     print(f"### 🟢 In-Window Fresh Slate Active")
@@ -349,8 +358,8 @@ def main():
     print(f"<details>")
     print(f"<summary>📋 Need to export or copy this session elsewhere?</summary>\n")
     print(f"- **In-Chat Mention**: `@{abs_output_path}`")
-    print(f"- **Copy to Project**: `cp \"{abs_output_path}\" ./`")
-    print(f"- **Copy to Clipboard**: `xclip -sel clip < \"{abs_output_path}\" || wl-copy < \"{abs_output_path}\"`")
+    print(f"- **Copy to Project**: `cp {quoted_path} ./`")
+    print(f"- **Copy to Clipboard**: `xclip -sel clip < {quoted_path} || wl-copy < {quoted_path}`")
     print(f"</details>\n")
 
 if __name__ == "__main__":

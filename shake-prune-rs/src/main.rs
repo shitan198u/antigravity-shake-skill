@@ -6,7 +6,7 @@ mod slug;
 
 use hook::handle_hook;
 use metadata::{write_active_anchor, write_artifact_metadata};
-use pruner::{compact_transcript_inplace, prune_transcript};
+use pruner::{compact_transcript_inplace, prune_transcript, shell_quote};
 use std::env;
 use std::fs::File;
 use std::io::Write;
@@ -117,7 +117,7 @@ fn main() {
     let _ = write_artifact_metadata(&abs_output_path, &summary_text);
     let _ = write_active_anchor(&abs_output_path, &stats);
 
-    // Perform physical in-place JSONL compaction on disk
+    // Perform physical in-place JSONL compaction with Inode preservation
     let in_place_result = if in_place {
         compact_transcript_inplace(&transcript_path, recent_window).ok()
     } else {
@@ -125,6 +125,7 @@ fn main() {
     };
 
     let abs_str = abs_output_path.display().to_string();
+    let quoted_path = shell_quote(&abs_str);
     let raw_formatted = format_bytes(stats.raw_bytes);
     let pruned_formatted = format_bytes(stats.pruned_bytes);
     let tokens_saved = stats.raw_tokens.saturating_sub(stats.pruned_tokens);
@@ -141,7 +142,7 @@ fn main() {
     println!("| **Preserved Signals** | {} User turns (100%) | {} Assistant turns (100%) | {} Error traces (100%) |\n", stats.user_turns, stats.assistant_turns, stats.retained_errors);
     
     if in_place_result.is_some() {
-        println!("> 💾 **In-Place JSONL Compaction**: `transcript.jsonl` was physically pruned on disk with backup created (`transcript.jsonl.bak`). Subsequent turns in **this exact window** now transmit the compact payload over the wire.\n");
+        println!("> 💾 **In-Place JSONL Compaction**: `transcript.jsonl` was physically pruned on disk (Inode preserved) with timestamped backup created. Subsequent turns in **this exact window** now transmit the compact payload over the wire.\n");
     }
 
     println!("---\n");
@@ -151,7 +152,7 @@ fn main() {
     println!("<details>");
     println!("<summary>📋 Need to export or copy this session elsewhere?</summary>\n");
     println!("- **In-Chat Mention**: `@{}`", abs_str);
-    println!("- **Copy to Project**: `cp \"{}\" ./`", abs_str);
-    println!("- **Copy to Clipboard**: `xclip -sel clip < \"{}\" || wl-copy < \"{}\"`", abs_str, abs_str);
+    println!("- **Copy to Project**: `cp {} ./`", quoted_path);
+    println!("- **Copy to Clipboard**: `xclip -sel clip < {} || wl-copy < {}`", quoted_path, quoted_path);
     println!("</details>\n");
 }
