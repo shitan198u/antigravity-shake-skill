@@ -12,25 +12,6 @@ When `/shake` runs, it generates an **Interactive IDE Artifact** with explicit c
 
 ![Shaken Transcript Artifact Preview](./assets/artifact_preview.png)
 
-```markdown
-# Shaken & Pruned History: EXECUTIVE SUMMARY YOUR OPOBUDS
-
-> [!IMPORTANT]
-> **Context Note for Assistant**: This document is a complete, verbatim transcript of earlier turns with token bloat removed via `/shake`.
-> - **User prompts and Assistant explanations are 100% complete and verbatim.**
-> - Actions marked `[Command completed successfully]` or `[File inspected]` were already executed with success.
-> - You do **NOT** need to re-run past successful commands unless the user explicitly requests it.
-> - Any errors or failures encountered in past turns are explicitly preserved below with full stack traces.
-> - The active working state and immediate recent tool outputs are preserved at the end of the transcript.
-
-- **Session ID**: `c6e172d1-5cc6-42ad-b0b8-56e2ac668326`
-- **Topic**: `executive summary your opobuds`
-- **Source Transcript**: `/home/shsrra/.gemini/antigravity-ide/brain/.../transcript.jsonl`
-- **User Turns**: 17 | **Assistant Turns**: 13
-- **Tool Dumps Pruned**: 232 | **Errors Preserved**: 21
----
-```
-
 ---
 
 ## ⚡ Key Highlights
