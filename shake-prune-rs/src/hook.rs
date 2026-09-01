@@ -36,13 +36,21 @@ fn is_trusted_storage_path(p: &Path) -> bool {
     }
     let trusted_gemini = Path::new(&home).join(".gemini");
     
-    if let Ok(canonical) = p.canonicalize() {
+    let p_abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else if let Ok(curr) = std::env::current_dir() {
+        curr.join(p)
+    } else {
+        p.to_path_buf()
+    };
+
+    if let Ok(canonical) = p_abs.canonicalize() {
         if let Ok(trusted_canonical) = trusted_gemini.canonicalize() {
             return canonical.starts_with(trusted_canonical);
         }
         return canonical.starts_with(&trusted_gemini);
     }
-    p.starts_with(&trusted_gemini)
+    p_abs.starts_with(&trusted_gemini)
 }
 
 pub fn handle_hook() {

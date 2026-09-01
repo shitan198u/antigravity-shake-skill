@@ -67,7 +67,7 @@ fn validate_transcript_path(path: &Path) -> Result<(), String> {
 
 /// Strict ALLOWLIST Validation:
 /// Ensures output files can ONLY be written within:
-/// 1. The transcript's parent directory (session brain folder)
+/// 1. The transcript's parent hierarchy (session brain folder: logs/, .system_generated/, and session root)
 /// 2. The active workspace directory (current_dir)
 /// 3. The user's system ~/.gemini directory
 fn validate_output_path_allowlist(target: &Path, transcript_path: &Path) -> Result<PathBuf, String> {
@@ -89,7 +89,13 @@ fn validate_output_path_allowlist(target: &Path, transcript_path: &Path) -> Resu
 
     if let Some(t_parent) = transcript_path.parent() {
         if let Ok(c) = t_parent.canonicalize() {
-            allowed_roots.push(c);
+            allowed_roots.push(c.clone());
+            if let Some(c_parent) = c.parent() {
+                allowed_roots.push(c_parent.to_path_buf());
+                if let Some(c_grand) = c_parent.parent() {
+                    allowed_roots.push(c_grand.to_path_buf());
+                }
+            }
         }
     }
 

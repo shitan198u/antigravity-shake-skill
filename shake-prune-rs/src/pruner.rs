@@ -380,7 +380,15 @@ pub fn prune_transcript(
 
         let step: Step = match serde_json::from_str(&line_str) {
             Ok(s) => s,
-            Err(_) => continue,
+            Err(_) => {
+                let snippet = sanitize_markdown_snippet(&safe_truncate(&line_str, 500));
+                output_blocks.push(format!("> ⚠️ **[Unparsed Raw Log Line (Preserved)]**:
+```
+{}
+```
+", snippet));
+                continue;
+            }
         };
 
         let stype = step.step_type.as_deref().unwrap_or("");
