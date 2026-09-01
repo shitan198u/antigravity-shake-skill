@@ -57,11 +57,11 @@ if [ "$INSTALLED_BINARY" = false ]; then
         if curl -sSL -f "${BASE_RELEASE_URL}/${DOWNLOAD_FILE}" -o "${TMP_DOWNLOAD_DIR}/shake-prune" &&            curl -sSL -f "${BASE_RELEASE_URL}/SHA256SUMS.txt" -o "${TMP_DOWNLOAD_DIR}/SHA256SUMS.txt"; then
             
             echo "• Verifying SHA256 integrity checksum..."
-            EXPECTED_HASH="$(grep "${DOWNLOAD_FILE}" "${TMP_DOWNLOAD_DIR}/SHA256SUMS.txt" | awk "{print $1}")"
+            EXPECTED_HASH="$(awk -v asset="${DOWNLOAD_FILE}" '$2 == asset || $2 == ("*" asset) {print $1; exit}' "${TMP_DOWNLOAD_DIR}/SHA256SUMS.txt")"
             if command -v sha256sum >/dev/null 2>&1; then
-                ACTUAL_HASH="$(sha256sum "${TMP_DOWNLOAD_DIR}/shake-prune" | awk "{print $1}")"
+                ACTUAL_HASH="$(sha256sum "${TMP_DOWNLOAD_DIR}/shake-prune" | awk '{print $1}')"
             elif command -v shasum >/dev/null 2>&1; then
-                ACTUAL_HASH="$(shasum -a 256 "${TMP_DOWNLOAD_DIR}/shake-prune" | awk "{print $1}")"
+                ACTUAL_HASH="$(shasum -a 256 "${TMP_DOWNLOAD_DIR}/shake-prune" | awk '{print $1}')"
             else
                 ACTUAL_HASH="$EXPECTED_HASH"
             fi
@@ -110,6 +110,8 @@ else
         ' "${HOOKS_CONFIG}" > "${TMP_JSON}" && mv "${TMP_JSON}" "${HOOKS_CONFIG}"
     fi
 fi
+
+chmod 600 "${HOOKS_CONFIG}"
 
 echo "--------------------------------------------------------------------------------"
 echo "✅ Installation complete!"

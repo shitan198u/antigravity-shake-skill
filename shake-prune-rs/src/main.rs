@@ -38,6 +38,31 @@ fn format_bytes(bytes: usize) -> String {
     }
 }
 
+/// Validates that the input path is a valid JSONL transcript file
+/// and prevents path traversal or arbitrary sensitive file modification.
+fn validate_transcript_path(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Err(format!("Transcript file does not exist: {}", path.display()));
+    }
+    if !path.is_file() {
+        return Err(format!("Target is not a file: {}", path.display()));
+    }
+
+    let file_name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+
+    if !file_name.ends_with(".jsonl") && !file_name.contains(".jsonl.bak") {
+        return Err(format!(
+            "Invalid file type: '{}'. /shake only operates on .jsonl transcript log files.",
+            file_name
+        ));
+    }
+
+    Ok(())
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 || args[1] == "--help" || args[1] == "-h" || args[1] == "help" {
@@ -51,6 +76,11 @@ fn main() {
     }
 
     let transcript_path = PathBuf::from(&args[1]);
+    if let Err(err_msg) = validate_transcript_path(&transcript_path) {
+        eprintln!("Security/Validation Error: {}", err_msg);
+        process::exit(1);
+    }
+
     let mut raw_target = String::new();
     let mut recent_window = 6usize;
     let mut in_place = true;
