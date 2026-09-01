@@ -39,10 +39,16 @@ pub fn write_active_anchor(markdown_path: &Path, stats: &PruningStats) -> std::i
         let tmp_path = parent_dir.join("active_shake_anchor.json.tmp");
         let now_iso = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
 
+        let t_size = parent_dir.join(".system_generated/logs/transcript.jsonl")
+            .metadata()
+            .map(|m| m.len())
+            .unwrap_or(stats.pruned_bytes as u64);
+
         let anchor_data = json!({
             "active": true,
             "shaken_file": markdown_path.to_string_lossy(),
             "anchored_at_step": stats.user_turns + stats.assistant_turns + stats.pruned_tools,
+            "last_compacted_bytes": t_size,
             "topic": stats.topic_slug,
             "token_savings_pct": stats.reduction_pct,
             "raw_tokens": stats.raw_tokens,
