@@ -8,6 +8,7 @@ set -e
 REPO_URL="https://github.com/shitan198u/antigravity-shake-skill"
 RELEASE_TAG="v0.1.4"
 GLOBAL_SKILLS_DIR="${HOME}/.gemini/config/skills/shake"
+FULL_SHAKE_SKILLS_DIR="${HOME}/.gemini/config/skills/full-shake"
 GLOBAL_BIN_DIR="${HOME}/.gemini/bin"
 HOOKS_CONFIG="${HOME}/.gemini/config/hooks.json"
 
@@ -17,6 +18,7 @@ echo "==========================================================================
 
 mkdir -p "${GLOBAL_SKILLS_DIR}/bin"
 mkdir -p "${GLOBAL_SKILLS_DIR}/references"
+mkdir -p "${FULL_SHAKE_SKILLS_DIR}"
 mkdir -p "${GLOBAL_BIN_DIR}"
 chmod 700 "${GLOBAL_BIN_DIR}"
 
@@ -25,6 +27,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # 1. Install SKILL.md and documentation
 echo "• Installing skill definition to: ${GLOBAL_SKILLS_DIR}"
 cp "${SCRIPT_DIR}/SKILL.md" "${GLOBAL_SKILLS_DIR}/SKILL.md"
+cp "${SCRIPT_DIR}/skills/full-shake/SKILL.md" "${FULL_SHAKE_SKILLS_DIR}/SKILL.md"
 cp -r "${SCRIPT_DIR}/references/"* "${GLOBAL_SKILLS_DIR}/references/"
 
 # 2. Install Native Precompiled Binary

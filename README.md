@@ -63,10 +63,22 @@ cp shake-prune-rs/target/release/shake-prune ~/.gemini/bin/shake-prune
 
 ## 💡 How to Use
 
-### 1. In Any Antigravity Chat (Interactive Slash Command)
-Simply type:
+### 1. In Any Antigravity Chat (Interactive Slash Commands)
+
+#### 🟢 Standard Zero-Loss Compaction (`/shake`)
+* Prunes all tool output dumps.
+* Retains **100% of User prompts, Assistant reasoning, Thoughts, and Errors verbatim**.
 ```text
 /shake
+```
+
+#### ⚡ Full Deep Compaction (`/full-shake`)
+* Prunes all tool output dumps.
+* Retains **100% of User prompts, Assistant explanations, Decisions, and Errors verbatim**.
+* Retains scratchpad thoughts (`thinking`) for the **last 20 turns** while dropping older thoughts (saving an extra ~400 KB – 500 KB on mega-threads).
+* Automatically acts as a natural shake if the session has $\le 20$ turns.
+```text
+/full-shake
 ```
 The agent will execute the pruner, report token savings, update the interactive anchor artifact, and allow you to **keep typing in the same chat tab**!
 

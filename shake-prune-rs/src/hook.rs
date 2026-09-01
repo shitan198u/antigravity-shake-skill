@@ -155,13 +155,13 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
                 };
 
                 if should_auto_shake {
-                    if let Ok((pruned_md, mut stats)) = prune_transcript(t_path, 6) {
+                    if let Ok((pruned_md, mut stats)) = prune_transcript(t_path, 6, None) {
                         let output_path = art_dir.join(&stats.suggested_filename);
                         if let Ok(mut f) = File::create(&output_path) {
                             let _ = f.write_all(pruned_md.as_bytes());
                         }
 
-                        let (before_bytes, after_bytes, backup_file_str) = match compact_transcript_inplace(t_path, 6) {
+                        let (before_bytes, after_bytes, backup_file_str) = match compact_transcript_inplace(t_path, 6, None) {
                             Ok((b, a, p)) => (b, a, p),
                             Err(_) => (stats.raw_bytes, stats.pruned_bytes, String::new()),
                         };

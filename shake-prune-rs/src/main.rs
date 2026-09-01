@@ -14,17 +14,19 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 fn print_usage() {
-    println!("Usage: shake-prune <transcript.jsonl> [output_file_or_dir] [--recent-window N] [--no-in-place]");
+    println!("Usage: shake-prune <transcript.jsonl> [output_file_or_dir] [--full] [--thought-window N] [--recent-window N] [--no-in-place]");
     println!("       shake-prune --hook");
     println!("\nOptions:");
     println!("  -h, --help           Show this help message and exit");
     println!("  --hook               Run as Antigravity PreInvocation hook (reads stdin JSON)");
+    println!("  --full               Enable full deep compaction (retains thoughts for last 20 turns, drops older)");
+    println!("  --thought-window N   Number of recent assistant turns to retain thoughts for (default: 20 with --full)");
     println!("  --recent-window N    Number of recent tool execution steps to keep intact (default: 6)");
     println!("  --no-in-place        Disable physical in-place compaction of transcript.jsonl");
     println!("\nExamples:");
     println!("  shake-prune /path/to/transcript.jsonl");
-    println!("  shake-prune /path/to/transcript.jsonl /path/to/output_dir/");
-    println!("  shake-prune /path/to/transcript.jsonl /path/to/custom_name.md --recent-window 8");
+    println!("  shake-prune /path/to/transcript.jsonl --full");
+    println!("  shake-prune /path/to/transcript.jsonl --full --thought-window 25");
     println!("  shake-prune --hook");
 }
 
@@ -106,6 +108,7 @@ fn main() {
 
     let mut raw_target = String::new();
     let mut recent_window = 6usize;
+    let mut thought_window: Option<usize> = None;
     let mut in_place = true;
 
     let mut i = 2;
@@ -113,6 +116,14 @@ fn main() {
         if args[i] == "--recent-window" && i + 1 < args.len() {
             if let Ok(val) = args[i + 1].parse::<usize>() {
                 recent_window = val;
+            }
+            i += 2;
+        } else if args[i] == "--full" {
+            thought_window = Some(20);
+            i += 1;
+        } else if args[i] == "--thought-window" && i + 1 < args.len() {
+            if let Ok(val) = args[i + 1].parse::<usize>() {
+                thought_window = Some(val);
             }
             i += 2;
         } else if args[i] == "--no-in-place" {
@@ -126,7 +137,7 @@ fn main() {
         }
     }
 
-    let (pruned_markdown, mut stats) = match prune_transcript(&transcript_path, recent_window) {
+    let (pruned_markdown, mut stats) = match prune_transcript(&transcript_path, recent_window, thought_window) {
         Ok(res) => res,
         Err(e) => {
             eprintln!("Error pruning transcript: {}", e);
@@ -165,7 +176,7 @@ fn main() {
 
     // Perform physical in-place JSONL compaction with Inode preservation
     let in_place_result = if in_place {
-        compact_transcript_inplace(&transcript_path, recent_window).ok()
+        compact_transcript_inplace(&transcript_path, recent_window, thought_window).ok()
     } else {
         None
     };
@@ -183,6 +194,12 @@ fn main() {
         0.0
     };
 
+    let trigger_label = if thought_window.is_some() {
+        "Manual (/full-shake)"
+    } else {
+        "Manual (/shake)"
+    };
+
     let summary_text = format!(
         "Shaken & pruned verbatim history for topic '{}'. Saved {:.1}% context tokens ({} tokens vs {} raw). Preserved {} user prompts, all reasoning, and thoughts.",
         stats.topic_slug.replace('_', " "),
@@ -193,7 +210,7 @@ fn main() {
     );
 
     let _ = write_artifact_metadata(&abs_output_path, &summary_text);
-    let _ = write_active_anchor(&abs_output_path, &stats, "Manual (/shake)", &backup_file_str);
+    let _ = write_active_anchor(&abs_output_path, &stats, trigger_label, &backup_file_str);
 
     let abs_str = abs_output_path.display().to_string();
     let quoted_path = shell_quote(&abs_str);
@@ -208,9 +225,20 @@ fn main() {
     let all_history = load_or_discover_history(logs_dir, &anchor_path);
     let history_timeline_md = format_history_timeline(&all_history);
 
+    let mode_header = if let Some(w) = thought_window {
+        if stats.assistant_turns > w {
+            format!("⚡ Full Deep Compaction (Last {} Thoughts Retained)", w)
+        } else {
+            "🟢 Standard Zero-Loss Compaction (All Thoughts Retained)".to_string()
+        }
+    } else {
+        "🟢 Standard Zero-Loss Compaction (100% Thoughts Retained)".to_string()
+    };
+
     println!("\n# ⚡ Context Compaction & Tree-Shaking Report\n");
     println!("Context for this session has been **physically compacted and anchored in this chat window**.");
-    println!("All **User prompts, Assistant reasoning, Thoughts, and Error signals are 100% preserved verbatim**.\n");
+    println!("Mode: **{}**.\n", mode_header);
+    println!("All **User prompts, Assistant reasoning, Decisions, and Error signals are 100% preserved verbatim**.\n");
     println!("---\n");
     println!("### 📊 Token Reduction & Storage Metrics\n");
     println!("| Metric Scope | Starting Size | Compacted Size | Net Reduction |");

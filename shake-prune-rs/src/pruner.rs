@@ -125,6 +125,7 @@ fn compact_tool_call_args(
 pub fn compact_single_jsonl_file(
     target_path: &Path,
     recent_window_steps: usize,
+    thought_window_turns: Option<usize>,
 ) -> Result<(usize, usize, String), Box<dyn std::error::Error>> {
     if !target_path.exists() {
         return Ok((0, 0, String::new()));
@@ -145,9 +146,10 @@ pub fn compact_single_jsonl_file(
     let mut file = File::options().read(true).write(true).open(&abs_target)?;
     file.lock_exclusive()?;
 
-    // Read and count steps
+    // Read and count steps + assistant turns
     let mut lines_buffer: Vec<String> = Vec::new();
     let mut initial_bytes = 0usize;
+    let mut total_assistant_turns = 0usize;
     {
         let reader = BufReader::new(&file);
         for line in reader.lines() {
@@ -156,15 +158,22 @@ pub fn compact_single_jsonl_file(
                 continue;
             }
             initial_bytes += line_str.len();
+            if let Ok(val) = serde_json::from_str::<Value>(&line_str) {
+                if val.get("type").and_then(|v| v.as_str()) == Some("PLANNER_RESPONSE") {
+                    total_assistant_turns += 1;
+                }
+            }
             lines_buffer.push(line_str);
         }
     }
 
     let total_steps = lines_buffer.len();
     let recent_threshold = total_steps.saturating_sub(recent_window_steps);
+    let thought_threshold = thought_window_turns.map(|w| total_assistant_turns.saturating_sub(w)).unwrap_or(0);
 
     // Compact lines in memory
     let mut compacted_output = String::with_capacity(initial_bytes / 2);
+    let mut current_assistant_turn = 0usize;
 
     for (i, line_str) in lines_buffer.into_iter().enumerate() {
         let mut step_val: Value = match serde_json::from_str(&line_str) {
@@ -186,8 +195,16 @@ pub fn compact_single_jsonl_file(
             || status.contains("error")
             || status.contains("failed");
 
-        if !is_recent {
-            if stype == "PLANNER_RESPONSE" {
+        if stype == "PLANNER_RESPONSE" {
+            current_assistant_turn += 1;
+            // Thought Windowing (/full-shake): Drop thoughts older than the last N turns if enabled
+            if thought_window_turns.is_some() && current_assistant_turn <= thought_threshold {
+                if let Some(obj) = step_val.as_object_mut() {
+                    obj.remove("thinking");
+                }
+            }
+
+            if !is_recent {
                 if let Some(tool_calls) = step_val.get_mut("tool_calls").and_then(|v| v.as_array_mut()) {
                     for tc in tool_calls {
                         let name = tc.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -197,32 +214,30 @@ pub fn compact_single_jsonl_file(
                     }
                 }
             }
-
-            if !is_error {
-                match stype.as_str() {
-                    "RUN_COMMAND" => {
-                        let content_len = step_val.get("content").and_then(|v| v.as_str()).map(|s| s.len()).unwrap_or(0);
-                        if content_len > 250 {
-                            step_val["content"] = serde_json::json!(format!(
-                                "Command completed successfully (exit 0). Step {} stdout archived in {}.",
-                                step_idx, backup_abs_str
-                            ));
-                        }
-                    }
-                    "VIEW_FILE" => {
+        } else if !is_recent && !is_error {
+            match stype.as_str() {
+                "RUN_COMMAND" => {
+                    let content_len = step_val.get("content").and_then(|v| v.as_str()).map(|s| s.len()).unwrap_or(0);
+                    if content_len > 250 {
                         step_val["content"] = serde_json::json!(format!(
-                            "File inspected in previous turn. Step {} content archived in {}.",
+                            "Command completed successfully (exit 0). Step {} stdout archived in {}.",
                             step_idx, backup_abs_str
                         ));
                     }
-                    "SEARCH_WEB" | "GREP_SEARCH" | "CODE_ACTION" => {
-                        step_val["content"] = serde_json::json!(format!(
-                            "{} completed successfully. Step {} output archived in {}.",
-                            stype, step_idx, backup_abs_str
-                        ));
-                    }
-                    _ => {}
                 }
+                "VIEW_FILE" => {
+                    step_val["content"] = serde_json::json!(format!(
+                        "File inspected in previous turn. Step {} content archived in {}.",
+                        step_idx, backup_abs_str
+                    ));
+                }
+                "SEARCH_WEB" | "GREP_SEARCH" | "CODE_ACTION" => {
+                    step_val["content"] = serde_json::json!(format!(
+                        "{} completed successfully. Step {} output archived in {}.",
+                        stype, step_idx, backup_abs_str
+                    ));
+                }
+                _ => {}
             }
         }
 
@@ -247,13 +262,14 @@ pub fn compact_single_jsonl_file(
 pub fn compact_transcript_inplace(
     transcript_path: &Path,
     recent_window_steps: usize,
+    thought_window_turns: Option<usize>,
 ) -> Result<(usize, usize, String), Box<dyn std::error::Error>> {
-    let (i1, c1, backup_path) = compact_single_jsonl_file(transcript_path, recent_window_steps)?;
+    let (i1, c1, backup_path) = compact_single_jsonl_file(transcript_path, recent_window_steps, thought_window_turns)?;
 
     if let Some(parent) = transcript_path.parent() {
         let full_transcript = parent.join("transcript_full.jsonl");
         if full_transcript.exists() && full_transcript != transcript_path {
-            let _ = compact_single_jsonl_file(&full_transcript, recent_window_steps);
+            let _ = compact_single_jsonl_file(&full_transcript, recent_window_steps, thought_window_turns);
         }
     }
 
@@ -310,12 +326,14 @@ pub fn format_history_timeline(events: &[CompactionEvent]) -> String {
 pub fn prune_transcript(
     transcript_path: &Path,
     recent_window_steps: usize,
+    thought_window_turns: Option<usize>,
 ) -> Result<(String, PruningStats), Box<dyn std::error::Error>> {
     let file_pass1 = File::open(transcript_path)?;
     let reader_pass1 = BufReader::new(file_pass1);
 
     let mut total_steps = 0usize;
     let mut raw_bytes = 0usize;
+    let mut total_assistant_turns = 0usize;
 
     for line in reader_pass1.lines() {
         let line_str = line?;
@@ -324,12 +342,17 @@ pub fn prune_transcript(
         }
         raw_bytes += line_str.len();
         total_steps += 1;
+        if let Ok(val) = serde_json::from_str::<Value>(&line_str) {
+            if val.get("type").and_then(|v| v.as_str()) == Some("PLANNER_RESPONSE") {
+                total_assistant_turns += 1;
+            }
+        }
     }
 
     let recent_threshold = total_steps.saturating_sub(recent_window_steps);
+    let thought_threshold = thought_window_turns.map(|w| total_assistant_turns.saturating_sub(w)).unwrap_or(0);
     let conv_id = extract_conversation_id(&transcript_path.to_string_lossy());
 
-    // Check full untruncated transcript size if available
     let cumulative_full_bytes = transcript_path
         .parent()
         .map(|p| p.join("transcript_full.jsonl"))
@@ -378,11 +401,14 @@ pub fn prune_transcript(
             "PLANNER_RESPONSE" => {
                 let assistant_text = content.trim();
                 let thinking_text = step.thinking.as_deref().unwrap_or("").trim();
+                assistant_count += 1;
 
                 if !assistant_text.is_empty() || !thinking_text.is_empty() {
-                    assistant_count += 1;
                     let mut assistant_block = String::from("### 🤖 Assistant\n\n");
-                    if !thinking_text.is_empty() {
+                    // Show thoughts if thought window is disabled OR if this assistant turn is within the recent window
+                    let show_thoughts = thought_window_turns.is_none() || assistant_count > thought_threshold;
+
+                    if show_thoughts && !thinking_text.is_empty() {
                         assistant_block.push_str(&format!(
                             "<details>\n<summary>💭 Thought Process</summary>\n\n{}\n\n</details>\n\n",
                             thinking_text
@@ -476,12 +502,23 @@ pub fn prune_transcript(
 
     let timeline_section = format_history_timeline(&history_events);
 
+    let mode_note = if let Some(w) = thought_window_turns {
+        if total_assistant_turns > w {
+            format!("> - **Compaction Mode**: ⚡ Full Deep Compaction (Scratchpad thoughts retained for last {} turns; older thoughts dropped).\n", w)
+        } else {
+            "> - **Compaction Mode**: 🟢 Standard Zero-Loss Compaction (All thoughts retained; session under 20 turns).\n".to_string()
+        }
+    } else {
+        "> - **Compaction Mode**: 🟢 Standard Zero-Loss Compaction (100% thoughts retained).\n".to_string()
+    };
+
     let header = format!(
         "# Shaken & Pruned History: {}\n\n\
         > [!IMPORTANT]\n\
         > **Context Note for Assistant**:\n\
         > This document is a complete, verbatim transcript of earlier turns with token bloat removed via `/shake`.\n\
-        > - **User prompts, Assistant explanations, and Thought processes are 100% complete and verbatim.**\n\
+        > - **User prompts, Assistant explanations, and Decisions are 100% complete and verbatim.**\n\
+        {}\
         > - Actions marked `[Command completed successfully]` or `[File inspected]` were already executed with success.\n\
         > - You do **NOT** need to re-run past successful commands unless the user explicitly requests it.\n\
         > - Any errors or failures encountered in past turns are explicitly preserved below with full stack traces.\n\
@@ -495,6 +532,7 @@ pub fn prune_transcript(
         {}\
         ---\n\n",
         topic_slug.replace('_', " ").to_uppercase(),
+        mode_note,
         conv_id,
         topic_slug.replace('_', " "),
         transcript_path.display(),

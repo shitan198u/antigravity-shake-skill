@@ -8,6 +8,7 @@ $RepoUrl = "https://github.com/shitan198u/antigravity-shake-skill"
 $ReleaseTag = "v0.1.4"
 $UserHome = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile)
 $GlobalSkillsDir = Join-Path $UserHome ".gemini\config\skills\shake"
+$FullShakeSkillsDir = Join-Path $UserHome ".gemini\config\skills\full-shake"
 $GlobalBinDir = Join-Path $UserHome ".gemini\bin"
 $HooksConfig = Join-Path $UserHome ".gemini\config\hooks.json"
 
@@ -17,6 +18,7 @@ Write-Host "====================================================================
 
 New-Item -ItemType Directory -Force -Path (Join-Path $GlobalSkillsDir "bin") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $GlobalSkillsDir "references") | Out-Null
+New-Item -ItemType Directory -Force -Path $FullShakeSkillsDir | Out-Null
 New-Item -ItemType Directory -Force -Path $GlobalBinDir | Out-Null
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -24,6 +26,7 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 # 1. Install SKILL.md and documentation
 Write-Host "• Installing skill definition to: $GlobalSkillsDir"
 Copy-Item (Join-Path $ScriptDir "SKILL.md") (Join-Path $GlobalSkillsDir "SKILL.md") -Force
+Copy-Item (Join-Path $ScriptDir "skills\full-shake\SKILL.md") (Join-Path $FullShakeSkillsDir "SKILL.md") -Force
 Copy-Item (Join-Path $ScriptDir "references\*") (Join-Path $GlobalSkillsDir "references") -Recurse -Force
 
 # 2. Install Native Precompiled Binary
