@@ -1,81 +1,89 @@
-# 🧠 Deep Dive: How `/shake` Works, Inode-Preserving Compaction & Context Mechanics
+# 🛠️ How `/shake` Works: Technical Reference Manual
 
-This document provides a comprehensive, technical explanation of what happens under the hood when `/shake` is executed, how `transcript.jsonl` is physically compacted on disk without breaking open file handles, and how the AI interacts with the compacted history.
+`shake` is a deterministic, multi-platform context tree-shaker and compaction engine purpose-built for Google Antigravity. It physically prunes historical tool execution bloat from active conversation logs while preserving 100% of User prompts, Assistant reasoning, Thoughts, and Error stack traces.
 
 ---
 
-## ⚡ Physical In-Place Compaction in the Same Chat Window
+## 🏗️ Core Architecture & Pipeline
 
-When `/shake` runs, it executes **Safe Inode-Preserving In-Place JSONL Compaction** directly on the active session's `transcript.jsonl`:
-
-```
-                                  BEFORE /shake
-         ┌─────────────────────────────────────────────────────────────┐
-         │ transcript.jsonl (2.7 MB on disk, Inode: 4698)              │
-         │  • Turn 1: User prompt                                      │
-         │  • Turn 2: RUN_COMMAND (5,000 lines npm/cmake stdout)       │ ◄── BLOAT
-         │  • Turn 3: VIEW_FILE (2,000 lines source code)             │ ◄── BLOAT
-         │  • Turn 4: Assistant thought & decision                     │
-         └─────────────────────────────────────────────────────────────┘
-                                        │
-                                        ▼
-                                  Run "/shake"
-                                        │
-                                        ▼
-                                  AFTER /shake
-         ┌─────────────────────────────────────────────────────────────┐
-         │ transcript.jsonl.bak_20260901_235144 (Timestamped backup)   │
-         │ transcript.jsonl (380 KB on disk, Inode: 4698 [SAME INODE]) │
-         │  • Turn 1: User prompt (100% verbatim)                      │
-         │  • Turn 2: RUN_COMMAND (exit 0: "Command completed...")     │ ◄── COMPACT
-         │  • Turn 3: VIEW_FILE ("File inspected...")                  │ ◄── COMPACT
-         │  • Turn 4: Assistant thought & decision (100% verbatim)     │
-         │  • Turn N-5..N: Active Working Window (100% full logs)      │
-         └─────────────────────────────────────────────────────────────┘
-                                        │
-                                        ▼
-                       Next Turn in the EXACT SAME TAB
-         Antigravity's active file descriptor continues writing seamlessly.
-         Model API payload physically drops from 2.7 MB ➔ 380 KB (85%+ saved)!
+```mermaid
+graph TD
+    A[Raw transcript.jsonl & transcript_full.jsonl] --> B[Exclusive File Lock (fs2)]
+    B --> C[Pass 1: Line & Step Indexing]
+    C --> D[Identify Active Working Window (Last 6 Steps)]
+    D --> E[Pass 2: In-Memory JSONL Compaction]
+    
+    subgraph Signal Preservation
+        E --> F1[100% User Prompts Verbatim]
+        E --> F2[100% Thoughts & Reasoning Verbatim]
+        E --> F3[100% Error Stack Traces & Non-Zero Exits]
+        E --> F4[100% Recent Tool Outputs (Last 6 Steps)]
+    end
+    
+    subgraph Pruning & Structured Receipts
+        E --> G1[RUN_COMMAND >250 chars -> Action Receipt]
+        E --> G2[VIEW_FILE >500 lines -> Action Receipt]
+        E --> G3[write_to_file / replace_file -> Progressive Backlink]
+    end
+    
+    E --> H[Create Timestamped Non-Destructive Backup]
+    H --> I[In-Place Truncate(0) & Rewrite (Inode Preserved)]
+    I --> J[Physical fsync commitment (sync_all)]
+    J --> K[Unlock File Handle (fs2)]
+    K --> L[Generate Interactive Markdown Artifact]
+    L --> M[Update active_shake_anchor.json with NamedTempFile]
 ```
 
 ---
 
-## 🛡️ The "Inode Swap" Solution & File Descriptor Safety
+## ⚡ Key Features & Mechanical Details
 
-### Why Atomic Rename Fails on Active Logs (POSIX Inode Traps)
-In Unix-like systems (Linux & macOS), when a process like Antigravity opens a file for appending (`O_WRONLY | O_APPEND`), the operating system binds the file descriptor to the **filesystem Inode**, not the file path string.
-* If a tool uses `fs::rename` or `os.replace` to swap a `.tmp` file over the original, the directory entry points to a new Inode, but the IDE’s open file descriptor remains attached to the *unlinked old Inode*.
-* **The Result**: Subsequent turns written by the IDE would be appended to the unlinked file, causing silent data loss on disk.
+### 1. Inode-Preserving Truncate-and-Rewrite
+Standard atomic rename (`fs::rename`) swaps out the underlying filesystem Inode. Because the Antigravity IDE holds open file descriptors to `transcript.jsonl`, renaming the file orphans the IDE handle, causing subsequent turns to write to a deleted file.
+- `/shake` opens the file with `File::options().read(true).write(true)`.
+- Acquires an exclusive cross-platform file lock using `fs2::FileExt::lock_exclusive()`.
+- Truncates to 0 bytes (`file.set_len(0)`), seeks to start (`file.seek(SeekFrom::Start(0))`), and writes the compacted stream.
+- Calls `file.sync_all()` (`fsync`) before releasing the lock.
+- **The IDE's active file descriptor continues writing to the exact same file without interruption.**
 
-### How `/shake` Preserves the Inode (Truncate-and-Rewrite)
-1. **Timestamped Backup**: Copies the file to `transcript.jsonl.bak_YYYYMMDD_HHMMSS` before any modification.
-2. **Open Existing Inode in Read+Write Mode**: Opens the active file path with read and write permissions.
-3. **In-Memory Transformation**: Compiles the noise-reduced stream.
-4. **In-Place Truncation (`file.set_len(0)` / `truncate(0)`)**: Truncates the file to 0 bytes and rewinds to offset 0 on the **exact same open file descriptor**.
-5. **Flush & Sync**: Writes the compacted JSONL lines and flushes to disk.
+### 2. The Active Working Window (Last 6 Steps)
+To ensure the agent never loses context on immediate tasks:
+- The **last 6 steps** of tool outputs (commands, file inspections, search queries) are **never pruned**.
+- The LLM has full verbatim visibility into recent files and build results.
+- Compaction only affects historical turns older than 6 steps where decisions have already been finalized.
 
-👉 **The Inode number never changes**. Antigravity IDE continues appending subsequent turns to the compacted file with zero desync or data loss.
+### 3. Progressive Disclosure & Canonical Backlinks
+For code write actions (`write_to_file`, `replace_file_content`, `multi_replace_file_content`):
+- Rather than dumping 2,000 lines of code into the prompt history, `/shake` compacts older write actions into receipts:
+  ```text
+  [File written to disk (140 lines). Step 42 full payload archived in /home/.../transcript.jsonl.bak_20260902_005415. Inspect via view_file if needed]
+  ```
+- The LLM retains knowledge of what file changed, the purpose of the change, and the exact absolute filesystem path to restore the code on-demand.
+
+### 4. Proactive 200k Token Auto-Compaction Hook
+The native `PreInvocation` hook (`shake-prune --hook`) automatically protects conversations from token rot:
+- **Calibrated Density**: Calibrated to **3.3 bytes/token** for Code/JSON transcripts.
+- **Threshold Trigger**: Triggers auto-compaction when `transcript.jsonl` exceeds **660 KB (~200,000 tokens)**.
+- **Growth Delta Guard (50 KB)**: Compares against `last_compacted_bytes`. If less than 50 KB of new logs have accumulated, the hook executes in `<0.2ms` without running disk compaction.
+- **180s Cooldown**: Prevents CPU tight-loops in edge-case or failure scenarios.
+
+### 5. Security & Safety Hardening
+- **Path Validation**: Rejects arbitrary system files (`/etc/passwd`, `/root/.ssh/`) for input and output.
+- **Context Poisoning Defense**: Restricts hook discovery strictly to system-managed storage (`~/.gemini` or `/brain/`).
+- **Markdown & XSS Sanitization**: Escapes HTML entities (`<` ➔ `&lt;`, `>` ➔ `&gt;`) and backticks (`` ``` `` ➔ `` ` ` ` ``).
+- **URL Encoding**: URL-encodes `file://` links to prevent broken links with spaces.
+- **Atomic Tempfiles**: Uses `tempfile::Builder` for exclusive 0600 permissions and cryptographically random filenames.
+- **ReDoS Immunity**: Linear $O(N)$ tag scanning instead of recursive regex matching.
+- **Panic Safety**: `panic::catch_unwind` ensures a rock-solid fail-open guarantee (`{}` output on any internal panic).
 
 ---
 
-## 📊 What Is Preserved vs. What Is Compacted
+## 📊 Token Calibration Benchmarks
 
-| Conversation Element | Treatment by `/shake` | AI Visibility & Precision |
+| Metric | Naive Prose Assumption | Empirical Calibrated Syntax Ratio |
 | :--- | :--- | :--- |
-| **User Prompts** | Retained 100% verbatim | Complete, character-for-character precision across all turns |
-| **Assistant Explanations** | Retained 100% verbatim | Architectural decisions, bug analyses, and notes are preserved word-for-word |
-| **Model Thoughts** | Retained in `<details>` drawers & JSON | Deep reasoning chains (`thinking`) are preserved without loss |
-| **Execution Errors & Stack Traces** | Retained 100% with full traceback | Any failed command (`exit_code != 0`), build error, or exception is preserved for debugging |
-| **Active Working Window** | Last 6 tool steps retained in full | Immediate momentum and active command outputs remain intact |
-| **Old Successful Tool Dumps** | Replaced with compact action receipts | `npm run build` (1,000 lines) becomes `ℹ️ [Command completed successfully (exit 0)]` |
-
----
-
-## 🔍 Is RAG (Retrieval-Augmented Generation) Happening?
-
-> **No. There is zero vector chunking, lossy embedding search, or top-k retrieval.**
-
-* **Direct In-Place Ingestion**: The compacted `transcript.jsonl` contains the full conversation history with noise removed.
-* **Direct Markdown Injection**: If referencing `@shake_topic.md` in a fresh window, the entire file is injected verbatim.
-* **Guaranteed Context Fit**: A pruned session is **15,000 – 40,000 tokens**, fitting easily into Gemini’s **1M+ token window** with 100% full-text visibility.
+| **Chars / Token** | `4.0 chars/token` | **`3.3 chars/token`** |
+| **Punctuation & Symbols** | ~2% | **20.7%** (braces, quotes, colons, slashes) |
+| **Whitespace & Formatting** | ~15% | **9.0%** |
+| **Words & Identifiers** | ~83% | **70.4%** |
+| **200k Token Threshold** | 800 KB | **660 KB (645 KB)** |

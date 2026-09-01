@@ -1,152 +1,112 @@
-# Antigravity `/shake` Context Compaction & Verbatim Pruning Skill
+# ⚡ Antigravity `/shake` Skill
 
-A high-performance context management, compaction, and tree-shaking skill for the **Google Antigravity AI Agent** platform (CLI, IDE, and 2.0) across **Linux, macOS, and Windows**.
-
-Inspired by the `/shake` context compaction mechanism in **omp (Oh-My-Pi)**, this tool solves "context rot" and token exhaustion in long-running coding sessions by **deterministically stripping verbose command outputs, file views, and tool payloads** while preserving **100% of User prompts, Assistant reasoning, and Thought processes verbatim**.
-
----
-
-## 📸 Interactive IDE Artifact Preview
-
-When `/shake` runs, it generates an **Interactive IDE Artifact** with explicit context instructions and session metadata:
-
-![Shaken Transcript Artifact Preview](./assets/artifact_preview.png)
+> **Deterministic, In-Place Context Tree-Shaking and Token Compaction for Google Antigravity (Gemini)**  
+> *Physically compact active conversation logs on disk, eliminate context degradation, and continue chatting seamlessly in the **exact same tab**.*
 
 ---
 
-## ⚡ Key Highlights
+## 🌟 Why `/shake`?
 
-* **🟢 Seamless In-Window Continuity (No New Tab Required!)**:
-  * Utilizes a native Antigravity **`PreInvocation` Hook** (`shake-prune --hook`).
-  * When `/shake` completes, it creates an active session anchor.
-  * **You stay in the exact same chat window**—when you press Send on your next turn, the native hook automatically pins the model's working memory to the clean shaken artifact!
-* **🦀 100% Self-Contained Native Binary**:
-  * One single binary (`shake-prune` / `shake-prune.exe`) handles both context pruning and sub-millisecond hook execution (`<0.2ms`).
-  * **Zero Python & Zero Rust dependencies** required at runtime.
-* **🌐 Cross-Platform Support (Linux, macOS, Windows)**:
-  * Pure Bash installer (`install.sh`) for Linux and macOS.
-  * Native PowerShell installer (`install.ps1`) for Windows.
-  * Automated GitHub Actions multi-platform binary compilation.
-* **🤖 Agent-Friendly (`AGENTS.md`)**:
-  * Built-in instructions for other AI coding agents to auto-configure and adapt this skill on unsupported machines.
-* **80%–90% Token Reduction**: Recovers hundreds of thousands of tokens from bloated transcripts instantly.
-* **Zero Loss of Meaning**: Unlike lossy LLM summarizers, User instructions, bug investigations, Assistant architectural decisions, and Thoughts are preserved **word-for-word**.
-* **Smart Signal Preservation**:
-  * ⚠️ **Errors & Failures**: Never deletes non-zero exit codes, compiler tracebacks, or test failures.
-  * 🕒 **Active Working Window**: Retains recent tool execution outputs to preserve immediate task momentum.
-  * 📋 **Status Commands**: Keeps compact status checks (`git branch`, `pwd`, short checks).
-  * ⚙️ **Action Receipts**: Replaces bulky file reads and terminal logs with clear single-line action receipts.
-* **Dynamic Topic Naming**: Auto-generates clean, timestamped filenames based on the conversation topic (e.g. `shake_earbud_fit_test_20260901_2018.md`).
+During long development sessions, AI coding agents accumulate tens of thousands of lines of terminal output, compiler logs, and file inspections. This leads to **"context rot"**:
+1. **Severe Latency**: Millions of raw characters are re-serialized and sent across the wire on every turn.
+2. **Attention Decay**: The LLM loses track of earlier instructions under a mountain of terminal noise.
+3. **Lost Momentum**: Developers are forced to open new chat tabs, re-explaining the project context and losing state.
+
+`/shake` solves this by **physically pruning the active `transcript.jsonl` on disk in-place** while preserving 100% of your dialogue, reasoning, thoughts, error traces, and active working state.
 
 ---
 
-## 🚀 Quick Installation
+## 🚀 Key Features
 
-### 🐧 Linux & 🍎 macOS
+* 🟢 **Same-Tab In-Place Compaction**: Modifies active session logs directly on disk without breaking open file descriptors or requiring new chat tabs.
+* 🛡️ **Inode Preservation & File Locking**: Uses POSIX/Windows truncate-and-rewrite with `fs2` exclusive locking and `fsync` durability.
+* ⚡ **Proactive 200k Token Auto-Shake**: Background `PreInvocation` hook automatically detects and compacts conversations that exceed 200k tokens (`660 KB`).
+* ⏱️ **50 KB Growth Delta Guard**: Prevents redundant CPU/disk cycles when conversations contain extensive clean dialogue.
+* 🧠 **100% Signal Retention**: Preserves all user prompts, assistant thoughts/reasoning, and non-zero exit error traces verbatim.
+* 🕒 **Active Working Window**: Retains the last 6 execution steps with 0% pruning so active momentum is never interrupted.
+* 🔍 **Progressive Disclosure Backlinks**: Compacts older code writes into lightweight receipts containing canonical absolute paths to timestamped backups (`.bak_<timestamp>`).
+* 🔒 **Hardened Security**: ReDoS-immune linear scanning, HTML/XSS sanitization, URL-encoded links, exclusive `0600` tempfiles, and strict path validation.
+* 🦀 **Pure Native Rust**: Precompiled multi-platform binaries for Linux (x86_64), macOS (Universal Binary for Apple Silicon & Intel), and Windows (x86_64).
+
+---
+
+## 📊 Physical Token Reduction Metrics
+
+| Metric | Original Active Session | Compacted via `/shake` | Total Savings |
+| :--- | :--- | :--- | :--- |
+| **Payload Size on Disk** | `1.1 MB` | `470 KB` | **54.5% – 78% physical reduction** |
+| **Estimated Token Load** | `~330,000 tokens` | `~145,000 tokens` | **`~185,000 tokens saved`** |
+| **Execution Overhead** | — | Native Rust binary | **`<10ms` in-place rewrite** |
+| **Hook Latency** | — | Native PreInvocation | **`<0.2ms` per prompt** |
+
+---
+
+## 📦 Quick Installation
+
+### Linux & macOS (curl / bash)
 ```bash
-git clone https://github.com/shitan198u/antigravity-shake-skill.git
-cd antigravity-shake-skill
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/shitan198u/antigravity-shake-skill/main/install.sh | bash
 ```
 
-### 🪟 Windows (PowerShell)
+### Windows (PowerShell)
 ```powershell
-git clone https://github.com/shitan198u/antigravity-shake-skill.git
-cd antigravity-shake-skill
-.\install.ps1
+irm https://raw.githubusercontent.com/shitan198u/antigravity-shake-skill/main/install.ps1 | iex
+```
+
+### Build from Local Source
+```bash
+cargo build --release --manifest-path shake-prune-rs/Cargo.toml
+cp shake-prune-rs/target/release/shake-prune ~/.gemini/bin/shake-prune
 ```
 
 ---
 
-## 💻 How to Use
+## 💡 How to Use
 
-### 1. In Any Antigravity Chat
-When a conversation gets long or starts to experience context degradation, simply type:
-
+### 1. In Any Antigravity Chat (Interactive Slash Command)
+Simply type:
 ```text
 /shake
 ```
+The agent will execute the pruner, report token savings, update the interactive anchor artifact, and allow you to **keep typing in the same chat tab**!
 
-The agent executes the native pruner, sets the session anchor, and presents the clean report:
+### 2. Fully Automatic (Background Hook)
+You don't even have to remember to run `/shake`! The included `PreInvocation` hook continuously monitors transcript growth and automatically compacts the conversation when it crosses **200,000 tokens** (`660 KB`).
 
-```markdown
-# ⚡ Context Compaction & Tree-Shaking Report
+### 3. Standalone CLI Usage
+```bash
+# Compact a specific transcript in-place
+shake-prune /path/to/brain/session_id/.system_generated/logs/transcript.jsonl
 
-Context for this session has been compacted and anchored in this chat window.
-All **User prompts, Assistant reasoning, Thoughts, and Error signals are 100% preserved verbatim**.
+# Specify a custom output directory and keep the last 8 tool steps intact
+shake-prune /path/to/transcript.jsonl /path/to/output_dir/ --recent-window 8
 
----
+# Generate markdown report only without modifying transcript.jsonl
+shake-prune /path/to/transcript.jsonl --no-in-place
 
-### 📊 Token Reduction Metrics
-
-| Metric | Original | Pruned | Savings |
-| :--- | :--- | :--- | :--- |
-| **Payload Size** | `2.7 MB` | `497.7 KB` | **81.4% reduction** |
-| **Estimated Tokens** | `~669,560` | `~124,424` | **~545,136 tokens saved** |
-| **Preserved Signals** | 53 User turns (100%) | 70 Assistant turns (100%) | 14 Error traces (100%) |
-
----
-
-### 🟢 In-Window Continuity Active
-> **Ready to continue**: Your context memory is now pinned to the clean state. Simply type your next prompt and press **Send** in this chat.
-
-- **Interactive Artifact**: [📄 shake_topic_20260901_2018.md](file:///path/to/shake_topic.md) *(Click to preview in side pane)*
-
-<details>
-<summary>📋 Need to export or copy this session elsewhere?</summary>
-
-- **In-Chat Mention**: `@/path/to/shake_topic.md`
-- **Copy to Project**: `cp "/path/to/shake_topic.md" ./`
-- **Copy to Clipboard**: `xclip -sel clip < "/path/to/shake_topic.md" || wl-copy < "/path/to/shake_topic.md"`
-</details>
+# Run as Antigravity lifecycle hook
+shake-prune --hook
 ```
 
-### 2. Keep Chatting in the Same Tab!
-You don't have to leave the window! Just type your next message and press **Send**. The native `PreInvocation` hook automatically ensures the agent continues with full clarity based on the clean shaken state.
+---
+
+## 📚 Technical Documentation & Deep Dives
+
+* 🧠 **[Antigravity Lifecycle & Backend vs. UI Cache](references/antigravity_lifecycle.md)**: Deep dive on how Antigravity handles model prompt streams vs. webview DOM caches, Inode preservation mechanics, and hook lifecycles.
+* 🛠️ **[How `/shake` Works Technical Reference](references/how_it_works.md)**: Comprehensive architectural breakdown of the 2-pass pruning pipeline, token calibration density, and security hardening.
+* ⚖️ **[Comparison with Other Compaction Tools](references/omp_comparison.md)**: Detailed comparison between `/shake`, OMP, and traditional summarization techniques.
 
 ---
 
-## 📚 Deep Dive & Architecture
+## 🛡️ Security & Reliability Architecture
 
-* 🧠 **[How `/shake` Works & Context Mechanics](references/how_it_works.md)**: Deep technical breakdown of how transcript streams, non-destructive compaction, in-window hooks, and full-context verbatim injection work under the hood.
-* ⚖️ **[`omp` vs Antigravity Comparison](references/omp_comparison.md)**: Detailed technical comparison between the original `omp` CLI context pruner and the Antigravity implementation.
-
----
-
-## 📦 Package Contents
-
-```text
-antigravity-shake/
-├── .github/
-│   └── workflows/
-│       └── release.yml           # Multi-platform CI/CD (Linux, macOS, Windows)
-├── assets/
-│   └── artifact_preview.png      # Rendered preview screenshot
-├── bin/
-│   └── shake-prune               # Precompiled native binary (x86_64, includes --hook)
-├── install.sh                     # Automated installer for Linux & macOS
-├── install.ps1                    # Automated installer for Windows (PowerShell)
-├── AGENTS.md                      # Cross-platform adaptation guide for AI agents
-├── README.md                      # Comprehensive documentation
-├── SKILL.md                       # Antigravity skill definition (Zero-guesswork workflow)
-├── references/
-│   ├── how_it_works.md            # Deep dive on transcript mechanics, hooks & full-context injection
-│   └── omp_comparison.md          # Technical analysis of omp vs Antigravity pruning
-├── scripts/
-│   ├── shake_prune.py             # Universal Python fallback engine
-│   └── pre_invocation_hook.py     # Python fallback lifecycle hook
-└── shake-prune-rs/                # High-speed Rust crate source
-    ├── Cargo.toml                 # Dependencies & release profile
-    └── src/
-        ├── main.rs                # CLI entry point, anchor generator & report
-        ├── hook.rs                # Native sub-millisecond PreInvocation hook runner
-        ├── metadata.rs            # Atomic writes for IDE Artifact & active_shake_anchor.json
-        ├── models.rs              # Typed Antigravity event schemas
-        ├── pruner.rs              # Signal-preserving filter & markdown generator
-        └── slug.rs                # Topic slug & filename generator
-```
+* **Strict Input/Output Validation**: Rejects access to sensitive system paths (`/etc`, `/root`, `C:\Windows`).
+* **Context Poisoning Prevention**: Restricts anchor discovery strictly to trusted system directories (`~/.gemini` or `/brain/`).
+* **Exclusive Concurrency (`fs2`)**: Holds exclusive file locks during in-place truncation and issues `fsync` (`sync_all()`) before unlocking.
+* **Fail-Open Hook Guarantee**: The `PreInvocation` hook runs with `catch_unwind` protection—it will always emit `{}` and exit cleanly on any error or panic.
 
 ---
 
 ## 📄 License
-MIT License. Free for distribution across all Antigravity users.
+
+MIT License. Copyright (c) 2026 shitan198u.
