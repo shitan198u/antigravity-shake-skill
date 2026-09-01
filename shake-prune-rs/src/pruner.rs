@@ -1,4 +1,5 @@
-use crate::models::{PruningStats, Step};
+use crate::metadata::load_or_discover_history;
+use crate::models::{CompactionEvent, PruningStats, Step};
 use crate::slug::{extract_conversation_id, generate_suggested_filename, generate_topic_slug};
 use chrono::Local;
 use fs2::FileExt;
@@ -120,12 +121,13 @@ fn compact_tool_call_args(
 
 /// Compacts a JSONL file in-place while PRESERVING the exact same filesystem Inode
 /// and holding an exclusive file lock to eliminate cross-process write race conditions.
-fn compact_single_jsonl_file(
+/// Returns (bytes_before, bytes_after, backup_abs_path).
+pub fn compact_single_jsonl_file(
     target_path: &Path,
     recent_window_steps: usize,
-) -> Result<(usize, usize), Box<dyn std::error::Error>> {
+) -> Result<(usize, usize, String), Box<dyn std::error::Error>> {
     if !target_path.exists() {
-        return Ok((0, 0));
+        return Ok((0, 0, String::new()));
     }
 
     let abs_target = fs::canonicalize(target_path).unwrap_or_else(|_| target_path.to_path_buf());
@@ -239,30 +241,70 @@ fn compact_single_jsonl_file(
     file.sync_all()?;
     file.unlock()?;
 
-    Ok((initial_bytes, compacted_bytes))
+    Ok((initial_bytes, compacted_bytes, backup_abs_str))
 }
 
 pub fn compact_transcript_inplace(
     transcript_path: &Path,
     recent_window_steps: usize,
-) -> Result<(usize, usize), Box<dyn std::error::Error>> {
-    let mut total_init = 0usize;
-    let mut total_compacted = 0usize;
-
-    let (i1, c1) = compact_single_jsonl_file(transcript_path, recent_window_steps)?;
-    total_init += i1;
-    total_compacted += c1;
+) -> Result<(usize, usize, String), Box<dyn std::error::Error>> {
+    let (i1, c1, backup_path) = compact_single_jsonl_file(transcript_path, recent_window_steps)?;
 
     if let Some(parent) = transcript_path.parent() {
         let full_transcript = parent.join("transcript_full.jsonl");
         if full_transcript.exists() && full_transcript != transcript_path {
-            let (i2, c2) = compact_single_jsonl_file(&full_transcript, recent_window_steps)?;
-            total_init += i2;
-            total_compacted += c2;
+            let _ = compact_single_jsonl_file(&full_transcript, recent_window_steps);
         }
     }
 
-    Ok((total_init, total_compacted))
+    Ok((i1, c1, backup_path))
+}
+
+pub fn format_history_timeline(events: &[CompactionEvent]) -> String {
+    if events.is_empty() {
+        return String::new();
+    }
+
+    let mut rows = String::new();
+    for (idx, ev) in events.iter().enumerate() {
+        let step_label = if ev.anchored_step > 0 {
+            format!("Step {}+", ev.anchored_step)
+        } else {
+            "Historical".to_string()
+        };
+        let before_kb = if ev.bytes_before > 0 {
+            format!("{:.1} KB", ev.bytes_before as f64 / 1024.0)
+        } else {
+            "—".to_string()
+        };
+        let savings_label = if ev.reduction_pct > 0.0 {
+            format!("-{:.1}%", ev.reduction_pct)
+        } else {
+            "—".to_string()
+        };
+        let archive_link = if !ev.backup_file.is_empty() {
+            let enc_link = format!("file://{}", urlencoding::encode(&ev.backup_file).replace("%2F", "/"));
+            format!("[📄 Backup #{}]({})", idx + 1, enc_link)
+        } else {
+            "—".to_string()
+        };
+
+        rows.push_str(&format!(
+            "| `{}` | {} | `{}` | `{}` | {} | {} |\n",
+            ev.timestamp_display, ev.trigger, step_label, before_kb, savings_label, archive_link
+        ));
+    }
+
+    format!(
+        "<details>\n\
+        <summary>📜 <b>Session Compaction Timeline & Checkpoint History ({} events)</b></summary>\n\n\
+        | Time | Trigger Event | Working Checkpoint | Input Size | Saved | Archive Backup |\n\
+        | :--- | :--- | :---: | :---: | :---: | :--- |\n\
+        {}\n\
+        </details>\n\n",
+        events.len(),
+        rows.trim_end()
+    )
 }
 
 pub fn prune_transcript(
@@ -286,6 +328,14 @@ pub fn prune_transcript(
 
     let recent_threshold = total_steps.saturating_sub(recent_window_steps);
     let conv_id = extract_conversation_id(&transcript_path.to_string_lossy());
+
+    // Check full untruncated transcript size if available
+    let cumulative_full_bytes = transcript_path
+        .parent()
+        .map(|p| p.join("transcript_full.jsonl"))
+        .and_then(|p| p.metadata().ok())
+        .map(|m| m.len() as usize)
+        .unwrap_or(raw_bytes);
 
     let file_pass2 = File::open(transcript_path)?;
     let reader_pass2 = BufReader::new(file_pass2);
@@ -420,6 +470,12 @@ pub fn prune_transcript(
     let topic_slug = generate_topic_slug(&first_user_prompt);
     let suggested_filename = generate_suggested_filename(&topic_slug);
 
+    let logs_dir = transcript_path.parent().unwrap_or_else(|| Path::new("."));
+    let anchor_path = logs_dir.parent().unwrap_or_else(|| Path::new(".")).join("active_shake_anchor.json");
+    let history_events = load_or_discover_history(logs_dir, &anchor_path);
+
+    let timeline_section = format_history_timeline(&history_events);
+
     let header = format!(
         "# Shaken & Pruned History: {}\n\n\
         > [!IMPORTANT]\n\
@@ -435,7 +491,8 @@ pub fn prune_transcript(
         - **Topic**: `{}`\n\
         - **Source Transcript**: `{}`\n\
         - **User Turns**: {} | **Assistant Turns**: {}\n\
-        - **Tool Dumps Pruned**: {} | **Errors Preserved**: {}\n\
+        - **Tool Dumps Pruned**: {} | **Errors Preserved**: {}\n\n\
+        {}\
         ---\n\n",
         topic_slug.replace('_', " ").to_uppercase(),
         conv_id,
@@ -444,7 +501,8 @@ pub fn prune_transcript(
         user_count,
         assistant_count,
         pruned_tools_count,
-        retained_errors_count
+        retained_errors_count,
+        timeline_section
     );
 
     let full_document = format!("{}{}", header, output_blocks.join("\n\n"));
@@ -457,6 +515,12 @@ pub fn prune_transcript(
         0.0
     };
 
+    let cumulative_savings_pct = if cumulative_full_bytes > 0 {
+        (1.0 - (raw_bytes as f64 / cumulative_full_bytes as f64)) * 100.0
+    } else {
+        0.0
+    };
+
     let stats = PruningStats {
         conv_id,
         raw_bytes,
@@ -464,6 +528,11 @@ pub fn prune_transcript(
         raw_tokens,
         pruned_tokens,
         reduction_pct,
+        this_run_before_bytes: raw_bytes,
+        this_run_after_bytes: raw_bytes,
+        this_run_savings_pct: 0.0,
+        cumulative_full_bytes,
+        cumulative_savings_pct,
         user_turns: user_count,
         assistant_turns: assistant_count,
         pruned_tools: pruned_tools_count,
@@ -472,6 +541,7 @@ pub fn prune_transcript(
         retained_recent_steps,
         topic_slug,
         suggested_filename,
+        history_events,
     };
 
     Ok((full_document, stats))

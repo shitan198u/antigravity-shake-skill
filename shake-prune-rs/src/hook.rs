@@ -1,4 +1,4 @@
-use crate::metadata::{write_active_anchor, write_artifact_metadata};
+use crate::metadata::{write_active_anchor, write_artifact_metadata, AnchorFilePayload};
 use crate::pruner::{compact_transcript_inplace, prune_transcript};
 use chrono::Utc;
 use serde::Deserialize;
@@ -23,15 +23,6 @@ struct HookPayload {
     transcript_path: Option<String>,
     #[serde(rename = "artifactDirectoryPath")]
     artifact_directory_path: Option<String>,
-}
-
-#[derive(Deserialize, Debug, Default)]
-struct AnchorData {
-    active: Option<bool>,
-    shaken_file: Option<String>,
-    anchored_at_step: Option<serde_json::Value>,
-    last_compacted_bytes: Option<u64>,
-    last_attempt_timestamp: Option<i64>,
 }
 
 /// Validates that a directory path is a trusted system-managed storage location
@@ -133,11 +124,11 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let mut found_anchor: Option<AnchorData> = None;
+    let mut found_anchor: Option<AnchorFilePayload> = None;
     for path in candidate_paths {
         if path.exists() {
             if let Ok(file) = File::open(&path) {
-                if let Ok(data) = serde_json::from_reader::<_, AnchorData>(file) {
+                if let Ok(data) = serde_json::from_reader::<_, AnchorFilePayload>(file) {
                     if data.active.unwrap_or(false) {
                         found_anchor = Some(data);
                         break;
@@ -164,19 +155,32 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
                 };
 
                 if should_auto_shake {
-                    if let Ok((pruned_md, stats)) = prune_transcript(t_path, 6) {
+                    if let Ok((pruned_md, mut stats)) = prune_transcript(t_path, 6) {
                         let output_path = art_dir.join(&stats.suggested_filename);
                         if let Ok(mut f) = File::create(&output_path) {
                             let _ = f.write_all(pruned_md.as_bytes());
                         }
+
+                        let (before_bytes, after_bytes, backup_file_str) = match compact_transcript_inplace(t_path, 6) {
+                            Ok((b, a, p)) => (b, a, p),
+                            Err(_) => (stats.raw_bytes, stats.pruned_bytes, String::new()),
+                        };
+
+                        stats.this_run_before_bytes = before_bytes;
+                        stats.this_run_after_bytes = after_bytes;
+                        stats.this_run_savings_pct = if before_bytes > 0 {
+                            (1.0 - (after_bytes as f64 / before_bytes as f64)) * 100.0
+                        } else {
+                            0.0
+                        };
+
                         let summary_text = format!(
                             "Auto-compacted verbatim history at 200k token threshold for topic '{}'. Saved {:.1}% context tokens.",
                             stats.topic_slug.replace('_', " "),
                             stats.reduction_pct
                         );
                         let _ = write_artifact_metadata(&output_path, &summary_text);
-                        let _ = write_active_anchor(&output_path, &stats);
-                        let _ = compact_transcript_inplace(t_path, 6);
+                        let _ = write_active_anchor(&output_path, &stats, "Auto (200k Threshold)", &backup_file_str);
 
                         let ephemeral_msg = format!(
                             "[Context auto-compacted via /shake (exceeded 200k token threshold). Active state anchored in @{} (Step {}+). Treat prior raw tool stdout as archived.]",

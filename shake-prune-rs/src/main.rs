@@ -5,8 +5,8 @@ mod pruner;
 mod slug;
 
 use hook::handle_hook;
-use metadata::{write_active_anchor, write_artifact_metadata};
-use pruner::{compact_transcript_inplace, prune_transcript, shell_quote};
+use metadata::{load_or_discover_history, write_active_anchor, write_artifact_metadata};
+use pruner::{compact_transcript_inplace, format_history_timeline, prune_transcript, shell_quote};
 use std::env;
 use std::fs::File;
 use std::io::Write;
@@ -126,7 +126,7 @@ fn main() {
         }
     }
 
-    let (pruned_markdown, stats) = match prune_transcript(&transcript_path, recent_window) {
+    let (pruned_markdown, mut stats) = match prune_transcript(&transcript_path, recent_window) {
         Ok(res) => res,
         Err(e) => {
             eprintln!("Error pruning transcript: {}", e);
@@ -163,6 +163,26 @@ fn main() {
         process::exit(1);
     }
 
+    // Perform physical in-place JSONL compaction with Inode preservation
+    let in_place_result = if in_place {
+        compact_transcript_inplace(&transcript_path, recent_window).ok()
+    } else {
+        None
+    };
+
+    let (before_bytes, after_bytes, backup_file_str) = match in_place_result {
+        Some((b, a, ref p)) => (b, a, p.clone()),
+        None => (stats.raw_bytes, stats.pruned_bytes, String::new()),
+    };
+
+    stats.this_run_before_bytes = before_bytes;
+    stats.this_run_after_bytes = after_bytes;
+    stats.this_run_savings_pct = if before_bytes > 0 {
+        (1.0 - (after_bytes as f64 / before_bytes as f64)) * 100.0
+    } else {
+        0.0
+    };
+
     let summary_text = format!(
         "Shaken & pruned verbatim history for topic '{}'. Saved {:.1}% context tokens ({} tokens vs {} raw). Preserved {} user prompts, all reasoning, and thoughts.",
         stats.topic_slug.replace('_', " "),
@@ -173,35 +193,39 @@ fn main() {
     );
 
     let _ = write_artifact_metadata(&abs_output_path, &summary_text);
-    let _ = write_active_anchor(&abs_output_path, &stats);
-
-    // Perform physical in-place JSONL compaction with Inode preservation
-    let in_place_result = if in_place {
-        compact_transcript_inplace(&transcript_path, recent_window).ok()
-    } else {
-        None
-    };
+    let _ = write_active_anchor(&abs_output_path, &stats, "Manual (/shake)", &backup_file_str);
 
     let abs_str = abs_output_path.display().to_string();
     let quoted_path = shell_quote(&abs_str);
     let encoded_file_url = format!("file://{}", urlencoding::encode(&abs_str).replace("%2F", "/"));
-    let raw_formatted = format_bytes(stats.raw_bytes);
-    let pruned_formatted = format_bytes(stats.pruned_bytes);
+    let before_fmt = format_bytes(stats.this_run_before_bytes);
+    let after_fmt = format_bytes(stats.this_run_after_bytes);
+    let cumulative_full_fmt = format_bytes(stats.cumulative_full_bytes);
     let tokens_saved = stats.raw_tokens.saturating_sub(stats.pruned_tokens);
+
+    let logs_dir = transcript_path.parent().unwrap_or_else(|| Path::new("."));
+    let anchor_path = logs_dir.parent().unwrap_or_else(|| Path::new(".")).join("active_shake_anchor.json");
+    let all_history = load_or_discover_history(logs_dir, &anchor_path);
+    let history_timeline_md = format_history_timeline(&all_history);
 
     println!("\n# ⚡ Context Compaction & Tree-Shaking Report\n");
     println!("Context for this session has been **physically compacted and anchored in this chat window**.");
     println!("All **User prompts, Assistant reasoning, Thoughts, and Error signals are 100% preserved verbatim**.\n");
     println!("---\n");
-    println!("### 📊 Physical Token Reduction Metrics\n");
-    println!("| Metric | Original | Pruned | Savings |");
-    println!("| :--- | :--- | :--- | :--- |");
-    println!("| **Payload Size** | `{}` | `{}` | **{:.1}% physical reduction** |", raw_formatted, pruned_formatted, stats.reduction_pct);
-    println!("| **Estimated Tokens** | `~{}` | `~{}` | **~{} tokens saved** |", stats.raw_tokens, stats.pruned_tokens, tokens_saved);
-    println!("| **Preserved Signals** | {} User turns (100%) | {} Assistant turns (100%) | {} Error traces (100%) |\n", stats.user_turns, stats.assistant_turns, stats.retained_errors);
+    println!("### 📊 Token Reduction & Storage Metrics\n");
+    println!("| Metric Scope | Starting Size | Compacted Size | Net Reduction |");
+    println!("| :--- | :---: | :---: | :---: |");
+    println!("| **This Compaction Pass (`transcript.jsonl`)** | `{}` | `{}` | **{:.1}% saved** |", before_fmt, after_fmt, stats.this_run_savings_pct);
+    println!("| **Cumulative Session Pruning (vs Full Stream)** | `{}` | `{}` | **{:.1}% pruned overall** |", cumulative_full_fmt, after_fmt, stats.cumulative_savings_pct);
+    println!("| **Exportable Summary Artifact (`.md`)** | — | `{}` | **~{} tokens saved** |\n", format_bytes(stats.pruned_bytes), tokens_saved);
+    println!("- **Preserved Core Signals**: {} User turns (100%) | {} Assistant turns (100%) | {} Error traces (100%)\n", stats.user_turns, stats.assistant_turns, stats.retained_errors);
     
-    if in_place_result.is_some() {
+    if !backup_file_str.is_empty() {
         println!("> 💾 **In-Place JSONL Compaction**: `transcript.jsonl` was physically pruned on disk (Inode preserved) with timestamped backup created. Subsequent turns in **this exact window** now transmit the compact payload over the wire.\n");
+    }
+
+    if !history_timeline_md.is_empty() {
+        println!("{}", history_timeline_md);
     }
 
     println!("---\n");
