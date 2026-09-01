@@ -7,8 +7,9 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::Path;
 
+/// Accurate token estimation calibrated for Code, JSON, and Markdown transcripts (~3.3 chars/token).
 pub fn estimate_tokens(byte_count: usize) -> usize {
-    std::cmp::max(1, byte_count / 4)
+    std::cmp::max(1, (byte_count as f64 / 3.3).round() as usize)
 }
 
 fn safe_truncate(s: &str, max_chars: usize) -> String {
@@ -18,6 +19,61 @@ fn safe_truncate(s: &str, max_chars: usize) -> String {
 /// Safely quotes a file path for POSIX shell output to prevent command injection.
 pub fn shell_quote(path_str: &str) -> String {
     format!("'{}'", path_str.replace('\'', "'\\''"))
+}
+
+/// Compacts large tool call arguments (e.g. write_to_file CodeContent, replace_file_content)
+/// into structured receipts while preserving TargetFile, Description, and intent.
+fn compact_tool_call_args(tool_name: &str, args_map: &mut serde_json::Map<String, Value>) {
+    match tool_name {
+        "write_to_file" => {
+            if let Some(code_val) = args_map.get("CodeContent").and_then(|v| v.as_str()) {
+                if code_val.len() > 200 {
+                    let line_count = code_val.lines().count();
+                    args_map.insert(
+                        "CodeContent".to_string(),
+                        Value::String(format!("[File written to disk ({} lines). Inspect via view_file if needed]", line_count)),
+                    );
+                }
+            }
+        }
+        "replace_file_content" => {
+            if let Some(rep_val) = args_map.get("ReplacementContent").and_then(|v| v.as_str()) {
+                if rep_val.len() > 200 {
+                    args_map.insert(
+                        "ReplacementContent".to_string(),
+                        Value::String("[Code edit applied to target file. Inspect via view_file if needed]".to_string()),
+                    );
+                }
+            }
+            if let Some(target_val) = args_map.get("TargetContent").and_then(|v| v.as_str()) {
+                if target_val.len() > 200 {
+                    args_map.insert(
+                        "TargetContent".to_string(),
+                        Value::String("[Original target code snippet]".to_string()),
+                    );
+                }
+            }
+        }
+        "multi_replace_file_content" => {
+            if let Some(chunks) = args_map.get_mut("ReplacementChunks").and_then(|v| v.as_array_mut()) {
+                for chunk in chunks {
+                    if let Some(chunk_map) = chunk.as_object_mut() {
+                        if let Some(rc) = chunk_map.get("ReplacementContent").and_then(|v| v.as_str()) {
+                            if rc.len() > 100 {
+                                chunk_map.insert("ReplacementContent".to_string(), Value::String("[Replacement chunk applied]".to_string()));
+                            }
+                        }
+                        if let Some(tc) = chunk_map.get("TargetContent").and_then(|v| v.as_str()) {
+                            if tc.len() > 100 {
+                                chunk_map.insert("TargetContent".to_string(), Value::String("[Target chunk snippet]".to_string()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Compacts a JSONL file in-place while PRESERVING the exact same filesystem Inode.
@@ -81,21 +137,35 @@ fn compact_single_jsonl_file(
             || status.contains("error")
             || status.contains("failed");
 
-        if !is_recent && !is_error {
-            match stype.as_str() {
-                "RUN_COMMAND" => {
-                    let content_len = step_val.get("content").and_then(|v| v.as_str()).map(|s| s.len()).unwrap_or(0);
-                    if content_len > 250 {
-                        step_val["content"] = serde_json::json!("Command completed successfully (exit 0). Verbose stdout pruned via /shake.");
+        if !is_recent {
+            // Idea 2: Compact large code payloads in tool_calls for PLANNER_RESPONSE
+            if stype == "PLANNER_RESPONSE" {
+                if let Some(tool_calls) = step_val.get_mut("tool_calls").and_then(|v| v.as_array_mut()) {
+                    for tc in tool_calls {
+                        let name = tc.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        if let Some(args_map) = tc.get_mut("args").and_then(|v| v.as_object_mut()) {
+                            compact_tool_call_args(&name, args_map);
+                        }
                     }
                 }
-                "VIEW_FILE" => {
-                    step_val["content"] = serde_json::json!("File inspected in previous turn. Content pruned via /shake.");
+            }
+
+            if !is_error {
+                match stype.as_str() {
+                    "RUN_COMMAND" => {
+                        let content_len = step_val.get("content").and_then(|v| v.as_str()).map(|s| s.len()).unwrap_or(0);
+                        if content_len > 250 {
+                            step_val["content"] = serde_json::json!("Command completed successfully (exit 0). Verbose stdout pruned via /shake.");
+                        }
+                    }
+                    "VIEW_FILE" => {
+                        step_val["content"] = serde_json::json!("File inspected in previous turn. Content pruned via /shake.");
+                    }
+                    "SEARCH_WEB" | "GREP_SEARCH" | "CODE_ACTION" => {
+                        step_val["content"] = serde_json::json!(format!("{} completed successfully. Output pruned via /shake.", stype));
+                    }
+                    _ => {}
                 }
-                "SEARCH_WEB" | "GREP_SEARCH" | "CODE_ACTION" => {
-                    step_val["content"] = serde_json::json!(format!("{} completed successfully. Output pruned via /shake.", stype));
-                }
-                _ => {}
             }
         }
 
@@ -237,7 +307,9 @@ pub fn prune_transcript(
                                     serde_json::Value::String(s) => s.replace('\n', " "),
                                     other => other.to_string().replace('\n', " "),
                                 };
-                                let v_formatted = if v_str.chars().count() > 120 {
+                                let v_formatted = if (k == "CodeContent" || k == "ReplacementContent" || k == "TargetContent") && v_str.len() > 100 {
+                                    "[Code payload archived on disk]".to_string()
+                                } else if v_str.chars().count() > 120 {
                                     format!("{}... [truncated]", safe_truncate(&v_str, 120))
                                 } else {
                                     v_str

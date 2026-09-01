@@ -14,7 +14,8 @@ import shlex
 from pathlib import Path
 
 def estimate_tokens(text: str) -> int:
-    return max(1, len(text) // 4)
+    # Calibrated token density for Code, JSON, and Markdown transcripts (~3.3 chars/token)
+    return max(1, round(len(text) / 3.3))
 
 def format_bytes(bytes_count: int) -> str:
     if bytes_count >= 1024 * 1024:
@@ -37,11 +38,33 @@ def extract_conversation_id(path_str: str) -> str:
     match = re.search(r"brain[/\\]([a-zA-Z0-9_-]+)[/\\]", path_str)
     return match.group(1) if match else "unknown-session"
 
+def compact_tool_call_args(tool_name: str, args_map: dict):
+    if tool_name == "write_to_file":
+        code_val = str(args_map.get("CodeContent", ""))
+        if len(code_val) > 200:
+            lines = len(code_val.splitlines())
+            args_map["CodeContent"] = f"[File written to disk ({lines} lines). Inspect via view_file if needed]"
+    elif tool_name == "replace_file_content":
+        rep_val = str(args_map.get("ReplacementContent", ""))
+        if len(rep_val) > 200:
+            args_map["ReplacementContent"] = "[Code edit applied to target file. Inspect via view_file if needed]"
+        tgt_val = str(args_map.get("TargetContent", ""))
+        if len(tgt_val) > 200:
+            args_map["TargetContent"] = "[Original target code snippet]"
+    elif tool_name == "multi_replace_file_content":
+        chunks = args_map.get("ReplacementChunks")
+        if isinstance(chunks, list):
+            for chunk in chunks:
+                if isinstance(chunk, dict):
+                    if len(str(chunk.get("ReplacementContent", ""))) > 100:
+                        chunk["ReplacementContent"] = "[Replacement chunk applied]"
+                    if len(str(chunk.get("TargetContent", ""))) > 100:
+                        chunk["TargetContent"] = "[Target chunk snippet]"
+
 def compact_single_jsonl_file(t_file: Path, recent_window_steps: int = 6) -> bool:
     if not t_file.exists():
         return False
 
-    # 1. Create timestamped backup (preserves history across multiple shakes)
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     bak_timestamped = t_file.with_suffix(f".jsonl.bak_{timestamp}")
     bak_latest = t_file.with_suffix(".jsonl.bak")
@@ -51,7 +74,6 @@ def compact_single_jsonl_file(t_file: Path, recent_window_steps: int = 6) -> boo
     except Exception:
         pass
 
-    # 2. Open in r+ mode to PRESERVE original filesystem inode
     try:
         with open(t_file, "r+", encoding="utf-8") as f:
             lines = f.readlines()
@@ -74,19 +96,29 @@ def compact_single_jsonl_file(t_file: Path, recent_window_steps: int = 6) -> boo
                 is_recent = (i >= recent_threshold)
                 is_error = (exit_code is not None and exit_code != 0) or ("error" in status) or ("failed" in status)
 
-                if not is_recent and not is_error:
-                    if stype == "RUN_COMMAND":
-                        content = str(step.get("content", ""))
-                        if len(content) > 250:
-                            step["content"] = "Command completed successfully (exit 0). Verbose stdout pruned via /shake."
-                    elif stype == "VIEW_FILE":
-                        step["content"] = "File inspected in previous turn. Content pruned via /shake."
-                    elif stype in ("SEARCH_WEB", "GREP_SEARCH", "CODE_ACTION"):
-                        step["content"] = f"{stype} completed successfully. Output pruned via /shake."
+                if not is_recent:
+                    # Idea 2: Compact large code args in tool_calls for PLANNER_RESPONSE
+                    if stype == "PLANNER_RESPONSE":
+                        tool_calls = step.get("tool_calls", [])
+                        if isinstance(tool_calls, list):
+                            for tc in tool_calls:
+                                name = tc.get("name", "")
+                                args = tc.get("args")
+                                if isinstance(args, dict):
+                                    compact_tool_call_args(name, args)
+
+                    if not is_error:
+                        if stype == "RUN_COMMAND":
+                            content = str(step.get("content", ""))
+                            if len(content) > 250:
+                                step["content"] = "Command completed successfully (exit 0). Verbose stdout pruned via /shake."
+                        elif stype == "VIEW_FILE":
+                            step["content"] = "File inspected in previous turn. Content pruned via /shake."
+                        elif stype in ("SEARCH_WEB", "GREP_SEARCH", "CODE_ACTION"):
+                            step["content"] = f"{stype} completed successfully. Output pruned via /shake."
 
                 compacted_lines.append(json.dumps(step) + "\n")
 
-            # Inode-preserving truncate and rewrite
             f.seek(0)
             f.truncate(0)
             f.writelines(compacted_lines)
@@ -99,7 +131,6 @@ def compact_transcript_inplace(transcript_path: str, recent_window_steps: int = 
     t_file = Path(transcript_path)
     ok1 = compact_single_jsonl_file(t_file, recent_window_steps)
 
-    # Also compact transcript_full.jsonl for IDE UI rendering
     if t_file.parent:
         full_transcript = t_file.parent / "transcript_full.jsonl"
         if full_transcript.exists() and full_transcript != t_file:
@@ -178,9 +209,13 @@ def prune_transcript(transcript_path: str, recent_window_steps: int = 6) -> tupl
                         if isinstance(args, dict):
                             for k, v in args.items():
                                 v_str = str(v).replace("\n", " ")
-                                if len(v_str) > 120:
-                                    v_str = v_str[:120] + "... [truncated]"
-                                arg_items.append(f"{k}={v_str}")
+                                if (k in ("CodeContent", "ReplacementContent", "TargetContent")) and len(v_str) > 100:
+                                    v_formatted = "[Code payload archived on disk]"
+                                elif len(v_str) > 120:
+                                    v_formatted = v_str[:120] + "... [truncated]"
+                                else:
+                                    v_formatted = v_str
+                                arg_items.append(f"{k}={v_formatted}")
                         arg_summary = ", ".join(arg_items)
                         output_blocks.append(f"- ⚙️ **Action Executed**: `{name}({arg_summary})`")
 
@@ -235,7 +270,7 @@ def prune_transcript(transcript_path: str, recent_window_steps: int = 6) -> tupl
 
     pruned_content = "\n".join(header) + "\n\n".join(output_blocks)
     pruned_bytes = len(pruned_content.encode("utf-8"))
-    raw_tokens = estimate_tokens(str(raw_bytes))
+    raw_tokens = max(1, round(raw_bytes / 3.3))
     pruned_tokens = estimate_tokens(pruned_content)
     reduction_pct = (1.0 - (pruned_bytes / max(raw_bytes, 1))) * 100.0
 
