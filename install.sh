@@ -20,6 +20,7 @@ echo "==========================================================================
 mkdir -p "${TARGET_SKILL_DIR}/scripts"
 mkdir -p "${TARGET_SKILL_DIR}/references"
 mkdir -p "${TARGET_SKILL_DIR}/assets"
+mkdir -p "${TARGET_SKILL_DIR}/bin"
 mkdir -p "${TARGET_BIN_DIR}"
 
 # 2. Copy Skill definition, fallback scripts, assets, and reference documentation
@@ -43,6 +44,8 @@ if [ -f "${PREBUILT_BIN}" ] && "${PREBUILT_BIN}" --help >/dev/null 2>&1; then
     echo "• Installing precompiled native binary to: ${TARGET_BIN_DIR}/shake-prune"
     cp "${PREBUILT_BIN}" "${TARGET_BIN_DIR}/shake-prune"
     chmod +x "${TARGET_BIN_DIR}/shake-prune"
+    cp "${PREBUILT_BIN}" "${TARGET_SKILL_DIR}/bin/shake-prune"
+    chmod +x "${TARGET_SKILL_DIR}/bin/shake-prune"
     BINARY_INSTALLED=true
 elif command -v cargo >/dev/null 2>&1 && [ -f "${SCRIPT_DIR}/shake-prune-rs/Cargo.toml" ]; then
     echo "• Prebuilt binary incompatible with this architecture/glibc. Compiling via cargo..."
@@ -51,6 +54,8 @@ elif command -v cargo >/dev/null 2>&1 && [ -f "${SCRIPT_DIR}/shake-prune-rs/Carg
     if [ -f "${RUST_BIN}" ]; then
         cp "${RUST_BIN}" "${TARGET_BIN_DIR}/shake-prune"
         chmod +x "${TARGET_BIN_DIR}/shake-prune"
+        cp "${RUST_BIN}" "${TARGET_SKILL_DIR}/bin/shake-prune"
+        chmod +x "${TARGET_SKILL_DIR}/bin/shake-prune"
         echo "• Installed compiled native binary to: ${TARGET_BIN_DIR}/shake-prune"
         BINARY_INSTALLED=true
     fi
