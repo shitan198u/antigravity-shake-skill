@@ -5,6 +5,25 @@
 
 ---
 
+## 📸 Live UI Showcase
+
+<p align="center">
+  <img src="assets/shake_showcase.gif" alt="Antigravity /shake and /full-shake UI Showcase" width="700">
+</p>
+
+<details open>
+<summary>🔍 <b>Side-by-Side Visual Gallery: Standard <code>/shake</code> vs. Deep <code>/full-shake</code></b></summary>
+<br/>
+
+| 🟢 Standard `/shake` (100% Thoughts Retained) | ⚡ Deep `/full-shake` (20-Turn Thought Window) |
+| :---: | :---: |
+| <a href="assets/artifact_preview.png"><img src="assets/artifact_preview.png" width="380" alt="Standard /shake Report"></a> | <a href="assets/full_shake_preview.png"><img src="assets/full_shake_preview.png" width="380" alt="Deep /full-shake Report"></a> |
+| *Zero-loss baseline report* | *Includes 2-tier scopes & timeline dropdown* |
+
+</details>
+
+---
+
 ## 🌟 Why `/shake`?
 
 During long development sessions, AI coding agents accumulate tens of thousands of lines of terminal output, compiler logs, and file inspections. This leads to **"context rot"**:
@@ -25,7 +44,7 @@ During long development sessions, AI coding agents accumulate tens of thousands 
 * 🧠 **100% Signal Retention**: Preserves all user prompts, assistant thoughts/reasoning, and non-zero exit error traces verbatim.
 * 🕒 **Active Working Window**: Retains the last 6 execution steps with 0% pruning so active momentum is never interrupted.
 * 🔍 **Progressive Disclosure Backlinks**: Compacts older code writes into lightweight receipts containing canonical absolute paths to timestamped backups (`.bak_<timestamp>`).
-* 🔒 **Hardened Security**: ReDoS-immune linear scanning, HTML/XSS sanitization, URL-encoded links, exclusive `0600` tempfiles, and strict path validation.
+* 🔒 **Hardened Security**: ReDoS-immune linear scanning, HTML/XSS sanitization, URL-encoded links, exclusive `0600` tempfiles, and strict canonical allowlists.
 * 🦀 **Pure Native Rust**: Precompiled multi-platform binaries for Linux (x86_64), macOS (Universal Binary for Apple Silicon & Intel), and Windows (x86_64).
 
 ---
@@ -34,8 +53,8 @@ During long development sessions, AI coding agents accumulate tens of thousands 
 
 | Metric | Original Active Session | Compacted via `/shake` | Total Savings |
 | :--- | :--- | :--- | :--- |
-| **Payload Size on Disk** | `1.1 MB` | `470 KB` | **54.5% – 78% physical reduction** |
-| **Estimated Token Load** | `~330,000 tokens` | `~145,000 tokens` | **`~185,000 tokens saved`** |
+| **Payload Size on Disk** | `1.4 MB` | `470 KB` | **54.5% – 78% physical reduction** |
+| **Estimated Token Load** | `~420,000 tokens` | `~145,000 tokens` | **`~275,000 tokens saved`** |
 | **Execution Overhead** | — | Native Rust binary | **`<10ms` in-place rewrite** |
 | **Hook Latency** | — | Native PreInvocation | **`<0.2ms` per prompt** |
 
@@ -90,6 +109,9 @@ You don't even have to remember to run `/shake`! The included `PreInvocation` ho
 # Compact a specific transcript in-place
 shake-prune /path/to/brain/session_id/.system_generated/logs/transcript.jsonl
 
+# Run full deep compaction with custom thought window
+shake-prune /path/to/transcript.jsonl --full --thought-window 25
+
 # Specify a custom output directory and keep the last 8 tool steps intact
 shake-prune /path/to/transcript.jsonl /path/to/output_dir/ --recent-window 8
 
@@ -113,9 +135,9 @@ shake-prune --hook
 ## 🛡️ Security & Reliability Architecture
 
 * **Strict Input/Output Validation**: Rejects access to sensitive system paths (`/etc`, `/root`, `C:\Windows`).
-* **Context Poisoning Prevention**: Restricts anchor discovery strictly to trusted system directories (`~/.gemini` or `/brain/`).
+* **Context Poisoning Prevention**: Restricts anchor discovery strictly to canonical system directories (`~/.gemini`).
 * **Exclusive Concurrency (`fs2`)**: Holds exclusive file locks during in-place truncation and issues `fsync` (`sync_all()`) before unlocking.
-* **Fail-Open Hook Guarantee**: The `PreInvocation` hook runs with `catch_unwind` protection—it will always emit `{}` and exit cleanly on any error or panic.
+* **Fail-Open Hook Guarantee**: The `PreInvocation` hook runs with `panic::catch_unwind` protection—it will always emit `{}` and exit cleanly on any error or panic.
 
 ---
 
