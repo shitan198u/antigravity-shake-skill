@@ -1,8 +1,13 @@
+use crate::metadata::{write_active_anchor, write_artifact_metadata};
+use crate::pruner::{compact_transcript_inplace, prune_transcript};
 use serde::Deserialize;
 use serde_json::json;
-use std::fs::File;
-use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+use std::fs::{self, File};
+use std::io::{self, Read, Write};
+use std::path::PathBuf;
+
+// 200k tokens * ~3.3 bytes/token = 660,000 bytes
+const AUTO_SHAKE_TOKEN_THRESHOLD_BYTES: u64 = 660_000;
 
 #[derive(Deserialize, Debug, Default)]
 struct HookPayload {
@@ -38,42 +43,111 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let payload: HookPayload = serde_json::from_str(&stdin_buffer).unwrap_or_default();
-    let mut candidate_paths: Vec<PathBuf> = Vec::new();
+    
+    // Resolve conversation directory, transcript path, and artifact directory
+    let mut resolved_transcript: Option<PathBuf> = None;
+    let mut resolved_art_dir: Option<PathBuf> = None;
 
-    // 1. Direct artifact directory
     if let Some(art_dir) = &payload.artifact_directory_path {
-        candidate_paths.push(Path::new(art_dir).join("active_shake_anchor.json"));
-    }
-
-    // 2. Transcript path traversal:
-    // transcript is at: <conv_id>/.system_generated/logs/transcript.jsonl
-    // parent 1 = logs, parent 2 = .system_generated, parent 3 = <conv_id>
-    if let Some(t_path) = &payload.transcript_path {
-        if let Some(conv_dir) = Path::new(t_path).parent().and_then(|p| p.parent()).and_then(|p| p.parent()) {
-            candidate_paths.push(conv_dir.join("active_shake_anchor.json"));
+        let p = PathBuf::from(art_dir);
+        resolved_art_dir = Some(p.clone());
+        let possible_t = p.join(".system_generated/logs/transcript.jsonl");
+        if possible_t.exists() {
+            resolved_transcript = Some(possible_t);
         }
     }
 
-    // 3. Fallback discovery across known global brain directories
-    if let Some(conv_id) = &payload.conversation_id {
-        let mut home_dirs = Vec::new();
-        if let Ok(home) = std::env::var("HOME") {
-            home_dirs.push(PathBuf::from(home));
-        }
-        if let Ok(uprof) = std::env::var("USERPROFILE") {
-            home_dirs.push(PathBuf::from(uprof));
-        }
-
-        let base_dirs = [
-            ".gemini/antigravity-ide/brain",
-            ".gemini/antigravity/brain",
-            ".gemini/antigravity-cli/brain",
-        ];
-        for h in &home_dirs {
-            for base in &base_dirs {
-                candidate_paths.push(h.join(base).join(conv_id).join("active_shake_anchor.json"));
+    if resolved_transcript.is_none() {
+        if let Some(t_path) = &payload.transcript_path {
+            let p = PathBuf::from(t_path);
+            if p.exists() {
+                resolved_transcript = Some(p.clone());
+                if let Some(conv_dir) = p.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) {
+                    if resolved_art_dir.is_none() {
+                        resolved_art_dir = Some(conv_dir.to_path_buf());
+                    }
+                }
             }
         }
+    }
+
+    // Fallback discovery across known global brain directories if conversation_id is provided
+    if resolved_transcript.is_none() {
+        if let Some(conv_id) = &payload.conversation_id {
+            let mut home_dirs = Vec::new();
+            if let Ok(home) = std::env::var("HOME") {
+                home_dirs.push(PathBuf::from(home));
+            }
+            if let Ok(uprof) = std::env::var("USERPROFILE") {
+                home_dirs.push(PathBuf::from(uprof));
+            }
+
+            let base_dirs = [
+                ".gemini/antigravity-ide/brain",
+                ".gemini/antigravity/brain",
+                ".gemini/antigravity-cli/brain",
+            ];
+            for h in &home_dirs {
+                for base in &base_dirs {
+                    let conv_dir = h.join(base).join(conv_id);
+                    let t_path = conv_dir.join(".system_generated/logs/transcript.jsonl");
+                    if t_path.exists() {
+                        resolved_transcript = Some(t_path);
+                        resolved_art_dir = Some(conv_dir);
+                        break;
+                    }
+                }
+                if resolved_transcript.is_some() {
+                    break;
+                }
+            }
+        }
+    }
+
+    // ⚡ PROACTIVE AUTO-SHAKE: Check if transcript exceeds 200k tokens (660 KB)
+    if let (Some(t_path), Some(art_dir)) = (&resolved_transcript, &resolved_art_dir) {
+        if let Ok(meta) = fs::metadata(t_path) {
+            if meta.len() >= AUTO_SHAKE_TOKEN_THRESHOLD_BYTES {
+                // Automatically compact in-place in background
+                if let Ok((pruned_md, stats)) = prune_transcript(t_path, 6) {
+                    let output_path = art_dir.join(&stats.suggested_filename);
+                    if let Ok(mut f) = File::create(&output_path) {
+                        let _ = f.write_all(pruned_md.as_bytes());
+                    }
+                    let summary_text = format!(
+                        "Auto-compacted verbatim history at 200k token threshold for topic '{}'. Saved {:.1}% context tokens.",
+                        stats.topic_slug.replace('_', " "),
+                        stats.reduction_pct
+                    );
+                    let _ = write_artifact_metadata(&output_path, &summary_text);
+                    let _ = write_active_anchor(&output_path, &stats);
+                    let _ = compact_transcript_inplace(t_path, 6);
+
+                    let ephemeral_msg = format!(
+                        "[Context auto-compacted via /shake (exceeded 200k token threshold). Active state anchored in @{} (Step {}+). Treat prior raw tool stdout as archived.]",
+                        output_path.display(),
+                        stats.user_turns + stats.assistant_turns + stats.pruned_tools
+                    );
+
+                    let response = json!({
+                        "injectSteps": [
+                            {
+                                "ephemeralMessage": ephemeral_msg
+                            }
+                        ]
+                    });
+
+                    println!("{}", serde_json::to_string(&response)?);
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    // Normal anchor lookup if under 200k tokens
+    let mut candidate_paths: Vec<PathBuf> = Vec::new();
+    if let Some(art_dir) = &resolved_art_dir {
+        candidate_paths.push(art_dir.join("active_shake_anchor.json"));
     }
 
     let mut found_anchor: Option<AnchorData> = None;
