@@ -5,6 +5,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
+use std::panic;
 use std::path::{Path, PathBuf};
 
 // 200k tokens * ~3.3 bytes/token = 660,000 bytes
@@ -41,7 +42,14 @@ fn is_trusted_storage_path(p: &Path) -> bool {
 }
 
 pub fn handle_hook() {
-    if let Err(_) = run_hook_safely() {
+    // Panic-safe & Error-safe fail-open guarantee: always outputs valid JSON with exit 0
+    let result = panic::catch_unwind(|| {
+        if let Err(_) = run_hook_safely() {
+            println!("{{}}");
+        }
+    });
+
+    if result.is_err() {
         println!("{{}}");
     }
 }

@@ -1,6 +1,7 @@
 use crate::models::{PruningStats, Step};
 use crate::slug::{extract_conversation_id, generate_suggested_filename, generate_topic_slug};
 use chrono::Local;
+use fs2::FileExt;
 use serde_json::Value;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
@@ -117,7 +118,8 @@ fn compact_tool_call_args(
     }
 }
 
-/// Compacts a JSONL file in-place while PRESERVING the exact same filesystem Inode.
+/// Compacts a JSONL file in-place while PRESERVING the exact same filesystem Inode
+/// and holding an exclusive file lock to eliminate cross-process write race conditions.
 fn compact_single_jsonl_file(
     target_path: &Path,
     recent_window_steps: usize,
@@ -128,7 +130,7 @@ fn compact_single_jsonl_file(
 
     let abs_target = fs::canonicalize(target_path).unwrap_or_else(|_| target_path.to_path_buf());
 
-    // 1. Create a timestamped backup first (never overwrite prior backups)
+    // 1. Create a timestamped backup first
     let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
     let backup_timestamped = abs_target.with_extension(format!("jsonl.bak_{}", timestamp));
     let backup_latest = abs_target.with_extension("jsonl.bak");
@@ -137,10 +139,11 @@ fn compact_single_jsonl_file(
 
     let backup_abs_str = backup_timestamped.to_string_lossy().to_string();
 
-    // 2. Open the file in Read+Write mode (preserves original inode on disk)
+    // 2. Open the file in Read+Write mode and acquire an exclusive file lock
     let mut file = File::options().read(true).write(true).open(&abs_target)?;
+    file.lock_exclusive()?;
 
-    // Pass 1: Read and count steps
+    // Read and count steps
     let mut lines_buffer: Vec<String> = Vec::new();
     let mut initial_bytes = 0usize;
     {
@@ -158,7 +161,7 @@ fn compact_single_jsonl_file(
     let total_steps = lines_buffer.len();
     let recent_threshold = total_steps.saturating_sub(recent_window_steps);
 
-    // Pass 2: Compact lines in memory
+    // Compact lines in memory
     let mut compacted_output = String::with_capacity(initial_bytes / 2);
 
     for (i, line_str) in lines_buffer.into_iter().enumerate() {
@@ -228,11 +231,13 @@ fn compact_single_jsonl_file(
 
     let compacted_bytes = compacted_output.len();
 
-    // 3. Truncate in-place and rewind (Inode preserved!)
+    // 3. Truncate in-place, rewind, write, and call fsync (sync_all) before unlocking
     file.set_len(0)?;
     file.seek(SeekFrom::Start(0))?;
     file.write_all(compacted_output.as_bytes())?;
     file.flush()?;
+    file.sync_all()?;
+    file.unlock()?;
 
     Ok((initial_bytes, compacted_bytes))
 }

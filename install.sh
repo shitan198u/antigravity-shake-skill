@@ -18,6 +18,7 @@ echo "==========================================================================
 mkdir -p "${GLOBAL_SKILLS_DIR}/bin"
 mkdir -p "${GLOBAL_SKILLS_DIR}/references"
 mkdir -p "${GLOBAL_BIN_DIR}"
+chmod 700 "${GLOBAL_BIN_DIR}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -94,12 +95,11 @@ echo "• Merging PreInvocation hook into ~/.gemini/config/hooks.json (preservin
 mkdir -p "$(dirname "${HOOKS_CONFIG}")"
 
 HOOK_BIN="${GLOBAL_BIN_DIR}/shake-prune"
-HOOK_DEF="{\"name\":\"shake-anchor\",\"command\":\"${HOOK_BIN} --hook\"}"
 
-if [ ! -f "${HOOKS_CONFIG}" ]; then
-    echo "{\"hooks\":{\"PreInvocation\":[${HOOK_DEF}]}}" > "${HOOKS_CONFIG}"
-else
-    if command -v jq >/dev/null 2>&1; then
+if command -v jq >/dev/null 2>&1; then
+    if [ ! -f "${HOOKS_CONFIG}" ]; then
+        jq -n --arg cmd "${HOOK_BIN} --hook"           '{"hooks": {"PreInvocation": [{"name": "shake-anchor", "command": $cmd}]}}' > "${HOOKS_CONFIG}"
+    else
         TMP_JSON="$(mktemp)"
         jq --arg cmd "${HOOK_BIN} --hook" '
           .hooks = (.hooks // {}) |
@@ -109,6 +109,22 @@ else
           )
         ' "${HOOKS_CONFIG}" > "${TMP_JSON}" && mv "${TMP_JSON}" "${HOOKS_CONFIG}"
     fi
+else
+    # Safe POSIX fallback without command interpolation
+    TMP_JSON="$(mktemp)"
+    cat << JSONEOF > "${TMP_JSON}"
+{
+  "hooks": {
+    "PreInvocation": [
+      {
+        "name": "shake-anchor",
+        "command": "${HOOK_BIN} --hook"
+      }
+    ]
+  }
+}
+JSONEOF
+    mv "${TMP_JSON}" "${HOOKS_CONFIG}"
 fi
 
 chmod 600 "${HOOKS_CONFIG}"

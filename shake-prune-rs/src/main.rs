@@ -63,6 +63,29 @@ fn validate_transcript_path(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Validates that an output path is not pointed at sensitive system directories
+/// to prevent arbitrary file overwrite vulnerabilities via prompt injection.
+fn validate_output_path(target: &Path) -> Result<(), String> {
+    let p_str = target.to_string_lossy();
+    let lower = p_str.to_lowercase();
+
+    let forbidden_prefixes = [
+        "/etc", "/root", "/bin", "/sbin", "/usr", "/boot", "/sys", "/proc", "/dev",
+        "c:\\windows", "c:\\program files", "\\windows", "\\system32"
+    ];
+
+    for prefix in forbidden_prefixes {
+        if lower.starts_with(prefix) {
+            return Err(format!(
+                "Security Error: Output path '{}' is within restricted system directory '{}'",
+                p_str, prefix
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 || args[1] == "--help" || args[1] == "-h" || args[1] == "help" {
@@ -119,6 +142,11 @@ fn main() {
         PathBuf::from(&stats.suggested_filename)
     };
 
+    if let Err(err_msg) = validate_output_path(&output_path) {
+        eprintln!("{}", err_msg);
+        process::exit(1);
+    }
+
     let abs_output_path = match std::fs::canonicalize(&output_path) {
         Ok(p) => p,
         Err(_) => {
@@ -156,6 +184,7 @@ fn main() {
 
     let abs_str = abs_output_path.display().to_string();
     let quoted_path = shell_quote(&abs_str);
+    let encoded_file_url = format!("file://{}", urlencoding::encode(&abs_str).replace("%2F", "/"));
     let raw_formatted = format_bytes(stats.raw_bytes);
     let pruned_formatted = format_bytes(stats.pruned_bytes);
     let tokens_saved = stats.raw_tokens.saturating_sub(stats.pruned_tokens);
@@ -178,7 +207,7 @@ fn main() {
     println!("---\n");
     println!("### 🟢 In-Window Fresh Slate Active");
     println!("> **Ready to continue**: Your context memory is now physically pruned. Simply type your next prompt and press **Send** in this chat.\n");
-    println!("- **Interactive Artifact**: [📄 {}](file://{}) *(Click to preview in side pane)*\n", stats.suggested_filename, abs_str);
+    println!("- **Interactive Artifact**: [📄 {}]({}) *(Click to preview in side pane)*\n", stats.suggested_filename, encoded_file_url);
     println!("<details>");
     println!("<summary>📋 Need to export or copy this session elsewhere?</summary>\n");
     println!("- **In-Chat Mention**: `@{}`", abs_str);
