@@ -10,6 +10,7 @@ pub struct ToolCall {
 pub struct Step {
     #[serde(rename = "type")]
     pub step_type: Option<String>,
+    #[allow(dead_code)]
     pub source: Option<String>,
     pub content: Option<String>,
     pub status: Option<String>,

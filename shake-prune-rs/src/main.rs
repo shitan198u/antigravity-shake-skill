@@ -12,18 +12,21 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 fn print_usage() {
-    eprintln!("Usage: shake-prune <transcript.jsonl> [output_file_or_dir] [--recent-window N]");
-    eprintln!("\nExamples:");
-    eprintln!("  shake-prune /path/to/transcript.jsonl");
-    eprintln!("  shake-prune /path/to/transcript.jsonl /path/to/output_dir/");
-    eprintln!("  shake-prune /path/to/transcript.jsonl /path/to/custom_name.md --recent-window 8");
+    println!("Usage: shake-prune <transcript.jsonl> [output_file_or_dir] [--recent-window N]");
+    println!("\nOptions:");
+    println!("  -h, --help           Show this help message and exit");
+    println!("  --recent-window N    Number of recent tool execution steps to keep intact (default: 6)");
+    println!("\nExamples:");
+    println!("  shake-prune /path/to/transcript.jsonl");
+    println!("  shake-prune /path/to/transcript.jsonl /path/to/output_dir/");
+    println!("  shake-prune /path/to/transcript.jsonl /path/to/custom_name.md --recent-window 8");
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    if args.len() < 2 {
+    if args.len() < 2 || args[1] == "--help" || args[1] == "-h" || args[1] == "help" {
         print_usage();
-        process::exit(1);
+        process::exit(0);
     }
 
     let transcript_path = PathBuf::from(&args[1]);
