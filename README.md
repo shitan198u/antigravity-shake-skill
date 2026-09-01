@@ -106,6 +106,13 @@ You don't have to leave the window! Just type your next message and press **Send
 
 ---
 
+## 📚 Deep Dive & Architecture
+
+* 🧠 **[How `/shake` Works & Context Mechanics](references/how_it_works.md)**: Deep technical breakdown of how transcript streams, non-destructive compaction, in-window hooks, and full-context verbatim injection work under the hood.
+* ⚖️ **[`omp` vs Antigravity Comparison](references/omp_comparison.md)**: Detailed technical comparison between the original `omp` CLI context pruner and the Antigravity implementation.
+
+---
+
 ## 📦 Package Contents
 
 ```text
@@ -123,9 +130,11 @@ antigravity-shake/
 ├── README.md                      # Comprehensive documentation
 ├── SKILL.md                       # Antigravity skill definition (Zero-guesswork workflow)
 ├── references/
+│   ├── how_it_works.md            # Deep dive on transcript mechanics, hooks & full-context injection
 │   └── omp_comparison.md          # Technical analysis of omp vs Antigravity pruning
 ├── scripts/
-│   └── shake_prune.py             # Universal Python fallback engine
+│   ├── shake_prune.py             # Universal Python fallback engine
+│   └── pre_invocation_hook.py     # Python fallback lifecycle hook
 └── shake-prune-rs/                # High-speed Rust crate source
     ├── Cargo.toml                 # Dependencies & release profile
     └── src/
