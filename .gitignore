@@ -1,0 +1,14 @@
+# Rust build artifacts
+shake-prune-rs/target/
+target/
+**/*.rs.bk
+Cargo.lock
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# OS / Editor
+.DS_Store
+.vscode/
+.idea/
