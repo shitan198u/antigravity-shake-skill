@@ -1,0 +1,11 @@
+{
+  "shake-anchor": {
+    "enabled": true,
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "python3 /home/shsrra/.gemini/config/skills/shake/scripts/pre_invocation_hook.py"
+      }
+    ]
+  }
+}

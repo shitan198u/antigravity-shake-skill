@@ -1,52 +1,33 @@
 ---
 name: shake
-description: >-
-  Compacts, prunes, and tree-shakes conversation context to reduce token bloat while
-  preserving essential task state, decisions, modified files, and next actions.
-  Use this skill whenever the user invokes `/shake` or asks to prune, compact,
-  or refresh the agent's context and working memory.
+description: Compacts and prunes conversation context by deterministically stripping verbose tool outputs, file views, and command stdout while preserving 100% of User prompts, Assistant reasoning, and Thoughts verbatim. Supports seamless in-window continuation via PreInvocation hook.
 ---
 
-# `/shake` Context Compaction & Verbatim Pruning Skill
+# `/shake` — Context Compaction & Verbatim Pruning
 
-The `/shake` skill eliminates context bloat caused by verbose command outputs, file views, and tool payloads while preserving **100% of the user and assistant dialogue verbatim** without lossy summarization.
+Compacts, prunes, and tree-shakes conversation context to reduce token bloat while preserving essential task state, decisions, modified files, and next actions. Use this skill whenever the user invokes `/shake` or asks to prune, compact, or refresh the agent's context and working memory.
 
----
+## Instructions
 
-## Execution Workflow
+When the user types `/shake` or asks to prune/compact context:
 
-When `/shake` is triggered:
+1. **Locate Current Transcript**:
+   Find the active transcript file at `<appDataDir>/brain/<conversation-id>/.system_generated/logs/transcript.jsonl`.
 
-### Step 1: Run Native Pruner
-Run the native Rust binary (or Python fallback) on the current session:
+2. **Execute High-Speed Pruning**:
+   Execute the native Rust pruner (or Python fallback) to prune the transcript:
+   ```bash
+   shake-prune "<appDataDir>/brain/<conversation-id>/.system_generated/logs/transcript.jsonl" "<appDataDir>/brain/<conversation-id>/"
+   ```
+   *(Fallback if native binary is not present: `python3 ~/.gemini/config/skills/shake/scripts/shake_prune.py ...`)*
 
-```bash
-~/.gemini/bin/shake-prune \
-  <appDataDir>/brain/<conversation-id>/.system_generated/logs/transcript.jsonl \
-  <appDataDir>/brain/<conversation-id>/
-```
+3. **Present Summary & In-Window Continuity**:
+   Display the pruning stats report to the user:
+   - Topic detected and timestamped filename generated.
+   - Original bytes/tokens vs pruned bytes/tokens and % reduction.
+   - Preserved signals count (100% user prompts, assistant turns, thoughts, error traces).
+   - In-Window Continuity indicator (`🟢 ACTIVE` via `PreInvocation` hook).
+   - Clickable file links and quick-copy command blocks.
 
-*(If the native binary is ever absent, the agent automatically falls back to `python3 ~/.gemini/config/skills/shake/scripts/shake_prune.py`).*
-
-This tool:
-1. Derives a **topic-specific filename** (e.g., `shake_<topic_slug>_<timestamp>.md`).
-2. Preserves **100% of User requests and Assistant responses verbatim**.
-3. Retains action receipts (`[Command completed successfully]` / `[File inspected]`).
-4. Preserves all **execution errors, stack traces, and non-zero exit codes**.
-5. Preserves the active working window (recent tool outputs).
-6. Completely strips bulky `RUN_COMMAND` stdout, `VIEW_FILE` contents, and large search payloads.
-7. Automatically creates the `.metadata.json` for **Interactive IDE Artifact** UI integration.
-8. Computes and outputs exact token reduction metrics and full copyable absolute paths.
-
-### Step 2: Check Repository Status
-```bash
-git status --short
-```
-
-### Step 3: Present Token Reduction Report & Quick-Copy Block
-Present the user with a clean summary table and the dedicated **Quick-Copy Block**:
-- **Topic & Session ID**
-- **Token Reduction Stats** (Original vs Pruned, % saved)
-- **Interactive Artifact Link**: Clickable link to open the artifact directly in the IDE
-- **In-Chat Mention Syntax**: `@/absolute/path/to/shake_...md`
-- **Copy Commands**: One-liner CLI commands to copy to project or clipboard
+4. **Seamless In-Window Continuation**:
+   The user can immediately continue typing their next prompt in the **exact same chat window**! The `PreInvocation` hook automatically pins future reasoning to the clean shaken artifact without requiring a tab switch.

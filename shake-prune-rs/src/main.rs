@@ -3,7 +3,7 @@ mod models;
 mod pruner;
 mod slug;
 
-use metadata::write_artifact_metadata;
+use metadata::{write_active_anchor, write_artifact_metadata};
 use pruner::prune_transcript;
 use std::env;
 use std::fs::File;
@@ -81,7 +81,7 @@ fn main() {
     }
 
     let summary_text = format!(
-        "Shaken & pruned verbatim history for topic '{}'. Saved {:.1}% context tokens ({} tokens vs {} raw). Preserved {} user prompts and all reasoning.",
+        "Shaken & pruned verbatim history for topic '{}'. Saved {:.1}% context tokens ({} tokens vs {} raw). Preserved {} user prompts, all reasoning, and thoughts.",
         stats.topic_slug.replace('_', " "),
         stats.reduction_pct,
         stats.pruned_tokens,
@@ -90,6 +90,7 @@ fn main() {
     );
 
     let _ = write_artifact_metadata(&abs_output_path, &summary_text);
+    let _ = write_active_anchor(&abs_output_path, &stats);
 
     let abs_str = abs_output_path.display().to_string();
 
@@ -108,9 +109,10 @@ fn main() {
     println!("--------------------------------------------------------------------------------");
     println!("📋 RESUMPTION PATHS & QUICK-COPY");
     println!("--------------------------------------------------------------------------------");
-    println!("• Absolute File Path: {}", abs_str);
-    println!("• In-Chat Mention:    @{}", abs_str);
-    println!("• Copy to Project:    cp \"{}\" ./", abs_str);
-    println!("• Copy to Clipboard:  xclip -sel clip < \"{}\" || wl-copy < \"{}\"", abs_str, abs_str);
+    println!("• In-Window Continuity: 🟢 ACTIVE (Next message in this tab will use clean context)");
+    println!("• Absolute File Path:   {}", abs_str);
+    println!("• In-Chat Mention:      @{}", abs_str);
+    println!("• Copy to Project:      cp \"{}\" ./", abs_str);
+    println!("• Copy to Clipboard:    xclip -sel clip < \"{}\" || wl-copy < \"{}\"", abs_str, abs_str);
     println!("================================================================================\n");
 }

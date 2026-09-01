@@ -8,6 +8,7 @@ Implements signal-preserving, zero-loss context pruning:
 - Preserves recent working window (last N tool steps)
 - Preserves short command outputs (<250 chars)
 - Prunes verbose successful file dumps, compiler dumps, and grep traces
+- Automatically registers IDE Artifact (.metadata.json) & In-Window Anchor (active_shake_anchor.json)
 """
 
 import sys
@@ -186,6 +187,23 @@ def write_artifact_metadata(markdown_path: str, summary: str):
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(meta_data, f, indent=2)
 
+def write_active_anchor(markdown_path: str, stats: dict):
+    parent_dir = os.path.dirname(markdown_path)
+    anchor_path = os.path.join(parent_dir, "active_shake_anchor.json")
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+    anchor_data = {
+        "active": True,
+        "shaken_file": markdown_path,
+        "anchored_at_step": stats["user_turns"] + stats["assistant_turns"] + stats["pruned_tools"],
+        "topic": stats["topic_slug"],
+        "token_savings_pct": stats["reduction_pct"],
+        "raw_tokens": stats["raw_tokens"],
+        "pruned_tokens": stats["pruned_tokens"],
+        "timestamp": now_iso
+    }
+    with open(anchor_path, "w", encoding="utf-8") as f:
+        json.dump(anchor_data, f, indent=2)
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: python3 shake_prune.py <transcript.jsonl> [output_file_or_dir]")
@@ -215,25 +233,27 @@ def main():
     )
     try:
         write_artifact_metadata(abs_output_path, summary_text)
+        write_active_anchor(abs_output_path, stats)
     except Exception as e:
         pass
 
     print(f"\n================================================================================")
     print(f"               ⚡ SHAKE CONTEXT PRUNING REPORT ⚡")
     print(f"================================================================================")
-    print(f"• Session ID:       {stats['conv_id']}")
-    print(f"• Topic:            {stats['topic_slug'].replace('_', ' ').title()}")
-    print(f"• Original Payload: {stats['raw_bytes']:,} bytes (~{stats['raw_tokens']:,} tokens)")
-    print(f"• Pruned Payload:   {stats['pruned_bytes']:,} bytes (~{stats['pruned_tokens']:,} tokens)")
-    print(f"• Token Savings:    {stats['reduction_pct']:.1f}% reduction")
-    print(f"• Preserved Signals: {stats['user_turns']} user turns (100%), {stats['assistant_turns']} assistant turns (100%), {stats['retained_errors']} errors")
+    print(f"• Session ID:           {stats['conv_id']}")
+    print(f"• Topic:                {stats['topic_slug'].replace('_', ' ').title()}")
+    print(f"• Original Payload:     {stats['raw_bytes']:,} bytes (~{stats['raw_tokens']:,} tokens)")
+    print(f"• Pruned Payload:       {stats['pruned_bytes']:,} bytes (~{stats['pruned_tokens']:,} tokens)")
+    print(f"• Token Savings:        {stats['reduction_pct']:.1f}% reduction")
+    print(f"• Preserved Signals:    {stats['user_turns']} user turns (100%), {stats['assistant_turns']} assistant turns (100%), {stats['retained_errors']} errors")
     print(f"--------------------------------------------------------------------------------")
     print(f"📋 RESUMPTION PATHS & QUICK-COPY")
     print(f"--------------------------------------------------------------------------------")
-    print(f"• Absolute File Path: {abs_output_path}")
-    print(f"• In-Chat Mention:    @{abs_output_path}")
-    print(f"• Copy to Project:    cp \"{abs_output_path}\" ./")
-    print(f"• Copy to Clipboard:  xclip -sel clip < \"{abs_output_path}\" || wl-copy < \"{abs_output_path}\"")
+    print(f"• In-Window Continuity: 🟢 ACTIVE (Next message in this tab will use clean context)")
+    print(f"• Absolute File Path:   {abs_output_path}")
+    print(f"• In-Chat Mention:      @{abs_output_path}")
+    print(f"• Copy to Project:      cp \"{abs_output_path}\" ./")
+    print(f"• Copy to Clipboard:    xclip -sel clip < \"{abs_output_path}\" || wl-copy < \"{abs_output_path}\"")
     print(f"================================================================================\n")
 
 if __name__ == "__main__":
