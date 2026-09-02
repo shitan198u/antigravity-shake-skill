@@ -1,5 +1,5 @@
 use crate::metadata::{write_active_anchor, write_artifact_metadata, AnchorFilePayload};
-use crate::pruner::{compact_transcript_inplace, prune_transcript};
+use crate::pruner::{run_compaction_pipeline, CompactionOptions};
 use chrono::Utc;
 use serde::Deserialize;
 use serde_json::json;
@@ -56,7 +56,7 @@ fn is_trusted_storage_path(p: &Path) -> bool {
 pub fn handle_hook() {
     // True Panic-Safe Fail-Open: catch_unwind active with unwind panic strategy
     let result = panic::catch_unwind(|| {
-        if let Err(_) = run_hook_safely() {
+        if run_hook_safely().is_err() {
             println!("{{}}");
         }
     });
@@ -176,24 +176,21 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
                 };
 
                 if should_auto_shake {
-                    if let Ok((pruned_md, mut stats)) = prune_transcript(t_path, 6, None) {
+                    let options = CompactionOptions {
+                        recent_window_steps: 6,
+                        thought_window_turns: None,
+                        keep_backups: 5,
+                        in_place: true,
+                        dry_run: false,
+                    };
+
+                    if let Ok((_compacted_jsonl, pruned_md, stats, backup_file_str)) =
+                        run_compaction_pipeline(t_path, &options)
+                    {
                         let output_path = art_dir.join(&stats.suggested_filename);
                         if let Ok(mut f) = File::create(&output_path) {
                             let _ = f.write_all(pruned_md.as_bytes());
                         }
-
-                        let (before_bytes, after_bytes, backup_file_str) = match compact_transcript_inplace(t_path, 6, None) {
-                            Ok((b, a, p)) => (b, a, p),
-                            Err(_) => (stats.raw_bytes, stats.pruned_bytes, String::new()),
-                        };
-
-                        stats.this_run_before_bytes = before_bytes;
-                        stats.this_run_after_bytes = after_bytes;
-                        stats.this_run_savings_pct = if before_bytes > 0 {
-                            (1.0 - (after_bytes as f64 / before_bytes as f64)) * 100.0
-                        } else {
-                            0.0
-                        };
 
                         let summary_text = format!(
                             "Auto-compacted verbatim history at 200k token threshold for topic '{}'. Saved {:.1}% context tokens.",

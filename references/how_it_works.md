@@ -8,32 +8,39 @@
 
 ```mermaid
 graph TD
-    A[Raw transcript.jsonl & transcript_full.jsonl] --> B[Acquire Exclusive File Lock (fs2)]
+    A[transcript.jsonl (Active Model Context)] --> B[Acquire Exclusive File Lock (fs2)]
     B --> C[Create Non-Destructive Timestamped Backup under Lock]
-    C --> D[Pass 1: Line, Step & Assistant Turn Indexing]
-    D --> E[Identify Active Working Window (Last 6 Steps)]
-    E --> F[Pass 2: In-Memory JSONL Compaction]
+    C --> D[Prune Older Timestamped Backups (keep_backups=5)]
+    D --> E[Single-Pass Pipeline: Step & Assistant Indexing]
+    
+    subgraph Unified In-Memory Generation
+        E --> F1[In-Place Compacted JSONL Stream]
+        E --> F2[Exportable Markdown Report & Stats]
+    end
     
     subgraph Signal Preservation
-        F --> G1[100% User Prompts Verbatim]
-        F --> G2[100% Assistant Final Responses & Explanations]
-        F --> G3[100% Error Stack Traces & Non-Zero Exits]
-        F --> G4[100% Recent Tool Outputs in Active Window]
+        F1 --> G1[100% User Prompts Verbatim]
+        F1 --> G2[100% Assistant Final Responses & Explanations]
+        F1 --> G3[100% Error Stack Traces & Non-Zero Exits]
+        F1 --> G4[100% Recent Tool Outputs in Active Window]
     end
     
-    subgraph Pruning & Structured Receipts
-        F --> H1[RUN_COMMAND >250 chars -> Action Receipt]
-        F --> H2[VIEW_FILE >500 lines -> Action Receipt]
-        F --> H3[write_to_file / replace_file -> Progressive Backlink]
-        F --> H4[/full-shake: Drop thoughts older than 20 turns]
+    subgraph Structured Receipt Tags
+        F1 --> H1[RUN_COMMAND -> [PRUNED tool=RUN_COMMAND step=N exit=0 lines=M archive=...]]
+        F1 --> H2[VIEW_FILE -> [PRUNED tool=VIEW_FILE step=N lines=M archive=...]]
+        F1 --> H3[write_to_file -> [PRUNED tool=write_to_file step=N lines=M archive=...]]
+        F1 --> H4[/full-shake: Drop thoughts older than 20 turns]
     end
     
-    F --> I[In-Place Truncate(0) & Rewrite (Inode Preserved)]
+    F1 --> I[In-Place Truncate(0) & Rewrite (Inode Preserved)]
     I --> J[Physical fsync Commitment (sync_all)]
     J --> K[Unlock File Handle (fs2)]
     K --> L[Generate Interactive Markdown Artifact with Timeline]
     L --> M[Update active_shake_anchor.json with NamedTempFile]
 ```
+
+> [!NOTE]
+> **Permanent History Isolation**: `transcript_full.jsonl` is deliberately left **100% untouched** on disk. It remains the developer's permanent unpruned debug log, allowing raw historical inspection while `transcript.jsonl` stays lean.
 
 ---
 
@@ -48,56 +55,57 @@ Standard atomic rename (`fs::rename`) swaps out the underlying filesystem Inode.
 - Calls `file.sync_all()` (`fsync`) before releasing the lock.
 - **The IDE's active file descriptor continues writing to the exact same file without interruption.**
 
-### 2. Standard `/shake` vs. Deep `/full-shake`
+---
 
-| Feature | Standard `/shake` | Deep `/full-shake` |
-| :--- | :--- | :--- |
-| **Tool Execution Bloat** | Pruned to structured receipts | Pruned to structured receipts |
-| **User Prompts** | 100% Verbatim | 100% Verbatim |
-| **Assistant Final Answers** | 100% Verbatim | 100% Verbatim |
-| **Errors & Traces** | 100% Verbatim | 100% Verbatim |
-| **Scratchpad Thoughts (`thinking`)** | **100% Verbatim (All turns)** | **Retains last 20 turns**; drops older thoughts |
-| **Automatic Fallback** | — | Automatically acts as natural shake if session has $\le 20$ turns |
-| **Additional Savings** | — | Extra **~400 KB – 500 KB (~120k – 150k tokens)** |
-
-### 3. The Active Working Window (Last 6 Steps)
-To ensure the agent never loses context on immediate tasks:
-- The **last 6 steps** of tool outputs (commands, file inspections, search queries) are **never pruned**.
-- The LLM has full verbatim visibility into recent files and build results.
-- Compaction only affects historical turns older than 6 steps where decisions have already been finalized.
-
-### 4. Two-Tier Metric Scopes & Interactive Timeline
-Reports clearly separate:
-* **This Compaction Pass (`transcript.jsonl`)**: Exact bytes reduced on disk for this turn.
-* **Cumulative Session Pruning (vs Full Stream)**: Total bloat pruned across the lifetime of the session compared to `transcript_full.jsonl`.
-* **Exportable Summary Artifact (`.md`)**: Compressed artifact file size.
-* **Session Compaction Timeline (`<details>`)**: Interactive dropdown tracking all prior compactions with timestamps, trigger types, and archive links.
-
-### 5. Proactive 200k Token Auto-Compaction Hook
-The native `PreInvocation` hook (`shake-prune --hook`) automatically protects conversations from token rot:
-* **Calibrated Density**: Calibrated to **3.3 bytes/token** for Code/JSON transcripts.
-* **Threshold Trigger**: Triggers auto-compaction when `transcript.jsonl` exceeds **660 KB (~200,000 tokens)**.
-* **Growth Delta Guard (50 KB)**: Compares against `last_compacted_bytes`. If less than 50 KB of new logs have accumulated, the hook executes in `<0.2ms` without running disk compaction.
-* **180s Cooldown**: Prevents CPU tight-loops in edge-case or failure scenarios.
-
-### 6. Security & Safety Hardening
-* **Canonical Storage Allowlist**: Validates that paths are within the user's canonical `~/.gemini` storage to prevent Context Poisoning from untrusted repositories.
-* **Strict Output Path Allowlist**: Enforces that Markdown artifacts can only be written to session, workspace, or `~/.gemini` directories.
-* **Lock-Before-Backup Concurrency**: Acquires `fs2` exclusive lock before creating backups, eliminating torn-write corruptions.
-* **Markdown & XSS Sanitization**: Escapes HTML entities (`<` ➔ `&lt;`, `>` ➔ `&gt;`) and backticks (`` ``` `` ➔ `` ` ` ` ``).
-* **URL Encoding**: URL-encodes `file://` links to prevent broken links with spaces.
-* **Atomic Tempfiles**: Uses `tempfile::Builder` for exclusive 0600 permissions and cryptographically random filenames.
-* **ReDoS Immunity**: Linear $O(N)$ tag scanning instead of recursive regex matching.
-* **True Fail-Open Guarantee**: `panic::catch_unwind` with unwind panic strategy ensures `{}` fallback output on any internal error.
+### 2. Unified Single-Pass Pipeline
+Earlier prototypes double-walked `transcript.jsonl` (once for markdown report generation, once for in-place compaction).
+- The unified pipeline buffers JSON lines once and generates both the in-place compacted JSONL buffer and the full Markdown summary in a single execution pass.
+- Eliminates redundant I/O, halving CPU and memory consumption on large multi-megabyte sessions.
 
 ---
 
-## 📊 Token Calibration Benchmarks
+### 3. Rolling Backup Retention (`--keep-backups N`)
+To prevent disk exhaustion across dozens of compactions:
+- Every shake creates a timestamped archive: `transcript.jsonl.bak_<YYYYMMDD_HHMMSS>`.
+- The retention engine (`prune_old_backups`) sorts existing archives chronologically, keeps the newest $N$ backups (default: 5), and removes older snapshots.
+- The latest unversioned `transcript.jsonl.bak` is always preserved.
 
-| Metric | Naive Prose Assumption | Empirical Calibrated Syntax Ratio |
-| :--- | :--- | :--- |
-| **Chars / Token** | `4.0 chars/token` | **`3.3 chars/token`** |
-| **Punctuation & Symbols** | ~2% | **20.7%** (braces, quotes, colons, slashes) |
-| **Whitespace & Formatting** | ~15% | **9.0%** |
-| **Words & Identifiers** | ~83% | **70.4%** |
-| **200k Token Threshold** | 800 KB | **660 KB (645 KB)** |
+---
+
+### 4. Structured Receipt Schema
+Pruned tool execution blocks are replaced with a stable, machine-parseable receipt schema:
+
+```text
+[PRUNED tool=RUN_COMMAND step=42 exit=0 lines=120 archive=/path/to/transcript.jsonl.bak_20260902_204559]
+[PRUNED tool=VIEW_FILE step=45 lines=520 archive=/path/to/transcript.jsonl.bak_20260902_204559]
+[PRUNED tool=write_to_file step=50 lines=140 archive=/path/to/transcript.jsonl.bak_20260902_204559]
+```
+
+- **tool**: The exact tool name that was executed.
+- **step**: The step index in the conversation stream.
+- **exit**: Exit status code for command executions (`0` = success).
+- **lines**: Number of lines that were pruned from context.
+- **archive**: Full canonical path to the timestamped backup containing the raw output.
+
+---
+
+### 5. Thought Windowing (`/full-shake`)
+While `/shake` retains 100% of thoughts across all turns, `/full-shake` keeps thoughts for the **last 20 assistant turns** only:
+- Thoughts older than 20 turns are stripped from `PLANNER_RESPONSE` nodes.
+- Dialogue, explanations, and decisions remain 100% verbatim.
+- Saves an extra **~400 KB – 500 KB (~120k – 150k tokens)** on mega-threads.
+- If the conversation has $\le 20$ turns, it automatically falls back to standard zero-loss retention.
+
+---
+
+### 6. Active Working Window (Immunity)
+The last 6 tool execution steps are **100% immune** to compaction:
+- Recent file reads, active terminal diffs, and immediate compiler warnings remain in active working memory so ongoing tasks are never disrupted.
+
+---
+
+### 7. Fail-Open PreInvocation Hook
+The background lifecycle hook runs before every model dispatch:
+- Monitors `transcript.jsonl` size. If $\ge 660\text{ KB}$ (~200k tokens), it triggers auto-compaction.
+- Protected by a **50 KB Growth Delta Guard** and **180s Cooldown**.
+- Wrapped in `panic::catch_unwind`: on any error, it safely outputs `{}` and exits 0, ensuring the IDE never stalls.

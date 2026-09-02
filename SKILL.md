@@ -1,11 +1,11 @@
 ---
 name: shake
-description: Deterministically compacts and tree-shakes conversation context by stripping verbose tool outputs and file dumps while preserving 100% of User prompts, Assistant reasoning, and Thoughts. Supports seamless in-window continuation.
+description: Deterministically compacts and tree-shakes conversation context by stripping verbose tool outputs, cargo/compiler dumps, and file reads while preserving 100% of User prompts, Assistant reasoning, and Thoughts. Trigger when context is full, prompt is laggy, before complex tasks, or to prune bloat.
 ---
 
 # Antigravity Context Tree-Shaking Skill (`/shake`)
 
-Compact conversation context in-place, freeing **80%–95% of transmitted tokens** while preserving 100% of user prompts, assistant reasoning, thoughts, error tracebacks, and the active working state.
+Compact conversation context in-place, freeing **50%–80% of transmitted tokens** while preserving 100% of user prompts, assistant reasoning, thoughts, error tracebacks, and the active working state.
 
 ---
 
@@ -30,13 +30,8 @@ From your runtime context:
 Run the native binary using `run_command`:
 
 ```bash
-# Direct execution (compacts transcript.jsonl in-place and creates interactive artifact)
+# Direct in-place compaction and interactive artifact generation
 ~/.gemini/bin/shake-prune "<appDataDir>/brain/<conversation-id>/.system_generated/logs/transcript.jsonl" "<appDataDir>/brain/<conversation-id>/"
-```
-
-*If binary is in the workspace root or global skill directory:*
-```bash
-~/.gemini/config/skills/shake/bin/shake-prune "<appDataDir>/brain/<conversation-id>/.system_generated/logs/transcript.jsonl" "<appDataDir>/brain/<conversation-id>/"
 ```
 
 ---

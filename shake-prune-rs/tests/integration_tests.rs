@@ -1,0 +1,274 @@
+use serde_json::json;
+use std::fs::{self, File};
+use std::io::Write;
+use std::os::unix::fs::MetadataExt;
+
+fn get_binary_path() -> std::path::PathBuf {
+    let mut path = std::env::current_exe().unwrap();
+    path.pop(); // drop test binary name
+    if path.ends_with("deps") {
+        path.pop();
+    }
+    path.push("shake-prune");
+    path
+}
+
+#[test]
+fn test_inode_preservation() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let logs_dir = tmp_dir.path().join(".gemini/brain/test-session/.system_generated/logs");
+    fs::create_dir_all(&logs_dir).unwrap();
+    let transcript_path = logs_dir.join("transcript.jsonl");
+
+    // Write a multi-turn transcript with bloat
+    {
+        let mut f = File::create(&transcript_path).unwrap();
+        writeln!(f, "{}", json!({"step_index": 1, "type": "USER_INPUT", "source": "USER_EXPLICIT", "content": "<USER_REQUEST>Hello</USER_REQUEST>"})).unwrap();
+        writeln!(f, "{}", json!({"step_index": 2, "type": "RUN_COMMAND", "status": "DONE", "exit_code": 0, "content": "long verbose output\n".repeat(20)})).unwrap();
+        writeln!(f, "{}", json!({"step_index": 3, "type": "PLANNER_RESPONSE", "content": "Assistant reply"})).unwrap();
+        writeln!(f, "{}", json!({"step_index": 4, "type": "RUN_COMMAND", "status": "DONE", "exit_code": 0, "content": "recent command"})).unwrap();
+        writeln!(f, "{}", json!({"step_index": 5, "type": "PLANNER_RESPONSE", "content": "Final reply"})).unwrap();
+    }
+
+    let inode_before = fs::metadata(&transcript_path).unwrap().ino();
+
+    let bin = get_binary_path();
+    let output = std::process::Command::new(&bin)
+        .arg(&transcript_path)
+        .output()
+        .expect("Failed to execute shake-prune");
+
+    assert!(output.status.success(), "shake-prune failed: {:?}", String::from_utf8_lossy(&output.stderr));
+
+    let inode_after = fs::metadata(&transcript_path).unwrap().ino();
+    assert_eq!(inode_before, inode_after, "Inode changed! In-place truncate-and-rewrite violated.");
+}
+
+#[test]
+fn test_safety_retention_invariants() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let logs_dir = tmp_dir.path().join(".gemini/brain/test-safety/.system_generated/logs");
+    fs::create_dir_all(&logs_dir).unwrap();
+    let transcript_path = logs_dir.join("transcript.jsonl");
+
+    let user_msg = "Please refactor the crypto module with zero breaking changes.";
+    let assistant_msg = "I have refactored the module with zero breaking changes.";
+    let error_content = "FATAL ERROR: Segment fault in libc.so.6 at 0x7fff";
+
+    {
+        let mut f = File::create(&transcript_path).unwrap();
+        writeln!(f, "{}", json!({"step_index": 1, "type": "USER_INPUT", "source": "USER_EXPLICIT", "content": format!("<USER_REQUEST>{}</USER_REQUEST>", user_msg)})).unwrap();
+        writeln!(f, "{}", json!({"step_index": 2, "type": "RUN_COMMAND", "status": "FAILED", "exit_code": 1, "content": error_content})).unwrap();
+        writeln!(f, "{}", json!({"step_index": 3, "type": "PLANNER_RESPONSE", "content": assistant_msg})).unwrap();
+        for i in 4..=10 {
+            writeln!(f, "{}", json!({"step_index": i, "type": "RUN_COMMAND", "status": "DONE", "exit_code": 0, "content": format!("recent step {}", i)})).unwrap();
+        }
+    }
+
+    let bin = get_binary_path();
+    let output = std::process::Command::new(&bin)
+        .arg(&transcript_path)
+        .output()
+        .expect("Failed to execute shake-prune");
+
+    assert!(output.status.success());
+
+    let compacted = fs::read_to_string(&transcript_path).unwrap();
+
+    // User prompt is 100% verbatim
+    assert!(compacted.contains(user_msg), "User prompt was corrupted or pruned!");
+    // Assistant text is 100% verbatim
+    assert!(compacted.contains(assistant_msg), "Assistant response was corrupted or pruned!");
+    // Error stack trace is 100% verbatim
+    assert!(compacted.contains(error_content), "Non-zero exit error trace was lost!");
+}
+
+#[test]
+fn test_active_working_window_preservation() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let logs_dir = tmp_dir.path().join(".gemini/brain/test-window/.system_generated/logs");
+    fs::create_dir_all(&logs_dir).unwrap();
+    let transcript_path = logs_dir.join("transcript.jsonl");
+
+    let old_bloat = "OLD_BLOAT_THAT_MUST_BE_PRUNED\n".repeat(50);
+    let recent_bloat = "RECENT_BLOAT_THAT_MUST_BE_KEPT\n".repeat(50);
+
+    {
+        let mut f = File::create(&transcript_path).unwrap();
+        writeln!(f, "{}", json!({"step_index": 1, "type": "USER_INPUT", "content": "Turn 1"})).unwrap();
+        writeln!(f, "{}", json!({"step_index": 2, "type": "RUN_COMMAND", "status": "DONE", "exit_code": 0, "content": old_bloat})).unwrap();
+        writeln!(f, "{}", json!({"step_index": 3, "type": "PLANNER_RESPONSE", "content": "Turn 1 reply"})).unwrap();
+        
+        // 6 recent steps
+        writeln!(f, "{}", json!({"step_index": 4, "type": "RUN_COMMAND", "status": "DONE", "exit_code": 0, "content": recent_bloat})).unwrap();
+        writeln!(f, "{}", json!({"step_index": 5, "type": "PLANNER_RESPONSE", "content": "Turn 2 reply"})).unwrap();
+        writeln!(f, "{}", json!({"step_index": 6, "type": "RUN_COMMAND", "status": "DONE", "exit_code": 0, "content": "recent cmd 2"})).unwrap();
+        writeln!(f, "{}", json!({"step_index": 7, "type": "PLANNER_RESPONSE", "content": "Turn 3 reply"})).unwrap();
+        writeln!(f, "{}", json!({"step_index": 8, "type": "RUN_COMMAND", "status": "DONE", "exit_code": 0, "content": "recent cmd 3"})).unwrap();
+        writeln!(f, "{}", json!({"step_index": 9, "type": "PLANNER_RESPONSE", "content": "Turn 4 reply"})).unwrap();
+    }
+
+    let bin = get_binary_path();
+    let output = std::process::Command::new(&bin)
+        .arg(&transcript_path)
+        .output()
+        .expect("Failed to execute shake-prune");
+
+    assert!(output.status.success());
+    let compacted = fs::read_to_string(&transcript_path).unwrap();
+
+    // Old bloat must be pruned to structured receipt
+    assert!(!compacted.contains("OLD_BLOAT_THAT_MUST_BE_PRUNED"), "Old bloat was not pruned!");
+    assert!(compacted.contains("[PRUNED tool=RUN_COMMAND step=2"), "Structured receipt missing for step 2!");
+
+    // Recent bloat within last 6 steps must be intact
+    assert!(compacted.contains("RECENT_BLOAT_THAT_MUST_BE_KEPT"), "Active working window (step 4) was improperly pruned!");
+}
+
+#[test]
+fn test_thought_windowing_full_shake() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let logs_dir = tmp_dir.path().join(".gemini/brain/test-thought/.system_generated/logs");
+    fs::create_dir_all(&logs_dir).unwrap();
+    let transcript_path = logs_dir.join("transcript.jsonl");
+
+    // 25 turns: turns 1-5 should have thoughts pruned, turns 6-25 should keep thoughts
+    {
+        let mut f = File::create(&transcript_path).unwrap();
+        for i in 1..=25 {
+            writeln!(f, "{}", json!({"step_index": i * 2 - 1, "type": "USER_INPUT", "content": format!("User prompt {}", i)})).unwrap();
+            writeln!(f, "{}", json!({"step_index": i * 2, "type": "PLANNER_RESPONSE", "thinking": format!("Thought scratchpad {}", i), "content": format!("Assistant answer {}", i)})).unwrap();
+        }
+    }
+
+    let bin = get_binary_path();
+    let output = std::process::Command::new(&bin)
+        .arg(&transcript_path)
+        .arg("--full")
+        .arg("--thought-window")
+        .arg("20")
+        .output()
+        .expect("Failed to execute shake-prune");
+
+    assert!(output.status.success());
+    let compacted = fs::read_to_string(&transcript_path).unwrap();
+
+    // Turns 1-5: thinking removed
+    for i in 1..=5 {
+        assert!(!compacted.contains(&format!("\"thinking\":\"Thought scratchpad {}\"", i)), "Turn {} thought should have been dropped!", i);
+        assert!(compacted.contains(&format!("\"content\":\"Assistant answer {}\"", i)), "Turn {} answer was lost!", i);
+    }
+
+    // Turns 6-25: thinking preserved
+    for i in 6..=25 {
+        assert!(compacted.contains(&format!("\"thinking\":\"Thought scratchpad {}\"", i)), "Turn {} thought should have been retained!", i);
+        assert!(compacted.contains(&format!("\"content\":\"Assistant answer {}\"", i)), "Turn {} answer was lost!", i);
+    }
+}
+
+#[test]
+fn test_backup_retention_rotation() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let logs_dir = tmp_dir.path().join(".gemini/brain/test-retention/.system_generated/logs");
+    fs::create_dir_all(&logs_dir).unwrap();
+    let transcript_path = logs_dir.join("transcript.jsonl");
+
+    let bin = get_binary_path();
+
+    // Run compaction 8 times with keep-backups = 3
+    for run in 1..=8 {
+        {
+            let mut f = File::create(&transcript_path).unwrap();
+            writeln!(f, "{}", json!({"step_index": 1, "type": "USER_INPUT", "content": format!("Run {}", run)})).unwrap();
+            writeln!(f, "{}", json!({"step_index": 2, "type": "RUN_COMMAND", "status": "DONE", "exit_code": 0, "content": "stdout bloat\n".repeat(30)})).unwrap();
+            writeln!(f, "{}", json!({"step_index": 3, "type": "PLANNER_RESPONSE", "content": "ok"})).unwrap();
+        }
+
+        // Sleep 1.1 second so timestamps differ
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        let output = std::process::Command::new(&bin)
+            .arg(&transcript_path)
+            .arg("--keep-backups")
+            .arg("3")
+            .output()
+            .expect("Failed to execute shake-prune");
+
+        assert!(output.status.success());
+    }
+
+    let mut bak_count = 0;
+    for entry in fs::read_dir(&logs_dir).unwrap().flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.contains(".jsonl.bak_") {
+            bak_count += 1;
+        }
+    }
+
+    assert_eq!(bak_count, 3, "Expected exactly 3 timestamped backups retained, found {}", bak_count);
+    assert!(logs_dir.join("transcript.jsonl.bak").exists(), "Latest transcript.jsonl.bak must always exist!");
+}
+
+#[test]
+fn test_security_allowlist_rejection() {
+    let bin = get_binary_path();
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let transcript_path = tmp_dir.path().join("transcript.jsonl");
+    {
+        let mut f = File::create(&transcript_path).unwrap();
+        writeln!(f, "{}", json!({"step_index": 1, "type": "USER_INPUT", "content": "test"})).unwrap();
+    }
+
+    // Attempt to write output to /etc
+    let output = std::process::Command::new(&bin)
+        .arg(&transcript_path)
+        .arg("/etc/malicious.md")
+        .output()
+        .expect("Failed to run binary");
+
+    assert!(!output.status.success(), "Output path outside allowlist must fail!");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Security Error: Output path"), "Expected security allowlist error, got: {}", stderr);
+}
+
+#[test]
+fn test_dry_run_flag() {
+    let bin = get_binary_path();
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let logs_dir = tmp_dir.path().join(".gemini/brain/test-dryrun/.system_generated/logs");
+    fs::create_dir_all(&logs_dir).unwrap();
+    let transcript_path = logs_dir.join("transcript.jsonl");
+
+    let initial_content = "{\"step_index\":1,\"type\":\"USER_INPUT\",\"content\":\"hello\"}\n";
+    fs::write(&transcript_path, initial_content).unwrap();
+
+    let output = std::process::Command::new(&bin)
+        .arg(&transcript_path)
+        .arg("--dry-run")
+        .output()
+        .expect("Failed to run binary");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Dry Run Active"), "Report should state Dry Run Active!");
+
+    // Verify transcript was NOT modified
+    let after_content = fs::read_to_string(&transcript_path).unwrap();
+    assert_eq!(initial_content, after_content);
+
+    // Verify no backup files were created
+    assert!(!logs_dir.join("transcript.jsonl.bak").exists());
+}
+
+#[test]
+fn test_version_flag() {
+    let bin = get_binary_path();
+    let output = std::process::Command::new(&bin)
+        .arg("--version")
+        .output()
+        .expect("Failed to run binary");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("shake-prune 0.1.8"), "Expected version 0.1.8, got: {}", stdout);
+}

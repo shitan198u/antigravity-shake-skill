@@ -1,6 +1,6 @@
 ---
 name: full-shake
-description: Deeply compacts conversation context in-place by pruning tool outputs and retaining scratchpad thoughts for the last 20 turns only.
+description: Deeply compacts conversation context in-place by pruning tool outputs and retaining scratchpad thoughts for the last 20 turns only. Trigger on mega-threads (40+ turns), when context limits are tight, or when maximum token recovery is needed.
 ---
 
 # ⚡ /full-shake: Deep Context Compaction (Thought Windowing)

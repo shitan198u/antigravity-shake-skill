@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-#  ⚡ Antigravity /shake & /full-shake Multi-Platform Installer
+#  ⚡ Antigravity /shake & /full-shake Multi-Platform Installer & Uninstaller
 # ==============================================================================
 set -euo pipefail
 
@@ -12,6 +12,67 @@ FULL_SHAKE_SKILLS_DIR="${HOME}/.gemini/config/skills/full-shake"
 HOOKS_CONFIG="${HOME}/.gemini/config/hooks.json"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# ==============================================================================
+# UNINSTALL MODE
+# ==============================================================================
+if [ "${1:-}" = "--uninstall" ] || [ "${1:-}" = "-u" ]; then
+    echo "⚡ Uninstalling Antigravity /shake & /full-shake..."
+
+    # 1. Remove binary
+    if [ -f "${INSTALL_DIR}/${BIN_NAME}" ]; then
+        rm -f "${INSTALL_DIR}/${BIN_NAME}"
+        echo "  ✓ Removed ${INSTALL_DIR}/${BIN_NAME}"
+    fi
+
+    # 2. Remove skills
+    if [ -d "${GLOBAL_SKILLS_DIR}" ]; then
+        rm -rf "${GLOBAL_SKILLS_DIR}"
+        echo "  ✓ Removed ${GLOBAL_SKILLS_DIR}"
+    fi
+    if [ -d "${FULL_SHAKE_SKILLS_DIR}" ]; then
+        rm -rf "${FULL_SHAKE_SKILLS_DIR}"
+        echo "  ✓ Removed ${FULL_SHAKE_SKILLS_DIR}"
+    fi
+
+    # 3. Clean hook from hooks.json
+    if [ -f "${HOOKS_CONFIG}" ]; then
+        if command -v jq >/dev/null 2>&1; then
+            jq --arg bin "${INSTALL_DIR}/${BIN_NAME} --hook" '
+                if .hooks and .hooks.PreInvocation then
+                    .hooks.PreInvocation = (.hooks.PreInvocation | map(select(.command != $bin and (.command | contains("shake-prune") | not))))
+                else . end
+            ' "${HOOKS_CONFIG}" > "${HOOKS_CONFIG}.tmp" && mv "${HOOKS_CONFIG}.tmp" "${HOOKS_CONFIG}"
+            echo "  ✓ Cleaned PreInvocation hook from ${HOOKS_CONFIG}"
+        elif command -v python3 >/dev/null 2>&1; then
+            python3 -c '
+import json, os
+config_path = os.path.expanduser("'"${HOOKS_CONFIG}"'")
+if os.path.exists(config_path):
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if "hooks" in data and "PreInvocation" in data["hooks"]:
+            data["hooks"]["PreInvocation"] = [
+                h for h in data["hooks"]["PreInvocation"]
+                if not ("shake-prune" in str(h.get("command", "")))
+            ]
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        print("  ✓ Cleaned PreInvocation hook via python3")
+    except Exception as e:
+        print(f"  ⚠️ Could not clean hooks: {e}")
+'
+        fi
+    fi
+
+    echo ""
+    echo "🎉 Antigravity /shake has been completely uninstalled."
+    exit 0
+fi
+
+# ==============================================================================
+# INSTALL MODE
+# ==============================================================================
 echo "⚡ Installing Antigravity /shake & /full-shake Context Compactor..."
 
 # Ensure secure installation directory with 0700 permissions
@@ -25,13 +86,13 @@ ARCH="$(uname -m)"
 case "${OS}" in
     linux)
         case "${ARCH}" in
-            x86_64|amd64) TARGET="x86_64-unknown-linux-gnu" ;;
-            aarch64|arm64) TARGET="aarch64-unknown-linux-gnu" ;;
+            x86_64|amd64) TARGET="linux-x86_64" ;;
+            aarch64|arm64) TARGET="linux-aarch64" ;;
             *) echo "❌ Unsupported Linux architecture: ${ARCH}"; exit 1 ;;
         esac
         ;;
     darwin)
-        TARGET="universal-apple-darwin"
+        TARGET="macos-universal"
         ;;
     *)
         echo "❌ Unsupported OS: ${OS}. On Windows, run install.ps1 via PowerShell."
@@ -57,19 +118,19 @@ else
     # Download latest release binary from GitHub
     echo "🌐 Fetching release asset for ${TARGET}..."
     DOWNLOAD_URL="https://github.com/${REPO}/releases/latest/download/${BIN_NAME}-${TARGET}"
-    CHECKSUM_URL="https://github.com/${REPO}/releases/latest/download/SHA256SUMS"
+    CHECKSUM_URL="https://github.com/${REPO}/releases/latest/download/SHA256SUMS.txt"
     
     TMP_DIR="$(mktemp -d)"
     trap 'rm -rf "${TMP_DIR}"' EXIT
     
     curl -fsSL "${DOWNLOAD_URL}" -o "${TMP_DIR}/${BIN_NAME}"
-    curl -fsSL "${CHECKSUM_URL}" -o "${TMP_DIR}/SHA256SUMS" 2>/dev/null || true
+    curl -fsSL "${CHECKSUM_URL}" -o "${TMP_DIR}/SHA256SUMS.txt" 2>/dev/null || true
     
     # Verify SHA256 checksum if available
-    if [ -f "${TMP_DIR}/SHA256SUMS" ]; then
+    if [ -f "${TMP_DIR}/SHA256SUMS.txt" ]; then
         echo "🔒 Verifying SHA256 integrity..."
         cd "${TMP_DIR}"
-        EXPECTED_HASH="$(awk -v asset="${BIN_NAME}-${TARGET}" '{gsub(/\r/, "", $2); if($2==asset) print $1}' SHA256SUMS)"
+        EXPECTED_HASH="$(awk -v asset="${BIN_NAME}-${TARGET}" '{gsub(/\r/, "", $2); if($2==asset) print $1}' SHA256SUMS.txt)"
         if [ -n "${EXPECTED_HASH}" ]; then
             ACTUAL_HASH="$(sha256sum "${BIN_NAME}" | awk '{print $1}')"
             if [ "${EXPECTED_HASH}" != "${ACTUAL_HASH}" ]; then
@@ -87,7 +148,12 @@ fi
 
 # Install Global Skills
 mkdir -p "${GLOBAL_SKILLS_DIR}/references"
+mkdir -p "${GLOBAL_SKILLS_DIR}/bin"
 mkdir -p "${FULL_SHAKE_SKILLS_DIR}"
+
+# Provide convenient skill-local symlink or copy to ensure legacy relative references resolve
+cp "${INSTALL_DIR}/${BIN_NAME}" "${GLOBAL_SKILLS_DIR}/bin/${BIN_NAME}"
+chmod 755 "${GLOBAL_SKILLS_DIR}/bin/${BIN_NAME}"
 
 if [ -f "${SCRIPT_DIR}/SKILL.md" ]; then
     cp "${SCRIPT_DIR}/SKILL.md" "${GLOBAL_SKILLS_DIR}/SKILL.md"
@@ -123,9 +189,8 @@ if command -v jq >/dev/null 2>&1; then
     ' > "${HOOKS_CONFIG}.tmp"
     mv "${HOOKS_CONFIG}.tmp" "${HOOKS_CONFIG}"
 elif command -v python3 >/dev/null 2>&1; then
-    # Safe Python fallback for JSON manipulation
     python3 -c '
-import json, os, sys
+import json, os
 
 config_path = os.path.expanduser("'"${HOOKS_CONFIG}"'")
 hook_cmd = "'"${HOOK_BIN}"' --hook"
