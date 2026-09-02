@@ -2,10 +2,7 @@ name: Build, Test & Release Multi-Platform Binaries
 
 on:
   push:
-    branches: [ main ]
     tags: [ 'v*' ]
-  pull_request:
-    branches: [ main ]
   workflow_dispatch:
 
 jobs:

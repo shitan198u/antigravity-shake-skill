@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $Repo = "shitan198u/antigravity-shake-skill"
-$DefaultTag = "v0.1.8"
+$DefaultTag = "v0.1.9"
 $UserHome = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile)
 $GlobalSkillsDir = Join-Path $UserHome ".gemini\config\skills\shake"
 $FullShakeSkillsDir = Join-Path $UserHome ".gemini\config\skills\full-shake"
