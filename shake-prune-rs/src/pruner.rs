@@ -13,7 +13,8 @@ use std::path::Path;
 pub struct CompactionOptions {
     pub recent_user_turns: usize, // Number of human conversational turns to keep unpruned (default: 10)
     pub recent_window_steps: usize, // Fallback step-level minimum (default: 6)
-    pub thought_window_turns: Option<usize>,
+    pub thought_window_turns: Option<usize>, // Thought window (e.g. Some(20) for /full-shake)
+    pub marathon_horizon: bool, // Enable Milestone Horizon on marathon threads (>30 user turns)
     pub keep_backups: usize,
     pub in_place: bool,
     pub dry_run: bool,
@@ -25,6 +26,7 @@ impl Default for CompactionOptions {
             recent_user_turns: 10,
             recent_window_steps: 6,
             thought_window_turns: None,
+            marathon_horizon: false,
             keep_backups: 5,
             in_place: true,
             dry_run: false,
@@ -106,6 +108,7 @@ pub fn prune_old_backups(logs_dir: &Path, keep_count: usize) {
 }
 
 /// Compacts large tool call arguments into structured receipts with FULL ABSOLUTE PATHS and 1-INDEXED LINE NUMBERS.
+/// Strictly idempotent: never double-wraps already-pruned receipts.
 fn compact_tool_call_args(
     tool_name: &str,
     args_map: &mut serde_json::Map<String, Value>,
@@ -156,7 +159,7 @@ fn compact_tool_call_args(
                 }
             }
             if let Some(target_val) = args_map.get("TargetContent").and_then(|v| v.as_str()) {
-                if target_val.len() > 200 {
+                if !target_val.starts_with("[PRUNED") && target_val.len() > 200 {
                     args_map.insert(
                         "TargetContent".to_string(),
                         Value::String("[Original target code snippet]".to_string()),
@@ -169,7 +172,7 @@ fn compact_tool_call_args(
                 for chunk in chunks {
                     if let Some(chunk_map) = chunk.as_object_mut() {
                         if let Some(rc) = chunk_map.get("ReplacementContent").and_then(|v| v.as_str()) {
-                            if rc.len() > 100 {
+                            if !rc.starts_with("[PRUNED") && rc.len() > 100 {
                                 chunk_map.insert(
                                     "ReplacementContent".to_string(),
                                     Value::String(format!(
@@ -180,7 +183,7 @@ fn compact_tool_call_args(
                             }
                         }
                         if let Some(tc) = chunk_map.get("TargetContent").and_then(|v| v.as_str()) {
-                            if tc.len() > 100 {
+                            if !tc.starts_with("[PRUNED") && tc.len() > 100 {
                                 chunk_map.insert("TargetContent".to_string(), Value::String("[Target chunk snippet]".to_string()));
                             }
                         }
@@ -243,13 +246,17 @@ pub fn format_history_timeline(events: &[CompactionEvent]) -> String {
 /// 1. Locks `transcript.jsonl` exclusively.
 /// 2. Creates timestamped backup under lock and rotates older backups.
 /// 3. Pass 1: Indexes User conversational turns, assistant turns, and ephemeral message positions.
-/// 4. Pass 2: In a single loop:
-///    - Keeps all tool steps within the last N user conversational turns (default: 10) 100% intact.
+/// 4. Milestone Horizon (if --marathon-horizon enabled and user_turns > 30):
+///    - Preserves Genesis Turn 1 verbatim.
+///    - Replaces intermediate turns with a structured Milestone Checkpoint block.
+///    - Preserves the last 25 user turns verbatim.
+/// 5. Pass 2: In a single loop:
+///    - Keeps all tool steps within the recent user conversational turns 100% intact.
 ///    - Deduplicates historical EPHEMERAL_MESSAGE notices (keeps only the latest 1).
 ///    - Compacts older tool outputs into line-indexed receipts: [PRUNED ... line=N].
 ///    - Compacts older multi-line bash heredoc CommandLine inputs.
 ///    - Produces the in-place compacted JSONL stream AND Markdown report simultaneously.
-/// 5. Inode-safe truncate-and-rewrite with `fsync` commitment.
+/// 6. Inode-safe truncate-and-rewrite with `fsync` commitment.
 pub fn run_compaction_pipeline(
     transcript_path: &Path,
     options: &CompactionOptions,
@@ -286,10 +293,10 @@ pub fn run_compaction_pipeline(
     let file_for_reading = File::open(&abs_target)?;
     let reader = BufReader::new(file_for_reading);
 
-    let mut lines_buffer: Vec<String> = Vec::new();
+    let mut lines_buffer: Vec<(usize, String)> = Vec::new(); // (original_line_no_1_indexed, content)
     let mut raw_bytes = 0usize;
     let mut total_assistant_turns = 0usize;
-    let mut user_turn_line_indices: Vec<usize> = Vec::new();
+    let mut user_turn_positions: Vec<(usize, usize)> = Vec::new(); // (turn_index, buffer_index)
     let mut ephemeral_message_indices: Vec<usize> = Vec::new();
 
     for (line_idx, line) in reader.lines().enumerate() {
@@ -298,34 +305,97 @@ pub fn run_compaction_pipeline(
             continue;
         }
         raw_bytes += line_str.len();
+        let original_line_no = line_idx + 1;
+        let buf_idx = lines_buffer.len();
+
         if let Ok(val) = serde_json::from_str::<Value>(&line_str) {
             let t = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
             if t == "PLANNER_RESPONSE" {
                 total_assistant_turns += 1;
             } else if t == "USER_INPUT" {
-                user_turn_line_indices.push(line_idx);
+                user_turn_positions.push((user_turn_positions.len() + 1, buf_idx));
             } else if t == "EPHEMERAL_MESSAGE" {
-                ephemeral_message_indices.push(line_idx);
+                ephemeral_message_indices.push(buf_idx);
             }
         }
-        lines_buffer.push(line_str);
+        lines_buffer.push((original_line_no, line_str));
     }
 
-    let total_steps = lines_buffer.len();
-    let total_user_turns = user_turn_line_indices.len();
+    let total_user_turns = user_turn_positions.len();
 
-    // Human Conversational Turn Boundary:
-    // Retains all tool executions from the last N user turns unpruned (default: 10 user turns)
-    let active_window_start = if options.recent_user_turns == 0 {
-        total_steps.saturating_sub(options.recent_window_steps)
-    } else if total_user_turns > options.recent_user_turns {
-        user_turn_line_indices[total_user_turns - options.recent_user_turns]
+    // ⚡ MILESTONE HORIZON (For Marathon Threads > 30 User Turns)
+    let mut effective_lines: Vec<(usize, String)> = Vec::with_capacity(lines_buffer.len());
+    let mut is_milestone_horizon_active = false;
+
+    if options.marathon_horizon && total_user_turns > 30 {
+        is_milestone_horizon_active = true;
+        let genesis_end_idx = if user_turn_positions.len() > 1 {
+            user_turn_positions[1].1
+        } else {
+            1
+        };
+
+        let horizon_turn_idx = total_user_turns.saturating_sub(25);
+        let horizon_start_idx = user_turn_positions[horizon_turn_idx].1;
+
+        // 1. Genesis Turn 1
+        for item in &lines_buffer[..genesis_end_idx] {
+            effective_lines.push(item.clone());
+        }
+
+        // 2. Synthesized Milestone Block
+        let milestone_content = format!(
+            "### 🏛️ Historical Milestone Horizon (Turns 2 to {})\n\n\
+            > **Verbatim History Reference**: The complete unpruned transcript of earlier turns is preserved permanently in `transcript_full.jsonl` and in historical backups (`{}`).\n\n\
+            All earlier user instructions, architectural decisions, and error fixes are archived with exact line-indexed pointers in the referenced backup.\n\n\
+            Active working momentum continues with the last 25 turns preserved verbatim below.",
+            horizon_turn_idx, backup_abs_str
+        );
+        let milestone_step = serde_json::json!({
+            "step_index": 2,
+            "source": "SYSTEM",
+            "type": "PLANNER_RESPONSE",
+            "status": "DONE",
+            "content": milestone_content
+        });
+        effective_lines.push((genesis_end_idx + 1, serde_json::to_string(&milestone_step)?));
+
+        // 3. Last 25 User Turns
+        for item in &lines_buffer[horizon_start_idx..] {
+            effective_lines.push(item.clone());
+        }
     } else {
-        total_steps.saturating_sub(options.recent_window_steps)
+        effective_lines = lines_buffer;
+    }
+
+    // Re-index effective user turns and ephemeral positions after milestone horizon
+    let mut effective_user_turn_indices: Vec<usize> = Vec::new();
+    let mut effective_ephemeral_indices: Vec<usize> = Vec::new();
+
+    for (buf_idx, (_, line_str)) in effective_lines.iter().enumerate() {
+        if let Ok(val) = serde_json::from_str::<Value>(line_str) {
+            let t = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            if t == "USER_INPUT" {
+                effective_user_turn_indices.push(buf_idx);
+            } else if t == "EPHEMERAL_MESSAGE" {
+                effective_ephemeral_indices.push(buf_idx);
+            }
+        }
+    }
+
+    let effective_total_user_turns = effective_user_turn_indices.len();
+    let effective_total_steps = effective_lines.len();
+
+    // Active working window cutoff
+    let active_window_start = if options.recent_user_turns == 0 {
+        effective_total_steps.saturating_sub(options.recent_window_steps)
+    } else if effective_total_user_turns > options.recent_user_turns {
+        effective_user_turn_indices[effective_total_user_turns - options.recent_user_turns]
+    } else {
+        effective_total_steps.saturating_sub(options.recent_window_steps)
     };
 
-    // Identify latest ephemeral message to preserve; older ones are dropped
-    let latest_ephemeral_idx = ephemeral_message_indices.last().copied();
+    let latest_ephemeral_idx = effective_ephemeral_indices.last().copied();
 
     let thought_threshold = options
         .thought_window_turns
@@ -342,7 +412,7 @@ pub fn run_compaction_pipeline(
 
     // Processing buffers
     let mut compacted_output = String::with_capacity(raw_bytes / 2);
-    let mut output_blocks = Vec::with_capacity(total_steps);
+    let mut output_blocks = Vec::with_capacity(effective_total_steps);
 
     let mut user_count = 0usize;
     let mut assistant_count = 0usize;
@@ -352,9 +422,7 @@ pub fn run_compaction_pipeline(
     let mut retained_recent_steps = 0usize;
     let mut first_user_prompt = String::new();
 
-    for (i, line_str) in lines_buffer.into_iter().enumerate() {
-        let line_no = i + 1; // Exact 1-indexed line number in backup file
-
+    for (i, (orig_line_no, line_str)) in effective_lines.into_iter().enumerate() {
         let mut step_val: Value = match serde_json::from_str(&line_str) {
             Ok(v) => v,
             Err(_) => {
@@ -430,7 +498,7 @@ pub fn run_compaction_pipeline(
                         let name = tc.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
                         if let Some(args_map) = tc.get_mut("args").and_then(|v| v.as_object_mut()) {
                             if !is_recent {
-                                compact_tool_call_args(&name, args_map, step_idx, &backup_abs_str, line_no);
+                                compact_tool_call_args(&name, args_map, step_idx, &backup_abs_str, orig_line_no);
                             }
                             let mut arg_items = Vec::new();
                             for (k, v) in args_map.iter() {
@@ -480,7 +548,7 @@ pub fn run_compaction_pipeline(
                         pruned_tools_count += 1;
                         let receipt = format!(
                             "[PRUNED tool=RUN_COMMAND step={} exit={} lines={} archive={} line={}]",
-                            step_idx, exit_code.unwrap_or(0), line_count, backup_abs_str, line_no
+                            step_idx, exit_code.unwrap_or(0), line_count, backup_abs_str, orig_line_no
                         );
                         step_val["content"] = serde_json::json!(receipt);
                         output_blocks.push(format!("> ℹ️ *{}*\n", receipt));
@@ -491,19 +559,19 @@ pub fn run_compaction_pipeline(
                         output_blocks.push(format!("> ℹ️ *{}*\n", content_str));
                     } else {
                         let line_count = content_str.lines().count();
-                    pruned_tools_count += 1;
-                    let receipt = format!(
-                        "[PRUNED tool=VIEW_FILE step={} lines={} archive={} line={}]",
-                        step_idx, line_count, backup_abs_str, line_no
-                    );
-                    step_val["content"] = serde_json::json!(receipt);
-                    output_blocks.push(format!("> ℹ️ *{}*\n", receipt));
+                        pruned_tools_count += 1;
+                        let receipt = format!(
+                            "[PRUNED tool=VIEW_FILE step={} lines={} archive={} line={}]",
+                            step_idx, line_count, backup_abs_str, orig_line_no
+                        );
+                        step_val["content"] = serde_json::json!(receipt);
+                        output_blocks.push(format!("> ℹ️ *{}*\n", receipt));
                     }
                 } else {
                     pruned_tools_count += 1;
                     let receipt = format!(
                         "[PRUNED tool={} step={} archive={} line={}]",
-                        stype, step_idx, backup_abs_str, line_no
+                        stype, step_idx, backup_abs_str, orig_line_no
                     );
                     step_val["content"] = serde_json::json!(receipt);
                     output_blocks.push(format!("> ℹ️ *{}*\n", receipt));
@@ -533,7 +601,9 @@ pub fn run_compaction_pipeline(
     let history_events = load_or_discover_history(logs_dir, &anchor_path);
     let timeline_section = format_history_timeline(&history_events);
 
-    let mode_note = if let Some(w) = options.thought_window_turns {
+    let mode_note = if is_milestone_horizon_active {
+        "> - **Compaction Mode**: ⚡ Marathon Reset (/full-shake) (Turn 1 Genesis preserved; intermediate turns collapsed into Milestone Horizon; thoughts windowed; last 25 turns active).\n".to_string()
+    } else if let Some(w) = options.thought_window_turns {
         if total_assistant_turns > w {
             format!("> - **Compaction Mode**: ⚡ Full Deep Compaction (Scratchpad thoughts retained for last {} turns; older thoughts dropped).\n", w)
         } else {

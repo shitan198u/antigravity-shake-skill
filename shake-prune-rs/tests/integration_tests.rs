@@ -453,3 +453,46 @@ fn test_heredoc_commandline_compaction() {
     assert!(compacted.contains("large_file.rs"), "Filename missing in heredoc receipt!");
     assert!(compacted.contains("line=2]"), "Heredoc receipt missing exact line=2 pointer!");
 }
+
+#[test]
+fn test_full_shake_marathon_milestone_horizon() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let logs_dir = tmp_dir.path().join(".gemini/brain/test-horizon/.system_generated/logs");
+    fs::create_dir_all(&logs_dir).unwrap();
+    let transcript_path = logs_dir.join("transcript.jsonl");
+
+    // Create 35 user turns
+    {
+        let mut f = File::create(&transcript_path).unwrap();
+        for i in 1..=35 {
+            writeln!(f, "{}", json!({"step_index": i * 2 - 1, "type": "USER_INPUT", "content": format!("User turn {} unique prompt", i)})).unwrap();
+            writeln!(f, "{}", json!({"step_index": i * 2, "type": "PLANNER_RESPONSE", "thinking": format!("Thought for turn {}", i), "content": format!("Reply for turn {}", i)})).unwrap();
+        }
+    }
+
+    let bin = get_binary_path();
+    let output = std::process::Command::new(&bin)
+        .arg(&transcript_path)
+        .arg("--full")
+        .output()
+        .expect("Failed to execute shake-prune");
+
+    assert!(output.status.success());
+    let compacted = fs::read_to_string(&transcript_path).unwrap();
+
+    // 1. Genesis Turn 1 MUST be preserved 100% verbatim
+    assert!(compacted.contains("User turn 1 unique prompt"), "Turn 1 Genesis prompt was improperly dropped!");
+    assert!(compacted.contains("Reply for turn 1"), "Turn 1 assistant reply was improperly dropped!");
+
+    // 2. Synthesized Milestone Block MUST exist
+    assert!(compacted.contains("Historical Milestone Horizon"), "Milestone Horizon block was not synthesized!");
+
+    // 3. Middle turns (e.g. Turn 5) should be collapsed into the milestone
+    assert!(!compacted.contains("User turn 5 unique prompt"), "Intermediate Turn 5 should have been collapsed into Milestone Horizon!");
+
+    // 4. Last 25 user turns (Turns 11-35) MUST be preserved verbatim
+    for i in 11..=35 {
+        assert!(compacted.contains(&format!("User turn {} unique prompt", i)), "Turn {} must be retained in active horizon!", i);
+        assert!(compacted.contains(&format!("Reply for turn {}", i)), "Reply {} must be retained in active horizon!", i);
+    }
+}

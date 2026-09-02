@@ -25,7 +25,8 @@ fn print_usage() {
     println!("  -h, --help               Show this help message and exit");
     println!("  -v, -V, --version        Print version information and exit");
     println!("  --hook                   Run as Antigravity PreInvocation hook (reads stdin JSON)");
-    println!("  --full                   Enable full deep compaction (retains thoughts for last 20 turns, drops older)");
+    println!("  --full                   Enable full deep compaction (20-turn thoughts + Milestone Horizon on 30+ turn sessions)");
+    println!("  --horizon                Enable Milestone Horizon (preserves Turn 1 Genesis + last 25 turns, collapses middle)");
     println!("  --thought-window N       Number of recent assistant turns to retain thoughts for (default: 20 with --full)");
     println!("  --recent-user-turns N    Number of human conversational turns to keep 100% unpruned (default: 10)");
     println!("  --recent-window N        Fallback minimum steps to keep intact (default: 6)");
@@ -194,6 +195,13 @@ fn main() {
             i += 2;
         } else if args[i] == "--full" {
             options.thought_window_turns = Some(20);
+            options.marathon_horizon = true;
+            i += 1;
+        } else if args[i] == "--horizon" {
+            options.marathon_horizon = true;
+            i += 1;
+        } else if args[i] == "--no-horizon" {
+            options.marathon_horizon = false;
             i += 1;
         } else if args[i] == "--thought-window" && i + 1 < args.len() {
             if let Ok(val) = args[i + 1].parse::<usize>() {
