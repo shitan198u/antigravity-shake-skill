@@ -209,6 +209,7 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
                     let options = CompactionOptions {
                         recent_user_turns: 10,
                         recent_tools_cap: 20,
+                        recent_errors_cap: 30,
                         recent_window_steps: 6,
                         thought_window_turns: None,
                         marathon_horizon: false,

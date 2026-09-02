@@ -13,6 +13,7 @@ use std::path::Path;
 pub struct CompactionOptions {
     pub recent_user_turns: usize, // Number of human conversational turns to keep unpruned (default: 10)
     pub recent_tools_cap: usize, // Maximum recent tool outputs to keep unpruned (default: 20)
+    pub recent_errors_cap: usize, // Maximum recent tool calls to preserve raw errors (default: 30)
     pub recent_window_steps: usize, // Fallback step-level minimum (default: 6)
     pub thought_window_turns: Option<usize>, // Thought window (e.g. Some(20) for /full-shake)
     pub marathon_horizon: bool, // Enable Milestone Horizon on marathon threads (>30 user turns)
@@ -25,6 +26,7 @@ impl Default for CompactionOptions {
         Self {
             recent_user_turns: 10,
             recent_tools_cap: 20,
+            recent_errors_cap: 30,
             recent_window_steps: 6,
             thought_window_turns: None,
             marathon_horizon: false,
@@ -410,6 +412,13 @@ pub fn run_compaction_pipeline(
         0
     };
 
+    // Error retention cap cutoff (Maximum recent tool calls to preserve raw errors: default 30)
+    let error_cutoff_idx = if options.recent_errors_cap > 0 && effective_tool_indices.len() > options.recent_errors_cap {
+        effective_tool_indices[effective_tool_indices.len() - options.recent_errors_cap]
+    } else {
+        0
+    };
+
 
     let thought_threshold = options
         .thought_window_turns
@@ -469,6 +478,7 @@ pub fn run_compaction_pipeline(
         let is_error = exit_code.map(|c| c != 0).unwrap_or(false)
             || status.contains("error")
             || status.contains("failed");
+        let is_recent_error = is_error && (i >= error_cutoff_idx);
 
         // Exact line number in the master archive (transcript_full.jsonl or fallback backup)
         let resolved_line_no = master_step_to_line
@@ -549,7 +559,7 @@ pub fn run_compaction_pipeline(
                     retained_recent_steps += 1;
                     let snippet = sanitize_markdown_snippet(&safe_truncate(content_str, 1500));
                     output_blocks.push(format!("> 🕒 **[Active Window Tool Output ({})]**:\n```\n{}\n```\n", stype, snippet));
-                } else if is_error {
+                } else if is_recent_error {
                     retained_errors_count += 1;
                     let snippet = sanitize_markdown_snippet(&safe_truncate(content_str, 1200));
                     output_blocks.push(format!(
@@ -560,7 +570,7 @@ pub fn run_compaction_pipeline(
                     if content_str.starts_with("[PRUNED") {
                         pruned_tools_count += 1;
                         output_blocks.push(format!("> ℹ️ *{}*\n", content_str));
-                    } else if content_str.trim().chars().count() < 250 {
+                    } else if !is_error && content_str.trim().chars().count() < 250 {
                         retained_short_cmds += 1;
                         let safe_cmd = sanitize_markdown_snippet(content_str.trim());
                         output_blocks.push(format!("> 📋 **[Command Output (exit 0)]**:\n```\n{}\n```\n", safe_cmd));

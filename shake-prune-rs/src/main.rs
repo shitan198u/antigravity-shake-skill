@@ -197,6 +197,11 @@ fn main() {
                 options.recent_tools_cap = val;
             }
             i += 2;
+        } else if args[i] == "--errors-cap" && i + 1 < args.len() {
+            if let Ok(val) = args[i + 1].parse::<usize>() {
+                options.recent_errors_cap = val;
+            }
+            i += 2;
         } else if args[i] == "--full" {
             options.thought_window_turns = Some(20);
             options.marathon_horizon = true;

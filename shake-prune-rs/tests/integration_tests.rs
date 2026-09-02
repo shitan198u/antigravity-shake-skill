@@ -573,3 +573,50 @@ fn test_autonomous_loop_20_tools_cap() {
         assert!(compacted.contains(&format!("Raw tool output for command execution number {} with lengthy compiler output {}", i, "x".repeat(300))), "Tool {} must be preserved verbatim in the 20-tool cap window!", i);
     }
 }
+
+#[test]
+fn test_ancient_error_pruned_after_30_tools() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let transcript_path = temp_dir.path().join("transcript.jsonl");
+
+    // Simulate 45 tools:
+    // Tool #5 failed (40 tools ago -> older than 30 -> must be pruned to receipt)
+    // Tool #25 failed (20 tools ago -> within last 30 -> must be preserved verbatim)
+    {
+        let mut f = File::create(&transcript_path).unwrap();
+        writeln!(f, "{}", json!({"step_index": 1, "type": "USER_INPUT", "content": "Run long regression test suite autonomously"})).unwrap();
+        for i in 1..=45 {
+            let is_err = i == 5 || i == 25;
+            let exit = if is_err { 1 } else { 0 };
+            let status = if is_err { "ERROR" } else { "DONE" };
+            let content = if is_err {
+                format!("FULL_UNCLAMPED_COMPILER_STACK_TRACE_FOR_TOOL_{}", i)
+            } else {
+                format!("Raw tool output for command execution number {} with lengthy compiler output {}", i, "x".repeat(300))
+            };
+            writeln!(f, "{}", json!({
+                "step_index": i + 1,
+                "type": "RUN_COMMAND",
+                "status": status,
+                "exit_code": exit,
+                "content": content
+            })).unwrap();
+        }
+    }
+
+    let bin = get_binary_path();
+    let output = std::process::Command::new(&bin)
+        .arg(&transcript_path)
+        .output()
+        .expect("Failed to execute shake-prune");
+
+    assert!(output.status.success());
+    let compacted = fs::read_to_string(&transcript_path).unwrap();
+
+    // 1. Tool 5 (older than 30 tools) MUST be pruned to receipt with exit=1
+    assert!(!compacted.contains("FULL_UNCLAMPED_COMPILER_STACK_TRACE_FOR_TOOL_5"), "Ancient tool 5 error should have been pruned!");
+    assert!(compacted.contains("[PRUNED tool=RUN_COMMAND step=6 exit=1"), "Receipt for ancient tool 5 missing or wrong exit code!");
+
+    // 2. Tool 25 (20 tools ago, within last 30) MUST be preserved 100% verbatim and unclamped
+    assert!(compacted.contains("FULL_UNCLAMPED_COMPILER_STACK_TRACE_FOR_TOOL_25"), "Recent tool 25 error within last 30 tools must be preserved verbatim!");
+}
