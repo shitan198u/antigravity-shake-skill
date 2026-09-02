@@ -84,8 +84,8 @@ jobs:
       - name: Test install.ps1 and Uninstallation on Windows
         shell: powershell
         run: |
-          mkdir -p bin
-          cp dist/shake-prune-windows-x86_64.exe bin/shake-prune.exe
+          if (!(Test-Path "bin")) { New-Item -ItemType Directory -Path "bin" -Force }
+          Copy-Item dist\shake-prune-windows-x86_64.exe bin\shake-prune.exe -Force
           powershell -ExecutionPolicy Bypass -File .\install.ps1
           & "$env:USERPROFILE\.gemini\bin\shake-prune.exe" --version
           powershell -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall
