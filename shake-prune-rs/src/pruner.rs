@@ -116,7 +116,7 @@ fn compact_tool_call_args(
     match tool_name {
         "run_command" => {
             if let Some(cmd_val) = args_map.get("CommandLine").and_then(|v| v.as_str()) {
-                if cmd_val.len() > 250 || cmd_val.contains("<< 'EOF'") || cmd_val.contains("<< 'END'") {
+                if !cmd_val.starts_with("[PRUNED") && (cmd_val.len() > 250 || cmd_val.contains("<< 'EOF'") || cmd_val.contains("<< 'END'")) {
                     let first_line = cmd_val.lines().next().unwrap_or("run_command").trim();
                     let line_count = cmd_val.lines().count();
                     args_map.insert(
@@ -131,7 +131,7 @@ fn compact_tool_call_args(
         }
         "write_to_file" => {
             if let Some(code_val) = args_map.get("CodeContent").and_then(|v| v.as_str()) {
-                if code_val.len() > 200 {
+                if !code_val.starts_with("[PRUNED") && code_val.len() > 200 {
                     let line_count = code_val.lines().count();
                     args_map.insert(
                         "CodeContent".to_string(),
@@ -145,7 +145,7 @@ fn compact_tool_call_args(
         }
         "replace_file_content" => {
             if let Some(rep_val) = args_map.get("ReplacementContent").and_then(|v| v.as_str()) {
-                if rep_val.len() > 200 {
+                if !rep_val.starts_with("[PRUNED") && rep_val.len() > 200 {
                     args_map.insert(
                         "ReplacementContent".to_string(),
                         Value::String(format!(
@@ -468,7 +468,10 @@ pub fn run_compaction_pipeline(
                         stype, exit_code, snippet
                     ));
                 } else if stype == "RUN_COMMAND" {
-                    if content_str.trim().chars().count() < 250 {
+                    if content_str.starts_with("[PRUNED") {
+                        pruned_tools_count += 1;
+                        output_blocks.push(format!("> ℹ️ *{}*\n", content_str));
+                    } else if content_str.trim().chars().count() < 250 {
                         retained_short_cmds += 1;
                         let safe_cmd = sanitize_markdown_snippet(content_str.trim());
                         output_blocks.push(format!("> 📋 **[Command Output (exit 0)]**:\n```\n{}\n```\n", safe_cmd));
@@ -483,7 +486,11 @@ pub fn run_compaction_pipeline(
                         output_blocks.push(format!("> ℹ️ *{}*\n", receipt));
                     }
                 } else if stype == "VIEW_FILE" {
-                    let line_count = content_str.lines().count();
+                    if content_str.starts_with("[PRUNED") {
+                        pruned_tools_count += 1;
+                        output_blocks.push(format!("> ℹ️ *{}*\n", content_str));
+                    } else {
+                        let line_count = content_str.lines().count();
                     pruned_tools_count += 1;
                     let receipt = format!(
                         "[PRUNED tool=VIEW_FILE step={} lines={} archive={} line={}]",
@@ -491,6 +498,7 @@ pub fn run_compaction_pipeline(
                     );
                     step_val["content"] = serde_json::json!(receipt);
                     output_blocks.push(format!("> ℹ️ *{}*\n", receipt));
+                    }
                 } else {
                     pruned_tools_count += 1;
                     let receipt = format!(
