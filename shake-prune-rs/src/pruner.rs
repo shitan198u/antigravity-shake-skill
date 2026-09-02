@@ -15,7 +15,6 @@ pub struct CompactionOptions {
     pub recent_window_steps: usize, // Fallback step-level minimum (default: 6)
     pub thought_window_turns: Option<usize>, // Thought window (e.g. Some(20) for /full-shake)
     pub marathon_horizon: bool, // Enable Milestone Horizon on marathon threads (>30 user turns)
-    pub keep_backups: usize,
     pub in_place: bool,
     pub dry_run: bool,
 }
@@ -27,7 +26,6 @@ impl Default for CompactionOptions {
             recent_window_steps: 6,
             thought_window_turns: None,
             marathon_horizon: false,
-            keep_backups: 5,
             in_place: true,
             dry_run: false,
         }
@@ -300,7 +298,6 @@ pub fn run_compaction_pipeline(
     let mut raw_bytes = 0usize;
     let mut total_assistant_turns = 0usize;
     let mut user_turn_positions: Vec<(usize, usize)> = Vec::new();
-    let mut ephemeral_message_indices: Vec<usize> = Vec::new();
 
     for (line_idx, line) in reader.lines().enumerate() {
         let line_str = line?;
@@ -317,8 +314,6 @@ pub fn run_compaction_pipeline(
                 total_assistant_turns += 1;
             } else if t == "USER_INPUT" {
                 user_turn_positions.push((user_turn_positions.len() + 1, buf_idx));
-            } else if t == "EPHEMERAL_MESSAGE" {
-                ephemeral_message_indices.push(buf_idx);
             }
         }
         lines_buffer.push((original_line_no, line_str));
@@ -386,19 +381,18 @@ pub fn run_compaction_pipeline(
         }
     }
 
+    let latest_ephemeral_idx = effective_ephemeral_indices.last().copied();
+
     let effective_total_user_turns = effective_user_turn_indices.len();
     let effective_total_steps = effective_lines.len();
 
     // Active working window cutoff
-    let active_window_start = if options.recent_user_turns == 0 {
-        effective_total_steps.saturating_sub(options.recent_window_steps)
-    } else if effective_total_user_turns > options.recent_user_turns {
+    let active_window_start = if options.recent_user_turns > 0 && effective_total_user_turns > options.recent_user_turns {
         effective_user_turn_indices[effective_total_user_turns - options.recent_user_turns]
     } else {
         effective_total_steps.saturating_sub(options.recent_window_steps)
     };
 
-    let latest_ephemeral_idx = effective_ephemeral_indices.last().copied();
 
     let thought_threshold = options
         .thought_window_turns

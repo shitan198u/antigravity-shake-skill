@@ -1,1 +1,0 @@
-skills/shake/SKILL.md

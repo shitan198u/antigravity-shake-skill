@@ -30,7 +30,6 @@ fn print_usage() {
     println!("  --thought-window N       Number of recent assistant turns to retain thoughts for (default: 20 with --full)");
     println!("  --recent-user-turns N    Number of human conversational turns to keep 100% unpruned (default: 10)");
     println!("  --recent-window N        Fallback minimum steps to keep intact (default: 6)");
-    println!("  --keep-backups N         Number of timestamped backup files to retain in logs/ (default: 5)");
     println!("  --no-in-place            Disable physical in-place compaction of transcript.jsonl");
     println!("  --dry-run                Simulate compaction and print report without modifying files");
     println!("  --json                   Output report metrics as machine-readable JSON");
@@ -208,11 +207,7 @@ fn main() {
                 options.thought_window_turns = Some(val);
             }
             i += 2;
-        } else if args[i] == "--keep-backups" && i + 1 < args.len() {
-            if let Ok(val) = args[i + 1].parse::<usize>() {
-                options.keep_backups = val;
-            }
-            i += 2;
+
         } else if args[i] == "--no-in-place" {
             options.in_place = false;
             i += 1;
@@ -344,7 +339,7 @@ fn main() {
     println!("- **Active Working Window**: Last **{} user conversational turns** kept 100% unpruned\n", options.recent_user_turns);
     
     if !options.dry_run && !backup_file_str.is_empty() {
-        println!("> 💾 **In-Place JSONL Compaction**: `transcript.jsonl` was physically pruned on disk (Inode preserved, latest {} backups retained). Subsequent turns in **this exact window** now transmit the compact payload over the wire.\n", options.keep_backups);
+        println!("> 💾 **In-Place JSONL Compaction**: `transcript.jsonl` was physically pruned on disk (Inode preserved, Single Master Archive active). Subsequent turns in **this exact window** now transmit the compact payload over the wire.\n");
     }
 
     if !history_timeline_md.is_empty() {

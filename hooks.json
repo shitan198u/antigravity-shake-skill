@@ -1,9 +1,7 @@
 {
-  "shake-anchor": {
-    "enabled": true,
+  "hooks": {
     "PreInvocation": [
       {
-        "type": "command",
         "command": "shake-prune --hook"
       }
     ]

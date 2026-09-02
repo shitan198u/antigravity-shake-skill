@@ -76,8 +76,6 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Write-Host "• Installing skill definitions to: $GlobalSkillsDir"
 if (Test-Path (Join-Path $ScriptDir "skills\shake\SKILL.md")) {
     Copy-Item (Join-Path $ScriptDir "skills\shake\SKILL.md") (Join-Path $GlobalSkillsDir "SKILL.md") -Force
-} elseif (Test-Path (Join-Path $ScriptDir "SKILL.md")) {
-    Copy-Item (Join-Path $ScriptDir "SKILL.md") (Join-Path $GlobalSkillsDir "SKILL.md") -Force
 }
 if (Test-Path (Join-Path $ScriptDir "skills\full-shake\SKILL.md")) {
     Copy-Item (Join-Path $ScriptDir "skills\full-shake\SKILL.md") (Join-Path $FullShakeSkillsDir "SKILL.md") -Force
@@ -150,10 +148,17 @@ Write-Host "• Merging PreInvocation hook into ~/.gemini/config/hooks.json (pre
 $EscapedHookExe = $TargetExe.Replace("\", "\\")
 $HookCommand = "$EscapedHookExe --hook"
 
+if (Test-Path $HooksConfig) {
+    Copy-Item $HooksConfig "$HooksConfig.bak" -Force -ErrorAction SilentlyContinue
+}
+
 $HooksObj = @{ "hooks" = @{ "PreInvocation" = @() } }
 if (Test-Path $HooksConfig) {
     try {
         $HooksObj = Get-Content $HooksConfig -Raw | ConvertFrom-Json
+        if ($HooksObj.PSObject.Properties["shake-anchor"]) {
+            $HooksObj.PSObject.Properties.Remove("shake-anchor")
+        }
         if (-not $HooksObj.hooks) { $HooksObj | Add-Member -MemberType NoteProperty -Name "hooks" -Value @{} }
         if (-not $HooksObj.hooks.PreInvocation) { $HooksObj.hooks | Add-Member -MemberType NoteProperty -Name "PreInvocation" -Value @() }
     } catch {

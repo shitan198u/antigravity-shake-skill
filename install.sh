@@ -171,21 +171,23 @@ fi
 HOOK_BIN="${INSTALL_DIR}/${BIN_NAME}"
 mkdir -p "$(dirname "${HOOKS_CONFIG}")"
 
-echo "⚙️ Configuring background PreInvocation hook..."
-if command -v jq >/dev/null 2>&1; then
-    if [ -f "${HOOKS_CONFIG}" ]; then
-        EXISTING_CONTENT="$(cat "${HOOKS_CONFIG}")"
-        if [ -z "${EXISTING_CONTENT// }" ]; then
-            EXISTING_CONTENT="{}"
-        fi
-    else
+echo "⚙️ Configuring background PreInvocation hook (preserving existing user hooks)..."
+if [ -f "${HOOKS_CONFIG}" ]; then
+    cp "${HOOKS_CONFIG}" "${HOOKS_CONFIG}.bak" 2>/dev/null || true
+    EXISTING_CONTENT="$(cat "${HOOKS_CONFIG}")"
+    if [ -z "${EXISTING_CONTENT// }" ]; then
         EXISTING_CONTENT="{}"
     fi
+else
+    EXISTING_CONTENT="{}"
+fi
 
+if command -v jq >/dev/null 2>&1; then
     echo "${EXISTING_CONTENT}" | jq --arg bin "${HOOK_BIN} --hook" '
+        del(."shake-anchor") |
         .hooks = (.hooks // {}) |
         .hooks.PreInvocation = (
-            ((.hooks.PreInvocation // []) | map(select(.command != $bin))) +
+            ((.hooks.PreInvocation // []) | map(select((.command != $bin) and (.command | contains("shake-prune") | not)))) +
             [{"command": $bin}]
         )
     ' > "${HOOKS_CONFIG}.tmp"
