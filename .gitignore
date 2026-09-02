@@ -12,3 +12,5 @@ __pycache__/
 .DS_Store
 .vscode/
 .idea/
+scripts/*.txt
+scripts/bundle_repo
