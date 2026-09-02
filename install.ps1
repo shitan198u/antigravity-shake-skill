@@ -20,19 +20,19 @@ $TargetExe = Join-Path $GlobalBinDir "shake-prune.exe"
 # UNINSTALL MODE
 # ==============================================================================
 if ($Uninstall) {
-    Write-Host "⚡ Uninstalling Antigravity /shake & /full-shake..." -ForegroundColor Cyan
+    Write-Host "[*] Uninstalling Antigravity /shake and /full-shake..." -ForegroundColor Cyan
 
     if (Test-Path $TargetExe) {
         Remove-Item -Force $TargetExe
-        Write-Host "  ✓ Removed $TargetExe"
+        Write-Host "  [OK] Removed $TargetExe"
     }
     if (Test-Path $GlobalSkillsDir) {
         Remove-Item -Recurse -Force $GlobalSkillsDir
-        Write-Host "  ✓ Removed $GlobalSkillsDir"
+        Write-Host "  [OK] Removed $GlobalSkillsDir"
     }
     if (Test-Path $FullShakeSkillsDir) {
         Remove-Item -Recurse -Force $FullShakeSkillsDir
-        Write-Host "  ✓ Removed $FullShakeSkillsDir"
+        Write-Host "  [OK] Removed $FullShakeSkillsDir"
     }
 
     if (Test-Path $HooksConfig) {
@@ -47,14 +47,14 @@ if ($Uninstall) {
                 }
                 $HooksObj.hooks.PreInvocation = $Filtered
                 $HooksObj | ConvertTo-Json -Depth 5 | Set-Content $HooksConfig -Encoding UTF8
-                Write-Host "  ✓ Cleaned PreInvocation hook from $HooksConfig"
+                Write-Host "  [OK] Cleaned PreInvocation hook from $HooksConfig"
             }
         } catch {
             Write-Warning "Could not update hooks.json: $_"
         }
     }
 
-    Write-Host "🎉 Antigravity /shake has been completely uninstalled." -ForegroundColor Green
+    Write-Host "[DONE] Antigravity /shake has been completely uninstalled." -ForegroundColor Green
     exit 0
 }
 
@@ -62,7 +62,7 @@ if ($Uninstall) {
 # INSTALL MODE
 # ==============================================================================
 Write-Host "================================================================================" -ForegroundColor Cyan
-Write-Host "          ⚡ Antigravity /shake Skill & Native Hook Installation ⚡" -ForegroundColor Cyan
+Write-Host "          [*] Antigravity /shake Skill & Native Hook Installation [*]" -ForegroundColor Cyan
 Write-Host "================================================================================" -ForegroundColor Cyan
 
 New-Item -ItemType Directory -Force -Path (Join-Path $GlobalSkillsDir "bin") | Out-Null
@@ -73,7 +73,7 @@ New-Item -ItemType Directory -Force -Path $GlobalBinDir | Out-Null
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 # 1. Install SKILL.md and documentation
-Write-Host "• Installing skill definitions to: $GlobalSkillsDir"
+Write-Host "- Installing skill definitions to: $GlobalSkillsDir"
 if (Test-Path (Join-Path $ScriptDir "skills\shake\SKILL.md")) {
     Copy-Item (Join-Path $ScriptDir "skills\shake\SKILL.md") (Join-Path $GlobalSkillsDir "SKILL.md") -Force
 }
@@ -88,7 +88,7 @@ if (Test-Path (Join-Path $ScriptDir "references")) {
 $InstalledBinary = $false
 
 if (Test-Path (Join-Path $ScriptDir "bin\shake-prune.exe")) {
-    Write-Host "• Installing local compiled native binary from bin/..."
+    Write-Host "- Installing local compiled native binary from bin/..."
     Copy-Item (Join-Path $ScriptDir "bin\shake-prune.exe") $TargetExe -Force
     Copy-Item (Join-Path $ScriptDir "bin\shake-prune.exe") (Join-Path $GlobalSkillsDir "bin\shake-prune.exe") -Force
     $InstalledBinary = $true
@@ -104,11 +104,11 @@ if (-not $InstalledBinary) {
     $TempSums = Join-Path $TempDir "SHA256SUMS.txt"
 
     try {
-        Write-Host "• Downloading latest precompiled release binary from GitHub..."
+        Write-Host "- Downloading latest precompiled release binary from GitHub..."
         Invoke-WebRequest -Uri "$BaseReleaseUrl/$DownloadFile" -OutFile $TempExe -UseBasicParsing
         Invoke-WebRequest -Uri "$BaseReleaseUrl/SHA256SUMS.txt" -OutFile $TempSums -UseBasicParsing
 
-        Write-Host "• Verifying SHA256 integrity checksum..."
+        Write-Host "- Verifying SHA256 integrity checksum..."
         $SumsLines = Get-Content $TempSums
         $ExpectedHash = ""
         foreach ($line in $SumsLines) {
@@ -121,7 +121,7 @@ if (-not $InstalledBinary) {
         $ActualHash = (Get-FileHash $TempExe -Algorithm SHA256).Hash.ToLower()
 
         if ($ExpectedHash -and ($ExpectedHash -eq $ActualHash)) {
-            Write-Host "  ✓ SHA256 checksum verified: $ActualHash" -ForegroundColor Green
+            Write-Host "  [OK] SHA256 checksum verified: $ActualHash" -ForegroundColor Green
             Copy-Item $TempExe $TargetExe -Force
             Copy-Item $TempExe (Join-Path $GlobalSkillsDir "bin\shake-prune.exe") -Force
             $InstalledBinary = $true
@@ -135,7 +135,7 @@ if (-not $InstalledBinary) {
     }
 
     if (-not $InstalledBinary -and (Get-Command "cargo" -ErrorAction SilentlyContinue)) {
-        Write-Host "• Building native Rust binary from source via Cargo..."
+        Write-Host "- Building native Rust binary from source via Cargo..."
         cargo build --release --manifest-path (Join-Path $ScriptDir "shake-prune-rs\Cargo.toml")
         Copy-Item (Join-Path $ScriptDir "shake-prune-rs\target\release\shake-prune.exe") $TargetExe -Force
         Copy-Item (Join-Path $ScriptDir "shake-prune-rs\target\release\shake-prune.exe") (Join-Path $GlobalSkillsDir "bin\shake-prune.exe") -Force
@@ -144,7 +144,7 @@ if (-not $InstalledBinary) {
 }
 
 # 3. Safely merge PreInvocation hook into hooks.json
-Write-Host "• Merging PreInvocation hook into ~/.gemini/config/hooks.json (preserving existing hooks)..."
+Write-Host "- Merging PreInvocation hook into ~/.gemini/config/hooks.json (preserving existing hooks)..."
 $EscapedHookExe = $TargetExe.Replace("\", "\\")
 $HookCommand = "$EscapedHookExe --hook"
 
@@ -178,8 +178,8 @@ $HooksObj.hooks.PreInvocation = $NewPreInvocation
 $HooksObj | ConvertTo-Json -Depth 5 | Set-Content $HooksConfig -Encoding UTF8
 
 Write-Host "--------------------------------------------------------------------------------" -ForegroundColor Green
-Write-Host "✅ Installation complete!" -ForegroundColor Green
-Write-Host "• Pure native Rust binary installed at: $TargetExe"
-Write-Host "• Skill & In-Window Anchor are globally active."
-Write-Host "• To use it: Type '/shake' or '/full-shake' in any Antigravity conversation and keep chatting in the same tab!"
+Write-Host "[OK] Installation complete!" -ForegroundColor Green
+Write-Host "- Pure native Rust binary installed at: $TargetExe"
+Write-Host "- Skill and In-Window Anchor are globally active."
+Write-Host "- To use it: Type '/shake' or '/full-shake' in any Antigravity conversation and keep chatting in the same tab!"
 Write-Host "================================================================================" -ForegroundColor Cyan
