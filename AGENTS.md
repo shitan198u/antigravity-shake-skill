@@ -1,11 +1,11 @@
 # Agent Instructions: Cross-Platform Adaptation & Installation Guide
 
-This document is a direct guide for **AI Coding Agents** (Google Antigravity, Claude Code, Cursor, Aider, etc.) running on a user's machine to automatically configure, adapt, or compile the `/shake` skill on **any operating system** (Linux, macOS, Windows).
+This document is a direct guide for **AI Coding Agents** (Google Antigravity, Claude Code, Cursor, Aider, etc.) running on a user's machine to automatically configure, adapt, or compile the `/shake` and `/full-shake` skills on **any operating system** (Linux, macOS, Windows).
 
 ---
 
 ## 🎯 Primary Goal
-Install the `/shake` context compaction skill globally into the user's Antigravity environment so that typing `/shake` in any chat session instantly prunes token bloat and sets an in-window continuity anchor.
+Install the `/shake` and `/full-shake` context compaction skills globally into the user's Antigravity environment so that typing `/shake` or `/full-shake` in any chat session instantly prunes token bloat and sets an in-window continuity anchor.
 
 ---
 
@@ -41,39 +41,25 @@ Check the current OS and CPU architecture:
    - Copy the compiled binary:
      - Linux/macOS: `shake-prune-rs/target/release/shake-prune` ➔ `<Global Binary Directory>/shake-prune`
      - Windows: `shake-prune-rs\target\release\shake-prune.exe` ➔ `%USERPROFILE%\.gemini\bin\shake-prune.exe`
-3. **Python Fallback Engine**:
-   - If neither prebuilt binary nor Rust compiler is available, copy `scripts/shake_prune.py` to `<Global Skill Directory>/scripts/shake_prune.py`.
+3. **Automated Shell Installer**:
+   - Alternatively, execute the self-contained installer script:
+     - Linux/macOS: `./install.sh`
+     - Windows: `powershell -ExecutionPolicy Bypass -File .\install.ps1`
 
-### 3. Deploy Skill Definition
-Copy `SKILL.md` to `<Global Skill Directory>/SKILL.md`.
+### 3. Deploy Skill Definitions
+- Copy `SKILL.md` to `<Global Skill Directory>/SKILL.md`.
+- Copy `skills/full-shake/SKILL.md` to `<Global Config Directory>/skills/full-shake/SKILL.md`.
+- Copy `references/` into `<Global Skill Directory>/references/`.
 
 ### 4. Configure PreInvocation Hook (`hooks.json`)
 Ensure the `PreInvocation` hook is configured in `<Global Config Directory>/hooks.json`:
 
-#### On Linux / macOS:
 ```json
 {
-  "shake-anchor": {
-    "enabled": true,
+  "hooks": {
     "PreInvocation": [
       {
-        "type": "command",
-        "command": "~/.gemini/bin/shake-prune --hook"
-      }
-    ]
-  }
-}
-```
-
-#### On Windows:
-```json
-{
-  "shake-anchor": {
-    "enabled": true,
-    "PreInvocation": [
-      {
-        "type": "command",
-        "command": "%USERPROFILE%\\.gemini\\bin\\shake-prune.exe --hook"
+        "command": "shake-prune --hook"
       }
     ]
   }
@@ -86,14 +72,20 @@ Ensure the `PreInvocation` hook is configured in `<Global Config Directory>/hook
 
 Any modifications or custom builds of the pruner engine **MUST adhere to these non-negotiable rules**:
 1. **100% Verbatim Prompts & Dialogue**: Never use an LLM to summarize conversation turns. User requests and assistant replies must be preserved character-for-character.
-2. **100% Thought Preservation**: Retain all `<details><summary>💭 Thought Process</summary>...</details>` blocks.
-3. **100% Error Preservation**: All tool calls with `exit_code != 0` or failure statuses must retain their full stack traces/logs.
-4. **Active Working Window**: Retain the outputs of the last 6 tool steps to prevent broken momentum.
+2. **Signal Preservation**: Retain all assistant explanations, code diffs, decisions, and non-zero exit error traces (`exit_code != 0`).
+3. **Thought Windowing (`/full-shake`)**: When `--full` is specified, retain scratchpad thoughts for the latest 20 turns while dropping older thoughts.
+4. **Active Working Window**: Retain the outputs of the last 6 tool execution steps to prevent broken momentum.
 5. **Fail-Open Hook**: The `--hook` command must exit with code `0` and output `{}` upon any unexpected error so it never blocks the user's chat.
+6. **Untouched Full Stream**: Never prune `transcript_full.jsonl` on disk. It serves as the developer's permanent unpruned audit log.
 
 ---
 
-## ⚡ Self-Verification
+## ⚡ Self-Verification & Uninstallation
 After installing, run:
+- `<Global Binary Directory>/shake-prune --version` (Prints `shake-prune 0.1.8`).
 - `<Global Binary Directory>/shake-prune --help` (Exit code must be `0`).
 - Confirm `<Global Skill Directory>/SKILL.md` exists and is non-empty.
+
+To completely uninstall:
+- Linux/macOS: `./install.sh --uninstall`
+- Windows: `powershell -File .\install.ps1 -Uninstall`

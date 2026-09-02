@@ -7,8 +7,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$RepoUrl = "https://github.com/shitan198u/antigravity-shake-skill"
-$ReleaseTag = "v0.1.8"
+$Repo = "shitan198u/antigravity-shake-skill"
+$DefaultTag = "v0.1.8"
 $UserHome = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile)
 $GlobalSkillsDir = Join-Path $UserHome ".gemini\config\skills\shake"
 $FullShakeSkillsDir = Join-Path $UserHome ".gemini\config\skills\full-shake"
@@ -73,9 +73,13 @@ New-Item -ItemType Directory -Force -Path $GlobalBinDir | Out-Null
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 # 1. Install SKILL.md and documentation
-Write-Host "• Installing skill definition to: $GlobalSkillsDir"
-Copy-Item (Join-Path $ScriptDir "SKILL.md") (Join-Path $GlobalSkillsDir "SKILL.md") -Force
-Copy-Item (Join-Path $ScriptDir "skills\full-shake\SKILL.md") (Join-Path $FullShakeSkillsDir "SKILL.md") -Force
+Write-Host "• Installing skill definitions to: $GlobalSkillsDir"
+if (Test-Path (Join-Path $ScriptDir "SKILL.md")) {
+    Copy-Item (Join-Path $ScriptDir "SKILL.md") (Join-Path $GlobalSkillsDir "SKILL.md") -Force
+}
+if (Test-Path (Join-Path $ScriptDir "skills\full-shake\SKILL.md")) {
+    Copy-Item (Join-Path $ScriptDir "skills\full-shake\SKILL.md") (Join-Path $FullShakeSkillsDir "SKILL.md") -Force
+}
 if (Test-Path (Join-Path $ScriptDir "references")) {
     Copy-Item (Join-Path $ScriptDir "references\*") (Join-Path $GlobalSkillsDir "references") -Recurse -Force
 }
@@ -84,31 +88,31 @@ if (Test-Path (Join-Path $ScriptDir "references")) {
 $InstalledBinary = $false
 
 if (Test-Path (Join-Path $ScriptDir "bin\shake-prune.exe")) {
-    Write-Host "• Installing local compiled native binary..."
+    Write-Host "• Installing local compiled native binary from bin/..."
     Copy-Item (Join-Path $ScriptDir "bin\shake-prune.exe") $TargetExe -Force
     Copy-Item (Join-Path $ScriptDir "bin\shake-prune.exe") (Join-Path $GlobalSkillsDir "bin\shake-prune.exe") -Force
     $InstalledBinary = $true
 }
 
 if (-not $InstalledBinary) {
-    $DownloadFile = "shake-prune-windows-x86_64.exe"
-    $BaseReleaseUrl = "$RepoUrl/releases/download/$ReleaseTag"
+    $DownloadFile = "shake-prune-x86_64-pc-windows-msvc.exe"
+    $BaseReleaseUrl = "https://github.com/$Repo/releases/latest/download"
     $TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid().ToString())
     New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
 
     $TempExe = Join-Path $TempDir "shake-prune.exe"
-    $TempSums = Join-Path $TempDir "SHA256SUMS.txt"
+    $TempSums = Join-Path $TempDir "SHA256SUMS"
 
     try {
-        Write-Host "• Downloading precompiled release binary ($DownloadFile) from GitHub..."
+        Write-Host "• Downloading latest precompiled release binary from GitHub..."
         Invoke-WebRequest -Uri "$BaseReleaseUrl/$DownloadFile" -OutFile $TempExe -UseBasicParsing
-        Invoke-WebRequest -Uri "$BaseReleaseUrl/SHA256SUMS.txt" -OutFile $TempSums -UseBasicParsing
+        Invoke-WebRequest -Uri "$BaseReleaseUrl/SHA256SUMS" -OutFile $TempSums -UseBasicParsing
 
         Write-Host "• Verifying SHA256 integrity checksum..."
         $SumsLines = Get-Content $TempSums
         $ExpectedHash = ""
         foreach ($line in $SumsLines) {
-            if ($line -match "^([a-fA-F0-9]{64})\s+(\*)?shake-prune-windows-x86_64\.exe$") {
+            if ($line -match "^([a-fA-F0-9]{64})\s+(\*)?$DownloadFile$") {
                 $ExpectedHash = $Matches[1].ToLower()
                 break
             }
@@ -131,7 +135,7 @@ if (-not $InstalledBinary) {
     }
 
     if (-not $InstalledBinary -and (Get-Command "cargo" -ErrorAction SilentlyContinue)) {
-        Write-Host "• Building native Rust binary from source..."
+        Write-Host "• Building native Rust binary from source via Cargo..."
         cargo build --release --manifest-path (Join-Path $ScriptDir "shake-prune-rs\Cargo.toml")
         Copy-Item (Join-Path $ScriptDir "shake-prune-rs\target\release\shake-prune.exe") $TargetExe -Force
         Copy-Item (Join-Path $ScriptDir "shake-prune-rs\target\release\shake-prune.exe") (Join-Path $GlobalSkillsDir "bin\shake-prune.exe") -Force
@@ -157,11 +161,11 @@ if (Test-Path $HooksConfig) {
 
 $NewPreInvocation = @()
 foreach ($h in $HooksObj.hooks.PreInvocation) {
-    if ($h.name -ne "shake-anchor") {
+    if ($h.command -notmatch "shake-prune") {
         $NewPreInvocation += $h
     }
 }
-$NewPreInvocation += @{ "name" = "shake-anchor"; "command" = $HookCommand }
+$NewPreInvocation += @{ "command" = $HookCommand }
 $HooksObj.hooks.PreInvocation = $NewPreInvocation
 
 $HooksObj | ConvertTo-Json -Depth 5 | Set-Content $HooksConfig -Encoding UTF8
@@ -170,5 +174,5 @@ Write-Host "--------------------------------------------------------------------
 Write-Host "✅ Installation complete!" -ForegroundColor Green
 Write-Host "• Pure native Rust binary installed at: $TargetExe"
 Write-Host "• Skill & In-Window Anchor are globally active."
-Write-Host "• To use it: Type '/shake' in any Antigravity conversation and keep chatting in the same tab!"
+Write-Host "• To use it: Type '/shake' or '/full-shake' in any Antigravity conversation and keep chatting in the same tab!"
 Write-Host "================================================================================" -ForegroundColor Cyan

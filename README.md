@@ -37,11 +37,13 @@ During long development sessions, AI coding agents accumulate tens of thousands 
 * 🛡️ **Inode Preservation & File Locking**: Uses POSIX/Windows truncate-and-rewrite with `fs2` exclusive locking and `fsync` durability.
 * ⚡ **Proactive 200k Token Auto-Shake**: Background `PreInvocation` hook automatically detects and compacts conversations that exceed 200k tokens (`660 KB`).
 * ⏱️ **50 KB Growth Delta Guard**: Prevents redundant CPU/disk cycles when conversations contain extensive clean dialogue.
+* 🧹 **Rolling Backup Retention**: Retains the latest $N$ timestamped backups (`.bak_*`) and automatically purges older snapshots to prevent disk bloat.
+* 🏷️ **Structured Receipt Schema**: Replaces noisy outputs with machine-parseable tags: `[PRUNED tool=... step=... archive=...]`.
+* 📜 **Untouched Permanent Raw History**: `transcript_full.jsonl` is left 100% unpruned for auditing and debugging.
 * 🧠 **100% Signal Retention**: Preserves all user prompts, assistant thoughts/reasoning, and non-zero exit error traces verbatim.
 * 🕒 **Active Working Window**: Retains the last 6 execution steps with 0% pruning so active momentum is never interrupted.
-* 🔍 **Progressive Disclosure Backlinks**: Compacts older code writes into lightweight receipts containing canonical absolute paths to timestamped backups (`.bak_<timestamp>`).
 * 🔒 **Hardened Security**: ReDoS-immune linear scanning, HTML/XSS sanitization, URL-encoded links, exclusive `0600` tempfiles, and strict canonical allowlists.
-* 🦀 **Pure Native Rust**: Precompiled multi-platform binaries for Linux (x86_64), macOS (Universal Binary for Apple Silicon & Intel), and Windows (x86_64).
+* 🦀 **Pure Native Rust**: Precompiled multi-platform binaries for Linux (x86_64, aarch64), macOS (Universal Binary for Apple Silicon & Intel), and Windows (x86_64).
 
 ---
 
@@ -103,16 +105,22 @@ You don't even have to remember to run `/shake`! The included `PreInvocation` ho
 ### 3. Standalone CLI Usage
 ```bash
 # Compact a specific transcript in-place
-shake-prune /path/to/brain/session_id/.system_generated/logs/transcript.jsonl
+shake-prune /path/to/transcript.jsonl
 
 # Run full deep compaction with custom thought window
 shake-prune /path/to/transcript.jsonl --full --thought-window 25
 
-# Specify a custom output directory and keep the last 8 tool steps intact
-shake-prune /path/to/transcript.jsonl /path/to/output_dir/ --recent-window 8
+# Enforce a custom backup retention limit (keeps last 3 backups)
+shake-prune /path/to/transcript.jsonl --keep-backups 3
 
-# Generate markdown report only without modifying transcript.jsonl
-shake-prune /path/to/transcript.jsonl --no-in-place
+# Dry-run simulation (calculates metrics without touching disk)
+shake-prune /path/to/transcript.jsonl --dry-run
+
+# Output metrics as machine-readable JSON
+shake-prune /path/to/transcript.jsonl --json
+
+# Check installed version
+shake-prune --version
 
 # Run as Antigravity lifecycle hook
 shake-prune --hook
@@ -120,10 +128,26 @@ shake-prune --hook
 
 ---
 
+## 🗑️ Uninstallation
+
+To completely remove the binary, skill definitions, and lifecycle hook:
+
+### Linux / macOS:
+```bash
+./install.sh --uninstall
+```
+
+### Windows:
+```powershell
+powershell -File .\install.ps1 -Uninstall
+```
+
+---
+
 ## 📚 Technical Documentation & Deep Dives
 
 * 🧠 **[Antigravity Lifecycle & Backend vs. UI Cache](references/antigravity_lifecycle.md)**: Deep dive on how Antigravity handles model prompt streams vs. webview DOM caches, Inode preservation mechanics, and hook lifecycles.
-* 🛠️ **[How `/shake` Works Technical Reference](references/how_it_works.md)**: Comprehensive architectural breakdown of the 2-pass pruning pipeline, token calibration density, and security hardening.
+* 🛠️ **[How `/shake` Works Technical Reference](references/how_it_works.md)**: Comprehensive architectural breakdown of the unified single-pass pipeline, token calibration density, and security hardening.
 * ⚖️ **[Comparison with Other Compaction Tools](references/omp_comparison.md)**: Detailed comparison between `/shake`, OMP, and traditional summarization techniques.
 
 ---

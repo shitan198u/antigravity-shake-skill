@@ -16,9 +16,9 @@ flowchart TD
     end
 
     subgraph Storage [Local Filesystem Storage]
-        T_JSONL[transcript.jsonl<br/>Active Model Context]
-        TF_JSONL[transcript_full.jsonl<br/>Untruncated Debug Log]
-        BAK_JSONL[transcript.jsonl.bak_timestamp<br/>Timestamped Raw Archives]
+        T_JSONL[transcript.jsonl<br/>Active Model Context - Compacted]
+        TF_JSONL[transcript_full.jsonl<br/>Permanent Raw Log - Untouched]
+        BAK_JSONL[transcript.jsonl.bak_timestamp<br/>Rolling Backup Archives]
         ANCHOR[active_shake_anchor.json<br/>Session Working State]
     end
 
@@ -46,146 +46,63 @@ flowchart TD
    - **Crucial Distinction**: The LLM *never* sees the frontend DOM cache. It only sees `transcript.jsonl`.
 
 ### How `/shake` Operates
-`/shake` performs **physical in-place compaction** directly on `transcript.jsonl` and `transcript_full.jsonl`:
-- It replaces verbose raw tool stdout (`RUN_COMMAND`, `VIEW_FILE`, `write_to_file`) with compact structured receipts.
-- The prompt sent to Gemini immediately drops from **1.5M+ tokens down to <200k tokens** (50% to 80% physical reduction).
-- The IDE frontend continues operating smoothly in the **exact same tab** without requiring tab switching or context re-initialization.
+`/shake` performs **physical in-place compaction** directly on `transcript.jsonl`:
+- It replaces verbose raw tool stdout (`RUN_COMMAND`, `VIEW_FILE`, `write_to_file`) with compact structured receipts:
+  `[PRUNED tool=RUN_COMMAND step=42 exit=0 lines=120 archive=/path/to/transcript.jsonl.bak_...]`
+- It leaves `transcript_full.jsonl` completely unpruned so developers always have a full raw historical record for auditing.
+- It preserves 100% of user prompts, assistant reasoning, and non-zero exit error traces verbatim.
+- Because the file's Inode is preserved via truncate-and-rewrite, the IDE's existing open file descriptor continues writing to the compacted file seamlessly.
 
 ---
 
-## 2. The Antigravity Lifecycle Hook System
+## 2. Inode Preservation Mechanics
 
-Antigravity provides lifecycle extension points defined in `~/.gemini/config/hooks.json`. `/shake` hooks directly into the **`PreInvocation`** lifecycle event.
+Operating systems associate open file descriptors with **Inodes** (Index Nodes), not filenames:
+
+```text
+[IDE Process] ---> File Descriptor 12 ---> Inode #84920412 (transcript.jsonl)
+```
+
+If a tool uses `fs::rename` (e.g. creating `transcript.tmp` and renaming it to `transcript.jsonl`):
+```text
+Old File: Inode #84920412 (Unlinked from filesystem, IDE still writes here!)
+New File: Inode #91024561 (New transcript.jsonl, orphaned from IDE!)
+```
+This causes the IDE to continue writing subsequent turns into a deleted Inode, resulting in silent data loss or broken context.
+
+`/shake` uses **POSIX Truncate-and-Rewrite**:
+1. `File::options().read(true).write(true).open(path)`
+2. `file.lock_exclusive()`
+3. `fs::copy(path, backup_path)` (taken under lock)
+4. `file.set_len(0)` (resets file length to 0, preserves Inode #84920412)
+5. `file.seek(SeekFrom::Start(0))`
+6. `file.write_all(compacted_bytes)`
+7. `file.sync_all()` (`fsync` ensures data hits physical disk)
+8. `file.unlock()`
+
+The IDE's file descriptor remains valid, and the context window is physically compacted with zero disruption.
+
+---
+
+## 3. The PreInvocation Lifecycle Hook
+
+Antigravity provides lifecycle hooks defined in `~/.gemini/config/hooks.json`.
 
 ```json
 {
   "hooks": {
     "PreInvocation": [
       {
-        "name": "shake-anchor",
-        "command": "/home/user/.gemini/bin/shake-prune --hook"
+        "command": "shake-prune --hook"
       }
     ]
   }
 }
 ```
 
-### The PreInvocation Lifecycle Flow
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor User
-    participant IDE as Antigravity IDE
-    participant Hook as shake-prune --hook
-    participant Storage as brain/conv_id/
-    participant Gemini as Gemini API
-
-    User->>IDE: Sends prompt ("Fix the auth bug")
-    IDE->>Hook: Stdin JSON payload {transcriptPath, artifactDirectoryPath, ...}
-    
-    rect rgb(240, 248, 255)
-        Note over Hook: Sub-millisecond Execution (<0.2ms)
-        Hook->>Storage: Check transcript.jsonl size & delta
-        alt Exceeds 200k tokens (660 KB) & 50 KB delta
-            Hook->>Storage: Auto-compact in-place with exclusive lock
-            Hook->>Storage: Write active_shake_anchor.json
-        else Under 200k tokens or within delta
-            Hook->>Storage: Read existing anchor metadata
-        end
-    end
-
-    Hook-->>IDE: Stdout JSON {"injectSteps": [{"ephemeralMessage": "..."}]}
-    IDE->>Gemini: Compacted transcript.jsonl + Ephemeral anchor context
-    Gemini-->>IDE: Stream response & execute tools
-    IDE-->>User: Instant, high-speed response
-```
-
-### Ephemeral Context Anchoring
-Rather than permanently modifying the transcript on every turn, the hook injects an **`ephemeralMessage`**:
-```text
-[Context compacted via /shake. Active state anchored in @/path/to/shake_report.md (Step 379+). Treat prior raw tool stdout as archived.]
-```
-* This message is injected into the LLM's working prompt for that turn only.
-* It anchors the model's awareness, informing it that prior commands succeeded and that full code payloads are archived on disk.
-* It does not pollute the permanent JSONL log on disk.
-
----
-
-## 3. The 200k Proactive Auto-Shake Engine
-
-To prevent users from having to manually remember to run `/shake` during long sessions, `shake-prune` includes an automated background trigger:
-
-1. **Sub-Millisecond Stat Check (`<0.01ms`)**:
-   On every user turn, the hook checks `fs::metadata(transcript_path).len()`.
-2. **Calibrated Code/JSON Threshold**:
-   - Code and JSON transcripts average **3.3 bytes/token** (due to 20.7% punctuation/symbol density).
-   - $\text{Threshold} = 200,000 \times 3.3 = 660,000 \text{ bytes (645 KB)}$.
-3. **The 50 KB Growth Delta Guard**:
-   If the clean dialogue (user prompts + thoughts) alone exceeds 200k tokens, the engine compares the current size against `last_compacted_bytes`:
-   $$\text{current\_size} > \text{last\_compacted\_size} + 50,000\text{ bytes}$$
-   If less than 50 KB of new content has accumulated, the hook immediately exits in `<0.2ms` without running disk compaction.
-4. **180s Cooldown Guard**:
-   Prevents tight CPU looping in failure or edge-case conditions.
-
----
-
-## 4. Inode Preservation & Cross-Platform Concurrency
-
-When modifying an active log file that a host IDE is currently writing to, standard file replacement (`fs::rename` / `os.replace`) causes a fatal **Inode Swap**:
-
-```mermaid
-flowchart LR
-    subgraph Broken [Atomic Rename: Inode Swap Bug]
-        FD1[IDE File Descriptor] -->|Points to Inode 101| OLD[Old transcript.jsonl unlinked on disk]
-        NEW[New transcript.jsonl Inode 102] -. Orphaned .- FD1
-    end
-
-    subgraph Fixed [r+ Truncate & Seek: Inode Preserved]
-        FD2[IDE File Descriptor] -->|Points to Inode 201| SAME[transcript.jsonl Inode 201]
-        SHAKE[shake-prune r+ truncate] -->|Writes to Inode 201| SAME
-    end
-```
-
-### In-Place Truncate-and-Rewrite Implementation
-
-1. **Exclusive Cross-Platform File Locking (`fs2`)**:
-   ```rust
-   let mut file = File::options().read(true).write(true).open(&abs_target)?;
-   file.lock_exclusive()?;
-   ```
-   Ensures that neither the IDE nor background agent tasks can write mid-compaction.
-2. **In-Place Truncation & Rewind**:
-   ```rust
-   file.set_len(0)?;
-   file.seek(SeekFrom::Start(0))?;
-   file.write_all(compacted_output.as_bytes())?;
-   file.flush()?;
-   file.sync_all()?; // fsync commits bytes to physical disk
-   file.unlock()?;
-   ```
-3. **Result**: The file descriptor held by the Antigravity IDE stays synchronized on the exact same inode. Subsequent turns append cleanly without data loss or corruption.
-
----
-
-## 5. Progressive Disclosure & Historical Recovery
-
-`/shake` never destroys code or makes irreversible deletions:
-
-1. **Timestamped Non-Destructive Backups**:
-   Every pass generates a uniquely timestamped snapshot:
-   ```text
-   transcript.jsonl.bak_20260902_005415
-   ```
-2. **Canonical Absolute Backlinks**:
-   Older `write_to_file` and `replace_file_content` payloads are replaced with structured receipts containing the exact step index and absolute archive path:
-   ```json
-   {
-     "name": "write_to_file",
-     "args": {
-       "TargetFile": "/path/to/src/main.rs",
-       "CodeContent": "[File written to disk (140 lines). Step 42 full payload archived in /home/.../transcript.jsonl.bak_20260902_005415. Inspect via view_file if needed]"
-     }
-   }
-   ```
-3. **On-Demand Recovery**: If a user later asks *"revert the hook changes made around step 40"*, the LLM reads the preserved dialogue history, retrieves the archive link from the receipt, and inspects the raw code via `view_file` to restore the code verbatim.
+On every prompt submission:
+1. The IDE executes `shake-prune --hook`, piping session metadata (conversation ID, transcript path, artifact directory) via `stdin`.
+2. The hook checks `transcript.jsonl` size. If $\ge 660\text{ KB}$ (~200k tokens), it triggers auto-compaction.
+3. If compacted, it injects an ephemeral anchor message into the prompt stream:
+   `[Context compacted via /shake. Active state anchored in @... (Step N+). Treat prior raw tool stdout as archived.]`
+4. The hook runs with `panic::catch_unwind` protection—if any error occurs, it emits `{}` and exits `0` immediately (fail-open guarantee).

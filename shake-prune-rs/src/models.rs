@@ -4,34 +4,13 @@ use serde::{Deserialize, Serialize};
 pub struct CompactionEvent {
     pub timestamp_iso: String,
     pub timestamp_display: String,
-    pub trigger: String, // "Manual (/shake)" or "Auto (200k Threshold)"
+    pub trigger: String, // "Manual (/shake)", "Manual (/full-shake)", or "Auto (200k Threshold)"
     pub anchored_step: u64,
     pub bytes_before: usize,
     pub bytes_after: usize,
     pub reduction_pct: f64,
     pub backup_file: String,
     pub artifact_file: String,
-}
-
-#[allow(dead_code)]
-#[derive(Deserialize, Debug, Clone)]
-pub struct ToolCall {
-    pub name: String,
-    pub args: Option<serde_json::Value>,
-}
-
-#[allow(dead_code)]
-#[derive(Deserialize, Debug, Clone)]
-pub struct Step {
-    #[serde(rename = "type")]
-    pub step_type: Option<String>,
-    #[allow(dead_code)]
-    pub source: Option<String>,
-    pub content: Option<String>,
-    pub thinking: Option<String>,
-    pub status: Option<String>,
-    pub exit_code: Option<i32>,
-    pub tool_calls: Option<Vec<ToolCall>>,
 }
 
 #[derive(Serialize, Debug, Clone)]
