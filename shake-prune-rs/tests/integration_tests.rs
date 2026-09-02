@@ -35,6 +35,10 @@ fn test_inode_preservation() {
     let bin = get_binary_path();
     let output = std::process::Command::new(&bin)
         .arg(&transcript_path)
+        .arg("--recent-user-turns")
+        .arg("0")
+        .arg("--recent-window")
+        .arg("0")
         .output()
         .expect("Failed to execute shake-prune");
 
@@ -68,6 +72,10 @@ fn test_safety_retention_invariants() {
     let bin = get_binary_path();
     let output = std::process::Command::new(&bin)
         .arg(&transcript_path)
+        .arg("--recent-user-turns")
+        .arg("0")
+        .arg("--recent-window")
+        .arg("0")
         .output()
         .expect("Failed to execute shake-prune");
 
@@ -167,46 +175,52 @@ fn test_thought_windowing_full_shake() {
 }
 
 #[test]
-fn test_backup_retention_rotation() {
+fn test_single_master_backup_cleanup() {
     let tmp_dir = tempfile::tempdir().unwrap();
-    let logs_dir = tmp_dir.path().join(".gemini/brain/test-retention/.system_generated/logs");
+    let logs_dir = tmp_dir.path().join(".gemini/brain/test-cleanup/.system_generated/logs");
     fs::create_dir_all(&logs_dir).unwrap();
     let transcript_path = logs_dir.join("transcript.jsonl");
+    let full_transcript = logs_dir.join("transcript_full.jsonl");
+
+    // Create initial transcripts
+    {
+        let mut f = File::create(&transcript_path).unwrap();
+        writeln!(f, "{}", json!({"step_index": 1, "type": "USER_INPUT", "content": "Run 1"})).unwrap();
+        writeln!(f, "{}", json!({"step_index": 2, "type": "RUN_COMMAND", "status": "DONE", "exit_code": 0, "content": "stdout bloat\n".repeat(30)})).unwrap();
+        writeln!(f, "{}", json!({"step_index": 3, "type": "PLANNER_RESPONSE", "content": "ok"})).unwrap();
+    }
+    fs::copy(&transcript_path, &full_transcript).unwrap();
+
+    // Create 5 legacy redundant timestamped backups
+    for i in 1..=5 {
+        let legacy_bak = logs_dir.join(format!("transcript.jsonl.bak_20260902_00000{}", i));
+        fs::write(&legacy_bak, "dummy legacy backup").unwrap();
+    }
 
     let bin = get_binary_path();
+    let output = std::process::Command::new(&bin)
+        .arg(&transcript_path)
+        .arg("--recent-user-turns")
+        .arg("0")
+        .arg("--recent-window")
+        .arg("0")
+        .output()
+        .expect("Failed to execute shake-prune");
 
-    // Run compaction 8 times with keep-backups = 3
-    for run in 1..=8 {
-        {
-            let mut f = File::create(&transcript_path).unwrap();
-            writeln!(f, "{}", json!({"step_index": 1, "type": "USER_INPUT", "content": format!("Run {}", run)})).unwrap();
-            writeln!(f, "{}", json!({"step_index": 2, "type": "RUN_COMMAND", "status": "DONE", "exit_code": 0, "content": "stdout bloat\n".repeat(30)})).unwrap();
-            writeln!(f, "{}", json!({"step_index": 3, "type": "PLANNER_RESPONSE", "content": "ok"})).unwrap();
-        }
+    assert!(output.status.success());
 
-        // Sleep 1.1 second so timestamps differ
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-
-        let output = std::process::Command::new(&bin)
-            .arg(&transcript_path)
-            .arg("--keep-backups")
-            .arg("3")
-            .output()
-            .expect("Failed to execute shake-prune");
-
-        assert!(output.status.success());
-    }
-
-    let mut bak_count = 0;
+    // Verify all legacy timestamped backups are purged
     for entry in fs::read_dir(&logs_dir).unwrap().flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.contains(".jsonl.bak_") {
-            bak_count += 1;
-        }
+        assert!(!name.contains(".bak_"), "Legacy backup {} was not purged!", name);
     }
 
-    assert_eq!(bak_count, 3, "Expected exactly 3 timestamped backups retained, found {}", bak_count);
-    assert!(logs_dir.join("transcript.jsonl.bak").exists(), "Latest transcript.jsonl.bak must always exist!");
+    // Verify single atomic fallback transcript.jsonl.bak exists
+    assert!(logs_dir.join("transcript.jsonl.bak").exists(), "Atomic fallback transcript.jsonl.bak must exist!");
+
+    // Verify receipt points to permanent transcript_full.jsonl
+    let compacted = fs::read_to_string(&transcript_path).unwrap();
+    assert!(compacted.contains("transcript_full.jsonl"), "Receipt should point to master transcript_full.jsonl!");
 }
 
 #[test]
@@ -341,6 +355,10 @@ fn test_ephemeral_message_deduplication() {
     let bin = get_binary_path();
     let output = std::process::Command::new(&bin)
         .arg(&transcript_path)
+        .arg("--recent-user-turns")
+        .arg("0")
+        .arg("--recent-window")
+        .arg("0")
         .output()
         .expect("Failed to execute shake-prune");
 

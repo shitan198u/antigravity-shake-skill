@@ -1,9 +1,9 @@
 use crate::metadata::load_or_discover_history;
 use crate::models::{CompactionEvent, PruningStats};
 use crate::slug::{extract_conversation_id, generate_suggested_filename, generate_topic_slug};
-use chrono::Local;
 use fs2::FileExt;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -77,34 +77,35 @@ pub fn shell_quote(path_str: &str) -> String {
     format!("'{}'", path_str.replace('\'', "'\\''"))
 }
 
-/// Retains only the latest `keep_count` timestamped backups in `logs_dir`,
-/// safely pruning older historical snapshots while preserving `transcript.jsonl.bak`.
-pub fn prune_old_backups(logs_dir: &Path, keep_count: usize) {
-    if keep_count == 0 {
-        return;
-    }
-
-    let entries = match fs::read_dir(logs_dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-
-    let mut timestamped_backups: Vec<(String, std::path::PathBuf)> = Vec::new();
-
-    for entry in entries.flatten() {
-        let file_name = entry.file_name().to_string_lossy().to_string();
-        if file_name.contains(".jsonl.bak_") {
-            timestamped_backups.push((file_name, entry.path()));
+/// Purges all redundant historical timestamped `.bak_*` files in `logs_dir`,
+/// reclaiming disk space while maintaining the single atomic `transcript.jsonl.bak`.
+pub fn purge_legacy_timestamped_backups(logs_dir: &Path) {
+    if let Ok(entries) = fs::read_dir(logs_dir) {
+        for entry in entries.flatten() {
+            let file_name = entry.file_name().to_string_lossy().to_string();
+            if file_name.contains(".bak_") {
+                let _ = fs::remove_file(entry.path());
+            }
         }
     }
+}
 
-    timestamped_backups.sort_by(|a, b| b.0.cmp(&a.0));
-
-    if timestamped_backups.len() > keep_count {
-        for (_, old_path) in timestamped_backups.iter().skip(keep_count) {
-            let _ = fs::remove_file(old_path);
+/// Builds an O(1) step_index -> 1-indexed line number lookup map for `transcript_full.jsonl`.
+pub fn index_master_full_transcript(full_transcript_path: &Path) -> HashMap<u64, usize> {
+    let mut map = HashMap::new();
+    if let Ok(file) = File::open(full_transcript_path) {
+        let reader = BufReader::new(file);
+        for (line_idx, line) in reader.lines().enumerate() {
+            if let Ok(line_str) = line {
+                if let Ok(val) = serde_json::from_str::<Value>(&line_str) {
+                    if let Some(step_idx) = val.get("step_index").and_then(|v| v.as_u64()) {
+                        map.insert(step_idx, line_idx + 1);
+                    }
+                }
+            }
         }
     }
+    map
 }
 
 /// Compacts large tool call arguments into structured receipts with FULL ABSOLUTE PATHS and 1-INDEXED LINE NUMBERS.
@@ -219,7 +220,7 @@ pub fn format_history_timeline(events: &[CompactionEvent]) -> String {
         };
         let archive_link = if !ev.backup_file.is_empty() {
             let enc_link = format!("file://{}", urlencoding::encode(&ev.backup_file).replace("%2F", "/"));
-            format!("[📄 Backup #{}]({})", idx + 1, enc_link)
+            format!("[📄 Archive #{}]({})", idx + 1, enc_link)
         } else {
             "—".to_string()
         };
@@ -233,7 +234,7 @@ pub fn format_history_timeline(events: &[CompactionEvent]) -> String {
     format!(
         "<details>\n\
         <summary>📜 <b>Session Compaction Timeline & Checkpoint History ({} events)</b></summary>\n\n\
-        | Time | Trigger Event | Working Checkpoint | Input Size | Saved | Archive Backup |\n\
+        | Time | Trigger Event | Working Checkpoint | Input Size | Saved | Archive Link |\n\
         | :--- | :--- | :---: | :---: | :---: | :--- |\n\
         {}\n\
         </details>\n\n",
@@ -242,21 +243,12 @@ pub fn format_history_timeline(events: &[CompactionEvent]) -> String {
     )
 }
 
-/// Unified Single-Pass Compaction & Pruning Pipeline:
+/// Unified Single Master Archive Compaction Pipeline:
 /// 1. Locks `transcript.jsonl` exclusively.
-/// 2. Creates timestamped backup under lock and rotates older backups.
-/// 3. Pass 1: Indexes User conversational turns, assistant turns, and ephemeral message positions.
-/// 4. Milestone Horizon (if --marathon-horizon enabled and user_turns > 30):
-///    - Preserves Genesis Turn 1 verbatim.
-///    - Replaces intermediate turns with a structured Milestone Checkpoint block.
-///    - Preserves the last 25 user turns verbatim.
-/// 5. Pass 2: In a single loop:
-///    - Keeps all tool steps within the recent user conversational turns 100% intact.
-///    - Deduplicates historical EPHEMERAL_MESSAGE notices (keeps only the latest 1).
-///    - Compacts older tool outputs into line-indexed receipts: [PRUNED ... line=N].
-///    - Compacts older multi-line bash heredoc CommandLine inputs.
-///    - Produces the in-place compacted JSONL stream AND Markdown report simultaneously.
-/// 6. Inode-safe truncate-and-rewrite with `fsync` commitment.
+/// 2. Creates single atomic crash fallback: `transcript.jsonl.bak`.
+/// 3. Purges all legacy redundant `.bak_*` files to eliminate disk bloat.
+/// 4. Maps receipts directly to `transcript_full.jsonl` (permanent zero dangling links).
+/// 5. Inode-safe truncate-and-rewrite with `fsync` commitment.
 pub fn run_compaction_pipeline(
     transcript_path: &Path,
     options: &CompactionOptions,
@@ -268,21 +260,32 @@ pub fn run_compaction_pipeline(
     let abs_target = fs::canonicalize(transcript_path).unwrap_or_else(|_| transcript_path.to_path_buf());
     let logs_dir = abs_target.parent().unwrap_or_else(|| Path::new("."));
 
-    let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
-    let backup_timestamped = abs_target.with_extension(format!("jsonl.bak_{}", timestamp));
+    // Single master archive resolution:
+    // If transcript_full.jsonl exists, all receipts point permanently to it!
+    // Otherwise, fall back to transcript.jsonl.bak
+    let full_transcript_path = logs_dir.join("transcript_full.jsonl");
     let backup_latest = abs_target.with_extension("jsonl.bak");
-    let backup_abs_str = backup_timestamped.to_string_lossy().to_string();
+
+    let (master_archive_abs_str, master_step_to_line) = if full_transcript_path.exists() {
+        let step_map = index_master_full_transcript(&full_transcript_path);
+        let abs_str = fs::canonicalize(&full_transcript_path)
+            .unwrap_or(full_transcript_path.clone())
+            .to_string_lossy()
+            .to_string();
+        (abs_str, Some(step_map))
+    } else {
+        (backup_latest.to_string_lossy().to_string(), None)
+    };
 
     let file_opt = if !options.dry_run && options.in_place {
         let file = File::options().read(true).write(true).open(&abs_target)?;
         file.lock_exclusive()?;
 
-        // Create timestamped backup while holding the exclusive lock (zero torn writes)
-        let _ = fs::copy(&abs_target, &backup_timestamped);
+        // Create single atomic crash fallback while holding the exclusive lock
         let _ = fs::copy(&abs_target, &backup_latest);
 
-        // Enforce rolling backup retention: keep latest N timestamped backups
-        prune_old_backups(logs_dir, options.keep_backups);
+        // Purge legacy timestamped backups to reclaim disk space
+        purge_legacy_timestamped_backups(logs_dir);
 
         Some(file)
     } else {
@@ -293,10 +296,10 @@ pub fn run_compaction_pipeline(
     let file_for_reading = File::open(&abs_target)?;
     let reader = BufReader::new(file_for_reading);
 
-    let mut lines_buffer: Vec<(usize, String)> = Vec::new(); // (original_line_no_1_indexed, content)
+    let mut lines_buffer: Vec<(usize, String)> = Vec::new();
     let mut raw_bytes = 0usize;
     let mut total_assistant_turns = 0usize;
-    let mut user_turn_positions: Vec<(usize, usize)> = Vec::new(); // (turn_index, buffer_index)
+    let mut user_turn_positions: Vec<(usize, usize)> = Vec::new();
     let mut ephemeral_message_indices: Vec<usize> = Vec::new();
 
     for (line_idx, line) in reader.lines().enumerate() {
@@ -346,10 +349,10 @@ pub fn run_compaction_pipeline(
         // 2. Synthesized Milestone Block
         let milestone_content = format!(
             "### 🏛️ Historical Milestone Horizon (Turns 2 to {})\n\n\
-            > **Verbatim History Reference**: The complete unpruned transcript of earlier turns is preserved permanently in `transcript_full.jsonl` and in historical backups (`{}`).\n\n\
-            All earlier user instructions, architectural decisions, and error fixes are archived with exact line-indexed pointers in the referenced backup.\n\n\
+            > **Verbatim History Reference**: The complete unpruned transcript of earlier turns is preserved permanently in `transcript_full.jsonl`.\n\n\
+            All earlier user instructions, architectural decisions, and error fixes are archived with exact line-indexed pointers in the permanent master archive (`{}`).\n\n\
             Active working momentum continues with the last 25 turns preserved verbatim below.",
-            horizon_turn_idx, backup_abs_str
+            horizon_turn_idx, master_archive_abs_str
         );
         let milestone_step = serde_json::json!({
             "step_index": 2,
@@ -455,6 +458,12 @@ pub fn run_compaction_pipeline(
             || status.contains("error")
             || status.contains("failed");
 
+        // Exact line number in the master archive (transcript_full.jsonl or fallback backup)
+        let resolved_line_no = master_step_to_line
+            .as_ref()
+            .and_then(|m| m.get(&step_idx).copied())
+            .unwrap_or(orig_line_no);
+
         match stype.as_str() {
             "USER_INPUT" => {
                 user_count += 1;
@@ -498,7 +507,7 @@ pub fn run_compaction_pipeline(
                         let name = tc.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
                         if let Some(args_map) = tc.get_mut("args").and_then(|v| v.as_object_mut()) {
                             if !is_recent {
-                                compact_tool_call_args(&name, args_map, step_idx, &backup_abs_str, orig_line_no);
+                                compact_tool_call_args(&name, args_map, step_idx, &master_archive_abs_str, resolved_line_no);
                             }
                             let mut arg_items = Vec::new();
                             for (k, v) in args_map.iter() {
@@ -546,9 +555,20 @@ pub fn run_compaction_pipeline(
                     } else {
                         let line_count = content_str.lines().count();
                         pruned_tools_count += 1;
+
+                        // Check for warnings in historical output to surface in receipt
+                        let warn_count = content_str.matches("warning:").count()
+                            + content_str.matches("Warning:").count()
+                            + content_str.matches("WARN").count();
+                        let warn_tag = if warn_count > 0 {
+                            format!(" warnings={}", warn_count)
+                        } else {
+                            String::new()
+                        };
+
                         let receipt = format!(
-                            "[PRUNED tool=RUN_COMMAND step={} exit={} lines={} archive={} line={}]",
-                            step_idx, exit_code.unwrap_or(0), line_count, backup_abs_str, orig_line_no
+                            "[PRUNED tool=RUN_COMMAND step={} exit={}{} lines={} archive={} line={}]",
+                            step_idx, exit_code.unwrap_or(0), warn_tag, line_count, master_archive_abs_str, resolved_line_no
                         );
                         step_val["content"] = serde_json::json!(receipt);
                         output_blocks.push(format!("> ℹ️ *{}*\n", receipt));
@@ -562,7 +582,7 @@ pub fn run_compaction_pipeline(
                         pruned_tools_count += 1;
                         let receipt = format!(
                             "[PRUNED tool=VIEW_FILE step={} lines={} archive={} line={}]",
-                            step_idx, line_count, backup_abs_str, orig_line_no
+                            step_idx, line_count, master_archive_abs_str, resolved_line_no
                         );
                         step_val["content"] = serde_json::json!(receipt);
                         output_blocks.push(format!("> ℹ️ *{}*\n", receipt));
@@ -571,7 +591,7 @@ pub fn run_compaction_pipeline(
                     pruned_tools_count += 1;
                     let receipt = format!(
                         "[PRUNED tool={} step={} archive={} line={}]",
-                        stype, step_idx, backup_abs_str, orig_line_no
+                        stype, step_idx, master_archive_abs_str, resolved_line_no
                     );
                     step_val["content"] = serde_json::json!(receipt);
                     output_blocks.push(format!("> ℹ️ *{}*\n", receipt));
@@ -620,7 +640,7 @@ pub fn run_compaction_pipeline(
         > This document is a complete, verbatim transcript of earlier turns with token bloat removed via `/shake`.\n\
         > - **User prompts, Assistant explanations, and Decisions are 100% complete and verbatim.**\n\
         {}\
-        > - Actions marked `[PRUNED ...]` were successfully executed. Stored stdout is archived in the referenced backup with exact line pointers (`line=N`).\n\
+        > - Actions marked `[PRUNED ...]` were successfully executed. Stored stdout is archived in the master permanent log with exact line pointers (`line=N`).\n\
         > - You can inspect any archived file or execution at exact line `N` using `view_file`.\n\
         > - You do **NOT** need to re-run past successful commands unless the user explicitly requests it.\n\
         > - Any errors or failures encountered in past turns are explicitly preserved below with full stack traces.\n\
@@ -691,5 +711,5 @@ pub fn run_compaction_pipeline(
         history_events,
     };
 
-    Ok((compacted_output, full_document, stats, backup_abs_str))
+    Ok((compacted_output, full_document, stats, master_archive_abs_str))
 }
