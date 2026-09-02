@@ -1,4 +1,4 @@
-# ⚡ Antigravity `/shake` Skill
+# ⚡ Antigravity `/shake` & `/full-shake`
 
 > **Deterministic, In-Place Context Tree-Shaking and Token Compaction for Google Antigravity (Gemini)**  
 > *Physically compact active conversation logs on disk, eliminate context degradation, and continue chatting seamlessly in the **exact same tab**.*
@@ -11,8 +11,8 @@
 <summary>🔍 <b>Side-by-Side Comparison: Standard <code>/shake</code> vs. Deep <code>/full-shake</code></b></summary>
 <br/>
 
-| 🟢 Standard `/shake` (100% Thoughts Retained) | ⚡ Deep `/full-shake` (20-Turn Thought Window) |
-| :---: | :---: |
+| 🟢 Standard `/shake` (100% Thoughts Retained) | ⚡ Marathon `/full-shake` (Milestone Horizon) |
+| :--- : | :---: |
 | <a href="assets/artifact_preview.png"><img src="assets/artifact_preview.png" width="380" alt="Standard /shake Report"></a> | <a href="assets/full_shake_preview.png"><img src="assets/full_shake_preview.png" width="380" alt="Deep /full-shake Report"></a> |
 | *Zero-loss baseline report* | *Includes 2-tier scopes & timeline dropdown* |
 
@@ -27,7 +27,7 @@ During long development sessions, AI coding agents accumulate tens of thousands 
 2. **Attention Decay**: The LLM loses track of earlier instructions under a mountain of terminal noise.
 3. **Lost Momentum**: Developers are forced to open new chat tabs, re-explaining the project context and losing state.
 
-`/shake` solves this by **physically pruning the active `transcript.jsonl` on disk in-place** while preserving 100% of your dialogue, reasoning, thoughts, error traces, and active working state.
+`/shake` solves this by **physically pruning active session logs directly on disk in-place** while preserving 100% of your dialogue, reasoning, thoughts, error traces, and active working state.
 
 ---
 
@@ -35,26 +35,28 @@ During long development sessions, AI coding agents accumulate tens of thousands 
 
 * 🟢 **Same-Tab In-Place Compaction**: Modifies active session logs directly on disk without breaking open file descriptors or requiring new chat tabs.
 * 🛡️ **Inode Preservation & File Locking**: Uses POSIX/Windows truncate-and-rewrite with `fs2` exclusive locking and `fsync` durability.
-* ⚡ **Proactive 200k Token Auto-Shake**: Background `PreInvocation` hook automatically detects and compacts conversations that exceed 200k tokens (`660 KB`).
+* ⚡ **Proactive 80k Token Auto-Shake**: Background `PreInvocation` hook automatically detects and compacts conversations before crossing **80,000 tokens** (`264 KB`), completely preventing lossy server-side `{{ CHECKPOINT }}` truncation!
 * ⏱️ **50 KB Growth Delta Guard**: Prevents redundant CPU/disk cycles when conversations contain extensive clean dialogue.
-* 🧹 **Rolling Backup Retention**: Retains the latest $N$ timestamped backups (`.bak_*`) and automatically purges older snapshots to prevent disk bloat.
-* 🏷️ **Structured Receipt Schema**: Replaces noisy outputs with machine-parseable tags: `[PRUNED tool=... step=... archive=...]`.
-* 📜 **Untouched Permanent Raw History**: `transcript_full.jsonl` is left 100% unpruned for auditing and debugging.
+* 🏛️ **Single Master Archive Architecture**: Receipts point directly to `transcript_full.jsonl` with exact 1-indexed line numbers (`line=N`). No broken links, ever.
+* 🧹 **Zero Disk Bloat Guarantee**: Eliminates redundant multi-megabyte `.bak_*` duplicates, maintaining only one atomic crash-recovery fallback (`transcript.jsonl.bak`).
+* 🎯 **10-Turn Human Conversational Working Window**: Retains all tool executions, diffs, and thoughts across the last **10 user conversational turns** 100% unpruned, eliminating agent amnesia and redundant re-runs.
+* ✂️ **Historical Heredoc Compaction**: Compacts older bash heredocs (`cat << 'EOF' ...` > 250 chars) from assistant tool calls into line-indexed receipts.
+* ⚠️ **Warning Awareness**: Tracks and tags compiler warnings (`warnings=N`) in receipts so the AI knows warnings were emitted without carrying terminal bloat.
 * 🧠 **100% Signal Retention**: Preserves all user prompts, assistant thoughts/reasoning, and non-zero exit error traces verbatim.
-* 🕒 **Active Working Window**: Retains the last 6 execution steps with 0% pruning so active momentum is never interrupted.
-* 🔒 **Hardened Security**: ReDoS-immune linear scanning, HTML/XSS sanitization, URL-encoded links, exclusive `0600` tempfiles, and strict canonical allowlists.
 * 🦀 **Pure Native Rust**: Precompiled multi-platform binaries for Linux (x86_64, aarch64), macOS (Universal Binary for Apple Silicon & Intel), and Windows (x86_64).
 
 ---
 
 ## 📊 Physical Token Reduction Metrics
 
-| Metric | Original Active Session | Compacted via `/shake` | Total Savings |
-| :--- | :--- | :--- | :--- |
-| **Payload Size on Disk** | `1.4 MB` | `470 KB` | **54.5% – 78% physical reduction** |
-| **Estimated Token Load** | `~420,000 tokens` | `~145,000 tokens` | **`~275,000 tokens saved`** |
-| **Execution Overhead** | — | Native Rust binary | **`<10ms` in-place rewrite** |
-| **Hook Latency** | — | Native PreInvocation | **`<0.2ms` per prompt** |
+| Metric | Original Master Stream (`transcript_full.jsonl`) | Compacted via `/shake` | Compacted via `/full-shake` |
+| :--- | :---: | :---: | :---: |
+| **Payload Size on Disk** | `3.35 MB` | `750 KB` | **`455 KB`** |
+| **Estimated Token Load** | `~990,000 tokens` | `~220,000 tokens` | **`~138,000 tokens`** |
+| **Cumulative Savings** | *Baseline* | **`77.4% pruned`** | **`86.0% pruned`** |
+| **Active Working Window**| Unpruned | **Last 10 User Turns (100% Intact)** | **Last 10 User Turns (100% Intact)** |
+| **Scratchpad Thoughts** | All | **100% Preserved** | **Last 20 Assistant Turns Only** |
+| **Milestone Horizon** | None | Verbatim Dialogue | **Turn 1 Genesis + Last 25 Turns** |
 
 ---
 
@@ -83,44 +85,40 @@ cp shake-prune-rs/target/release/shake-prune ~/.gemini/bin/shake-prune
 ### 1. In Any Antigravity Chat (Interactive Slash Commands)
 
 #### 🟢 Standard Zero-Loss Compaction (`/shake`)
-* Prunes all tool output dumps.
+* Prunes tool stdout dumps and historical bash heredocs older than the last 10 user conversational turns.
 * Retains **100% of User prompts, Assistant reasoning, Thoughts, and Errors verbatim**.
 ```text
 /shake
 ```
 
-#### ⚡ Full Deep Compaction (`/full-shake`)
-* Prunes all tool output dumps.
-* Retains **100% of User prompts, Assistant explanations, Decisions, and Errors verbatim**.
-* Retains scratchpad thoughts (`thinking`) for the **last 20 turns** while dropping older thoughts (saving an extra ~400 KB – 500 KB on mega-threads).
-* Automatically acts as a natural shake if the session has $\le 20$ turns.
+#### ⚡ Marathon Reset (`/full-shake`)
+* Designed for long-running sessions (30+ turns).
+* Windows scratchpad thoughts to the **last 20 assistant turns**, dropping older internal monologues.
+* Automatically applies the **Milestone Horizon** on threads with $> 30$ user turns:
+  * **Turn 1 (Genesis)**: Preserved 100% verbatim (project origin and rules).
+  * **Middle Segment (Turns 2 to N-25)**: Collapsed into a structured Milestone Checkpoint block with exact line-indexed backup links.
+  * **Active Working Window (Last 25 user turns)**: Preserved 100% verbatim (last 10 turns of tool outputs unpruned).
+* Restores sub-second "Turn 1" responsiveness on mega-threads!
 ```text
 /full-shake
 ```
-The agent will execute the pruner, report token savings, update the interactive anchor artifact, and allow you to **keep typing in the same chat tab**!
 
-### 2. Fully Automatic (Background Hook)
-You don't even have to remember to run `/shake`! The included `PreInvocation` hook continuously monitors transcript growth and automatically compacts the conversation when it crosses **200,000 tokens** (`660 KB`).
-
-### 3. Standalone CLI Usage
+### 2. Standalone CLI Usage
 ```bash
-# Compact a specific transcript in-place
+# Compact a specific transcript in-place (keeps last 10 user turns unpruned)
 shake-prune /path/to/transcript.jsonl
 
-# Run full deep compaction with custom thought window
-shake-prune /path/to/transcript.jsonl --full --thought-window 25
+# Custom human conversational working window (e.g. keep last 15 user turns)
+shake-prune /path/to/transcript.jsonl --recent-user-turns 15
 
-# Enforce a custom backup retention limit (keeps last 3 backups)
-shake-prune /path/to/transcript.jsonl --keep-backups 3
+# Run marathon full-shake with Milestone Horizon and thought windowing
+shake-prune /path/to/transcript.jsonl --full
 
 # Dry-run simulation (calculates metrics without touching disk)
 shake-prune /path/to/transcript.jsonl --dry-run
 
 # Output metrics as machine-readable JSON
 shake-prune /path/to/transcript.jsonl --json
-
-# Check installed version
-shake-prune --version
 
 # Run as Antigravity lifecycle hook
 shake-prune --hook
@@ -146,8 +144,8 @@ powershell -File .\install.ps1 -Uninstall
 
 ## 📚 Technical Documentation & Deep Dives
 
-* 🧠 **[Antigravity Lifecycle & Backend vs. UI Cache](references/antigravity_lifecycle.md)**: Deep dive on how Antigravity handles model prompt streams vs. webview DOM caches, Inode preservation mechanics, and hook lifecycles.
-* 🛠️ **[How `/shake` Works Technical Reference](references/how_it_works.md)**: Comprehensive architectural breakdown of the unified single-pass pipeline, token calibration density, and security hardening.
+* 🧠 **[Antigravity Lifecycle & Backend vs. UI Cache](references/antigravity_lifecycle.md)**: Deep dive on model prompt streams vs. webview DOM caches, Inode preservation, and server-side checkpointing prevention.
+* 🛠️ **[How `/shake` Works Technical Reference](references/how_it_works.md)**: Breakdown of the Single Master Archive, line-indexed receipts, token calibration, and security hardening.
 * ⚖️ **[Comparison with Other Compaction Tools](references/omp_comparison.md)**: Detailed comparison between `/shake`, OMP, and traditional summarization techniques.
 
 ---

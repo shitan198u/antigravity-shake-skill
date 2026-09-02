@@ -35,6 +35,10 @@ fn test_inode_preservation() {
     let bin = get_binary_path();
     let output = std::process::Command::new(&bin)
         .arg(&transcript_path)
+        .arg("--recent-user-turns")
+        .arg("0")
+        .arg("--recent-window")
+        .arg("0")
         .output()
         .expect("Failed to execute shake-prune");
 
@@ -68,6 +72,10 @@ fn test_safety_retention_invariants() {
     let bin = get_binary_path();
     let output = std::process::Command::new(&bin)
         .arg(&transcript_path)
+        .arg("--recent-user-turns")
+        .arg("0")
+        .arg("--recent-window")
+        .arg("0")
         .output()
         .expect("Failed to execute shake-prune");
 
@@ -167,46 +175,52 @@ fn test_thought_windowing_full_shake() {
 }
 
 #[test]
-fn test_backup_retention_rotation() {
+fn test_single_master_backup_cleanup() {
     let tmp_dir = tempfile::tempdir().unwrap();
-    let logs_dir = tmp_dir.path().join(".gemini/brain/test-retention/.system_generated/logs");
+    let logs_dir = tmp_dir.path().join(".gemini/brain/test-cleanup/.system_generated/logs");
     fs::create_dir_all(&logs_dir).unwrap();
     let transcript_path = logs_dir.join("transcript.jsonl");
+    let full_transcript = logs_dir.join("transcript_full.jsonl");
+
+    // Create initial transcripts
+    {
+        let mut f = File::create(&transcript_path).unwrap();
+        writeln!(f, "{}", json!({"step_index": 1, "type": "USER_INPUT", "content": "Run 1"})).unwrap();
+        writeln!(f, "{}", json!({"step_index": 2, "type": "RUN_COMMAND", "status": "DONE", "exit_code": 0, "content": "stdout bloat\n".repeat(30)})).unwrap();
+        writeln!(f, "{}", json!({"step_index": 3, "type": "PLANNER_RESPONSE", "content": "ok"})).unwrap();
+    }
+    fs::copy(&transcript_path, &full_transcript).unwrap();
+
+    // Create 5 legacy redundant timestamped backups
+    for i in 1..=5 {
+        let legacy_bak = logs_dir.join(format!("transcript.jsonl.bak_20260902_00000{}", i));
+        fs::write(&legacy_bak, "dummy legacy backup").unwrap();
+    }
 
     let bin = get_binary_path();
+    let output = std::process::Command::new(&bin)
+        .arg(&transcript_path)
+        .arg("--recent-user-turns")
+        .arg("0")
+        .arg("--recent-window")
+        .arg("0")
+        .output()
+        .expect("Failed to execute shake-prune");
 
-    // Run compaction 8 times with keep-backups = 3
-    for run in 1..=8 {
-        {
-            let mut f = File::create(&transcript_path).unwrap();
-            writeln!(f, "{}", json!({"step_index": 1, "type": "USER_INPUT", "content": format!("Run {}", run)})).unwrap();
-            writeln!(f, "{}", json!({"step_index": 2, "type": "RUN_COMMAND", "status": "DONE", "exit_code": 0, "content": "stdout bloat\n".repeat(30)})).unwrap();
-            writeln!(f, "{}", json!({"step_index": 3, "type": "PLANNER_RESPONSE", "content": "ok"})).unwrap();
-        }
+    assert!(output.status.success());
 
-        // Sleep 1.1 second so timestamps differ
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-
-        let output = std::process::Command::new(&bin)
-            .arg(&transcript_path)
-            .arg("--keep-backups")
-            .arg("3")
-            .output()
-            .expect("Failed to execute shake-prune");
-
-        assert!(output.status.success());
-    }
-
-    let mut bak_count = 0;
+    // Verify all legacy timestamped backups are purged
     for entry in fs::read_dir(&logs_dir).unwrap().flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.contains(".jsonl.bak_") {
-            bak_count += 1;
-        }
+        assert!(!name.contains(".bak_"), "Legacy backup {} was not purged!", name);
     }
 
-    assert_eq!(bak_count, 3, "Expected exactly 3 timestamped backups retained, found {}", bak_count);
-    assert!(logs_dir.join("transcript.jsonl.bak").exists(), "Latest transcript.jsonl.bak must always exist!");
+    // Verify single atomic fallback transcript.jsonl.bak exists
+    assert!(logs_dir.join("transcript.jsonl.bak").exists(), "Atomic fallback transcript.jsonl.bak must exist!");
+
+    // Verify receipt points to permanent transcript_full.jsonl
+    let compacted = fs::read_to_string(&transcript_path).unwrap();
+    assert!(compacted.contains("transcript_full.jsonl"), "Receipt should point to master transcript_full.jsonl!");
 }
 
 #[test]
@@ -271,4 +285,232 @@ fn test_version_flag() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("shake-prune 0.1.8"), "Expected version 0.1.8, got: {}", stdout);
+}
+
+#[test]
+fn test_user_turn_working_window() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let logs_dir = tmp_dir.path().join(".gemini/brain/test-turns/.system_generated/logs");
+    fs::create_dir_all(&logs_dir).unwrap();
+    let transcript_path = logs_dir.join("transcript.jsonl");
+
+    // Create 15 conversational turns
+    // Turns 1-5: should be pruned (older than 10 recent user turns)
+    // Turns 6-15: should be kept 100% unpruned
+    {
+        let mut f = File::create(&transcript_path).unwrap();
+        for i in 1..=15 {
+            writeln!(f, "{}", json!({"step_index": i * 3 - 2, "type": "USER_INPUT", "content": format!("User turn {}", i)})).unwrap();
+            let tool_output = format!("TOOL_OUTPUT_DATA_FOR_TURN_{}_END\n", i).repeat(20);
+            writeln!(f, "{}", json!({"step_index": i * 3 - 1, "type": "RUN_COMMAND", "status": "DONE", "exit_code": 0, "content": tool_output})).unwrap();
+            writeln!(f, "{}", json!({"step_index": i * 3, "type": "PLANNER_RESPONSE", "content": format!("Reply turn {}", i)})).unwrap();
+        }
+    }
+
+    let bin = get_binary_path();
+    let output = std::process::Command::new(&bin)
+        .arg(&transcript_path)
+        .arg("--recent-user-turns")
+        .arg("10")
+        .output()
+        .expect("Failed to execute shake-prune");
+
+    assert!(output.status.success());
+    let compacted = fs::read_to_string(&transcript_path).unwrap();
+
+    // Turns 1-5 tool outputs must be pruned to structured receipts with line= pointers
+    for i in 1..=5 {
+        assert!(!compacted.contains(&format!("TOOL_OUTPUT_DATA_FOR_TURN_{}_END", i)), "Turn {} tool output should have been pruned!", i);
+        assert!(compacted.contains(&format!("[PRUNED tool=RUN_COMMAND step={}", i * 3 - 1)), "Receipt missing for turn {}", i);
+        assert!(compacted.contains(&format!("line={}", i * 3 - 1)), "Exact line number missing for turn {}", i);
+    }
+
+    // Turns 6-15 tool outputs must be 100% unpruned
+    for i in 6..=15 {
+        assert!(compacted.contains(&format!("TOOL_OUTPUT_DATA_FOR_TURN_{}_END", i)), "Turn {} tool output must remain in active working window!", i);
+    }
+}
+
+#[test]
+fn test_ephemeral_message_deduplication() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let logs_dir = tmp_dir.path().join(".gemini/brain/test-eph/.system_generated/logs");
+    fs::create_dir_all(&logs_dir).unwrap();
+    let transcript_path = logs_dir.join("transcript.jsonl");
+
+    {
+        let mut f = File::create(&transcript_path).unwrap();
+        writeln!(f, "{}", json!({"step_index": 1, "type": "USER_INPUT", "content": "Hello"})).unwrap();
+        
+        // 10 historical duplicate hook messages
+        for i in 1..=10 {
+            writeln!(f, "{}", json!({"step_index": i + 1, "type": "EPHEMERAL_MESSAGE", "content": format!("OLD_HOOK_NOTICE_{}", i)})).unwrap();
+        }
+
+        // Latest active anchor message
+        writeln!(f, "{}", json!({"step_index": 12, "type": "EPHEMERAL_MESSAGE", "content": "LATEST_ACTIVE_ANCHOR_NOTICE"})).unwrap();
+        writeln!(f, "{}", json!({"step_index": 13, "type": "PLANNER_RESPONSE", "content": "Ready"})).unwrap();
+    }
+
+    let bin = get_binary_path();
+    let output = std::process::Command::new(&bin)
+        .arg(&transcript_path)
+        .arg("--recent-user-turns")
+        .arg("0")
+        .arg("--recent-window")
+        .arg("0")
+        .output()
+        .expect("Failed to execute shake-prune");
+
+    assert!(output.status.success());
+    let compacted = fs::read_to_string(&transcript_path).unwrap();
+
+    // All old hook notices must be pruned
+    for i in 1..=10 {
+        assert!(!compacted.contains(&format!("OLD_HOOK_NOTICE_{}", i)), "Historical hook notice {} was not deduplicated!", i);
+    }
+
+    // Latest anchor notice must be retained
+    assert!(compacted.contains("LATEST_ACTIVE_ANCHOR_NOTICE"), "Latest active anchor notice was improperly dropped!");
+}
+
+#[test]
+fn test_exact_line_number_indexing() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let logs_dir = tmp_dir.path().join(".gemini/brain/test-index/.system_generated/logs");
+    fs::create_dir_all(&logs_dir).unwrap();
+    let transcript_path = logs_dir.join("transcript.jsonl");
+
+    // Line 1: USER_INPUT
+    // Line 2: RUN_COMMAND (bloat)
+    // Line 3: PLANNER_RESPONSE
+    {
+        let mut f = File::create(&transcript_path).unwrap();
+        writeln!(f, "{}", json!({"step_index": 1, "type": "USER_INPUT", "content": "test line index"})).unwrap();
+        writeln!(f, "{}", json!({"step_index": 2, "type": "RUN_COMMAND", "status": "DONE", "exit_code": 0, "content": "line_index_target_bloat\n".repeat(40)})).unwrap();
+        writeln!(f, "{}", json!({"step_index": 3, "type": "PLANNER_RESPONSE", "content": "done"})).unwrap();
+        
+        // Push step 2 outside the 6-step window
+        for i in 4..=12 {
+            writeln!(f, "{}", json!({"step_index": i, "type": "PLANNER_RESPONSE", "content": format!("pad {}", i)})).unwrap();
+        }
+    }
+
+    let bin = get_binary_path();
+    let output = std::process::Command::new(&bin)
+        .arg(&transcript_path)
+        .arg("--recent-user-turns")
+        .arg("0")
+        .arg("--recent-window")
+        .arg("0")
+        .output()
+        .expect("Failed to execute shake-prune");
+
+    assert!(output.status.success());
+    let compacted = fs::read_to_string(&transcript_path).unwrap();
+
+    // Verify receipt has line=2
+    assert!(compacted.contains("line=2]"), "Receipt did not contain exact line=2 pointer! Compacted: {}", compacted);
+
+    // Read line 2 of the backup file and verify it contains the original bloat
+    let bak_path = logs_dir.join("transcript.jsonl.bak");
+    let bak_content = fs::read_to_string(&bak_path).unwrap();
+    let line_2 = bak_content.lines().nth(1).expect("Backup must have line 2");
+    assert!(line_2.contains("line_index_target_bloat"), "Backup line 2 did not match target content!");
+}
+
+#[test]
+fn test_heredoc_commandline_compaction() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let logs_dir = tmp_dir.path().join(".gemini/brain/test-heredoc/.system_generated/logs");
+    fs::create_dir_all(&logs_dir).unwrap();
+    let transcript_path = logs_dir.join("transcript.jsonl");
+
+    let giant_heredoc = "cat << 'EOF' > large_file.rs\n".to_string() + &"// code line\n".repeat(40) + "EOF";
+
+    {
+        let mut f = File::create(&transcript_path).unwrap();
+        writeln!(f, "{}", json!({"step_index": 1, "type": "USER_INPUT", "content": "write giant file"})).unwrap();
+        writeln!(f, "{}", json!({
+            "step_index": 2,
+            "type": "PLANNER_RESPONSE",
+            "content": "writing file",
+            "tool_calls": [{
+                "id": "call_1",
+                "name": "run_command",
+                "args": {
+                    "CommandLine": giant_heredoc,
+                    "Cwd": "/tmp"
+                }
+            }]
+        })).unwrap();
+        writeln!(f, "{}", json!({"step_index": 3, "type": "RUN_COMMAND", "status": "DONE", "exit_code": 0, "content": "written\n".repeat(40)})).unwrap();
+
+        // Pad with steps so step 2 is outside recent window
+        for i in 4..=15 {
+            writeln!(f, "{}", json!({"step_index": i, "type": "PLANNER_RESPONSE", "content": format!("pad {}", i)})).unwrap();
+        }
+    }
+
+    let bin = get_binary_path();
+    let output = std::process::Command::new(&bin)
+        .arg(&transcript_path)
+        .arg("--recent-user-turns")
+        .arg("0")
+        .arg("--recent-window")
+        .arg("0")
+        .output()
+        .expect("Failed to execute shake-prune");
+
+    assert!(output.status.success());
+    let compacted = fs::read_to_string(&transcript_path).unwrap();
+
+    // Verify heredoc in tool_calls CommandLine was compacted to receipt with line=2
+    assert!(!compacted.contains("// code line"), "Raw heredoc lines were not pruned from CommandLine args!");
+    assert!(compacted.contains("[PRUNED heredoc command="), "Heredoc receipt missing in compacted stream!");
+    assert!(compacted.contains("large_file.rs"), "Filename missing in heredoc receipt!");
+    assert!(compacted.contains("line=2]"), "Heredoc receipt missing exact line=2 pointer!");
+}
+
+#[test]
+fn test_full_shake_marathon_milestone_horizon() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let logs_dir = tmp_dir.path().join(".gemini/brain/test-horizon/.system_generated/logs");
+    fs::create_dir_all(&logs_dir).unwrap();
+    let transcript_path = logs_dir.join("transcript.jsonl");
+
+    // Create 35 user turns
+    {
+        let mut f = File::create(&transcript_path).unwrap();
+        for i in 1..=35 {
+            writeln!(f, "{}", json!({"step_index": i * 2 - 1, "type": "USER_INPUT", "content": format!("User turn {} unique prompt", i)})).unwrap();
+            writeln!(f, "{}", json!({"step_index": i * 2, "type": "PLANNER_RESPONSE", "thinking": format!("Thought for turn {}", i), "content": format!("Reply for turn {}", i)})).unwrap();
+        }
+    }
+
+    let bin = get_binary_path();
+    let output = std::process::Command::new(&bin)
+        .arg(&transcript_path)
+        .arg("--full")
+        .output()
+        .expect("Failed to execute shake-prune");
+
+    assert!(output.status.success());
+    let compacted = fs::read_to_string(&transcript_path).unwrap();
+
+    // 1. Genesis Turn 1 MUST be preserved 100% verbatim
+    assert!(compacted.contains("User turn 1 unique prompt"), "Turn 1 Genesis prompt was improperly dropped!");
+    assert!(compacted.contains("Reply for turn 1"), "Turn 1 assistant reply was improperly dropped!");
+
+    // 2. Synthesized Milestone Block MUST exist
+    assert!(compacted.contains("Historical Milestone Horizon"), "Milestone Horizon block was not synthesized!");
+
+    // 3. Middle turns (e.g. Turn 5) should be collapsed into the milestone
+    assert!(!compacted.contains("User turn 5 unique prompt"), "Intermediate Turn 5 should have been collapsed into Milestone Horizon!");
+
+    // 4. Last 25 user turns (Turns 11-35) MUST be preserved verbatim
+    for i in 11..=35 {
+        assert!(compacted.contains(&format!("User turn {} unique prompt", i)), "Turn {} must be retained in active horizon!", i);
+        assert!(compacted.contains(&format!("Reply for turn {}", i)), "Reply {} must be retained in active horizon!", i);
+    }
 }

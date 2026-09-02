@@ -177,8 +177,10 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
 
                 if should_auto_shake {
                     let options = CompactionOptions {
+                        recent_user_turns: 10,
                         recent_window_steps: 6,
                         thought_window_turns: None,
+                        marathon_horizon: false,
                         keep_backups: 5,
                         in_place: true,
                         dry_run: false,

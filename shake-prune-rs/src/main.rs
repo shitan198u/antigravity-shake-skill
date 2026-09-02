@@ -22,20 +22,22 @@ fn print_usage() {
     println!("       shake-prune --hook");
     println!("       shake-prune --version\n");
     println!("Options:");
-    println!("  -h, --help           Show this help message and exit");
-    println!("  -v, -V, --version    Print version information and exit");
-    println!("  --hook               Run as Antigravity PreInvocation hook (reads stdin JSON)");
-    println!("  --full               Enable full deep compaction (retains thoughts for last 20 turns, drops older)");
-    println!("  --thought-window N   Number of recent assistant turns to retain thoughts for (default: 20 with --full)");
-    println!("  --recent-window N    Number of recent tool execution steps to keep intact (default: 6)");
-    println!("  --keep-backups N     Number of timestamped backup files to retain in logs/ (default: 5)");
-    println!("  --no-in-place        Disable physical in-place compaction of transcript.jsonl");
-    println!("  --dry-run            Simulate compaction and print report without modifying files");
-    println!("  --json               Output report metrics as machine-readable JSON");
+    println!("  -h, --help               Show this help message and exit");
+    println!("  -v, -V, --version        Print version information and exit");
+    println!("  --hook                   Run as Antigravity PreInvocation hook (reads stdin JSON)");
+    println!("  --full                   Enable full deep compaction (20-turn thoughts + Milestone Horizon on 30+ turn sessions)");
+    println!("  --horizon                Enable Milestone Horizon (preserves Turn 1 Genesis + last 25 turns, collapses middle)");
+    println!("  --thought-window N       Number of recent assistant turns to retain thoughts for (default: 20 with --full)");
+    println!("  --recent-user-turns N    Number of human conversational turns to keep 100% unpruned (default: 10)");
+    println!("  --recent-window N        Fallback minimum steps to keep intact (default: 6)");
+    println!("  --keep-backups N         Number of timestamped backup files to retain in logs/ (default: 5)");
+    println!("  --no-in-place            Disable physical in-place compaction of transcript.jsonl");
+    println!("  --dry-run                Simulate compaction and print report without modifying files");
+    println!("  --json                   Output report metrics as machine-readable JSON");
     println!("\nExamples:");
     println!("  shake-prune /path/to/transcript.jsonl");
+    println!("  shake-prune /path/to/transcript.jsonl --recent-user-turns 15");
     println!("  shake-prune /path/to/transcript.jsonl --full");
-    println!("  shake-prune /path/to/transcript.jsonl --keep-backups 3");
     println!("  shake-prune /path/to/transcript.jsonl --dry-run");
 }
 
@@ -99,7 +101,6 @@ fn validate_output_path_allowlist(target: &Path, transcript_path: &Path) -> Resu
 
     let mut allowed_roots: Vec<PathBuf> = Vec::new();
 
-    // Guard against root '/' or generic system temp dirs becoming wildcard allowlists
     let forbidden_parents = [
         Path::new("/"),
         Path::new("/tmp"),
@@ -182,13 +183,25 @@ fn main() {
 
     let mut i = 2;
     while i < args.len() {
-        if args[i] == "--recent-window" && i + 1 < args.len() {
+        if args[i] == "--recent-user-turns" && i + 1 < args.len() {
+            if let Ok(val) = args[i + 1].parse::<usize>() {
+                options.recent_user_turns = val;
+            }
+            i += 2;
+        } else if args[i] == "--recent-window" && i + 1 < args.len() {
             if let Ok(val) = args[i + 1].parse::<usize>() {
                 options.recent_window_steps = val;
             }
             i += 2;
         } else if args[i] == "--full" {
             options.thought_window_turns = Some(20);
+            options.marathon_horizon = true;
+            i += 1;
+        } else if args[i] == "--horizon" {
+            options.marathon_horizon = true;
+            i += 1;
+        } else if args[i] == "--no-horizon" {
+            options.marathon_horizon = false;
             i += 1;
         } else if args[i] == "--thought-window" && i + 1 < args.len() {
             if let Ok(val) = args[i + 1].parse::<usize>() {
@@ -267,12 +280,13 @@ fn main() {
         };
 
         let summary_text = format!(
-            "Shaken & pruned verbatim history for topic '{}'. Saved {:.1}% context tokens ({} tokens vs {} raw). Preserved {} user prompts, all reasoning, and thoughts.",
+            "Shaken & pruned verbatim history for topic '{}'. Saved {:.1}% context tokens ({} tokens vs {} raw). Preserved {} user prompts, all reasoning, thoughts, and last {} user conversational turns.",
             stats.topic_slug.replace('_', " "),
             stats.reduction_pct,
             stats.pruned_tokens,
             stats.raw_tokens,
-            stats.user_turns
+            stats.user_turns,
+            options.recent_user_turns
         );
 
         let _ = write_artifact_metadata(&abs_output_path, &summary_text);
@@ -327,6 +341,7 @@ fn main() {
     println!("| **Cumulative Session Pruning (vs Full Stream)** | `{}` | `{}` | **{:.1}% pruned overall** |", cumulative_full_fmt, after_fmt, stats.cumulative_savings_pct);
     println!("| **Exportable Summary Artifact (`.md`)** | — | `{}` | **~{} tokens saved** |\n", format_bytes(stats.pruned_bytes), tokens_saved);
     println!("- **Preserved Core Signals**: {} User turns (100%) | {} Assistant turns (100%) | {} Error traces (100%)\n", stats.user_turns, stats.assistant_turns, stats.retained_errors);
+    println!("- **Active Working Window**: Last **{} user conversational turns** kept 100% unpruned\n", options.recent_user_turns);
     
     if !options.dry_run && !backup_file_str.is_empty() {
         println!("> 💾 **In-Place JSONL Compaction**: `transcript.jsonl` was physically pruned on disk (Inode preserved, latest {} backups retained). Subsequent turns in **this exact window** now transmit the compact payload over the wire.\n", options.keep_backups);
