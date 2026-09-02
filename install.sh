@@ -155,7 +155,9 @@ mkdir -p "${FULL_SHAKE_SKILLS_DIR}"
 cp "${INSTALL_DIR}/${BIN_NAME}" "${GLOBAL_SKILLS_DIR}/bin/${BIN_NAME}"
 chmod 755 "${GLOBAL_SKILLS_DIR}/bin/${BIN_NAME}"
 
-if [ -f "${SCRIPT_DIR}/SKILL.md" ]; then
+if [ -f "${SCRIPT_DIR}/skills/shake/SKILL.md" ]; then
+    cp "${SCRIPT_DIR}/skills/shake/SKILL.md" "${GLOBAL_SKILLS_DIR}/SKILL.md"
+elif [ -f "${SCRIPT_DIR}/SKILL.md" ]; then
     cp "${SCRIPT_DIR}/SKILL.md" "${GLOBAL_SKILLS_DIR}/SKILL.md"
 fi
 if [ -d "${SCRIPT_DIR}/references" ]; then
@@ -226,6 +228,6 @@ echo "🎉 Installation Complete!"
 echo "• Binary installed to: ${INSTALL_DIR}/${BIN_NAME}"
 echo "• /shake skill installed to: ${GLOBAL_SKILLS_DIR}"
 echo "• /full-shake skill installed to: ${FULL_SHAKE_SKILLS_DIR}"
-echo "• Proactive 200k token auto-compaction hook configured in: ${HOOKS_CONFIG}"
+echo "• Proactive 80k token auto-compaction hook configured in: ${HOOKS_CONFIG}"
 echo ""
 echo "👉 Type /shake or /full-shake in any Antigravity conversation to compact context!"

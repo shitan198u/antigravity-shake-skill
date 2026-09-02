@@ -74,7 +74,9 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 # 1. Install SKILL.md and documentation
 Write-Host "• Installing skill definitions to: $GlobalSkillsDir"
-if (Test-Path (Join-Path $ScriptDir "SKILL.md")) {
+if (Test-Path (Join-Path $ScriptDir "skills\shake\SKILL.md")) {
+    Copy-Item (Join-Path $ScriptDir "skills\shake\SKILL.md") (Join-Path $GlobalSkillsDir "SKILL.md") -Force
+} elseif (Test-Path (Join-Path $ScriptDir "SKILL.md")) {
     Copy-Item (Join-Path $ScriptDir "SKILL.md") (Join-Path $GlobalSkillsDir "SKILL.md") -Force
 }
 if (Test-Path (Join-Path $ScriptDir "skills\full-shake\SKILL.md")) {
