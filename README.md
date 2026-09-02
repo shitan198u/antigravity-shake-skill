@@ -35,14 +35,14 @@ During long development sessions, AI coding agents accumulate tens of thousands 
 
 * 🟢 **Same-Tab In-Place Compaction**: Modifies active session logs directly on disk without breaking open file descriptors or requiring new chat tabs.
 * 🛡️ **Inode Preservation & File Locking**: Uses POSIX/Windows truncate-and-rewrite with `fs2` exclusive locking and `fsync` durability.
-* ⚡ **Proactive 80k Token Auto-Shake**: Background `PreInvocation` hook automatically detects and compacts conversations before crossing **80,000 tokens** (`264 KB`), completely preventing lossy server-side `{{ CHECKPOINT }}` truncation!
+* ⚡ **Dual-Trigger Proactive Auto-Hook**: Background `PreInvocation` hook automatically detects and compacts conversations whenever file size crosses **80,000 tokens** (`264 KB`) **OR** the transcript accumulates **$\ge 20$ unpruned tool runs**, completely preventing lossy server-side `{{ CHECKPOINT }}` truncation and autonomous burst bloat!
 * ⏱️ **50 KB Growth Delta Guard**: Prevents redundant CPU/disk cycles when conversations contain extensive clean dialogue.
 * 🏛️ **Single Master Archive Architecture**: Receipts point directly to `transcript_full.jsonl` with exact 1-indexed line numbers (`line=N`). No broken links, ever.
 * 🧹 **Zero Disk Bloat Guarantee**: Eliminates redundant multi-megabyte `.bak_*` duplicates, maintaining only one atomic crash-recovery fallback (`transcript.jsonl.bak`).
-* 🎯 **10-Turn Human Conversational Working Window**: Retains all tool executions, diffs, and thoughts across the last **10 user conversational turns** 100% unpruned, eliminating agent amnesia and redundant re-runs.
+* 🎯 **Dual-Boundary Working Memory Engine**: Working memory is bounded by both human conversational context (last **10 user turns**) and autonomous tool volume (capped at last **20 tool outputs**). Autonomous tasks executing 30+ tools in 1 turn keep the last 20 outputs raw while compacting earlier tools into indexed receipts.
 * ✂️ **Historical Heredoc Compaction**: Compacts older bash heredocs (`cat << 'EOF' ...` > 250 chars) from assistant tool calls into line-indexed receipts.
 * ⚠️ **Warning Awareness**: Tracks and tags compiler warnings (`warnings=N`) in receipts so the AI knows warnings were emitted without carrying terminal bloat.
-* 🧠 **100% Signal Retention**: Preserves all user prompts, assistant thoughts/reasoning, and non-zero exit error traces verbatim.
+* 🛡️ **30-Call Un-Clamped Error Window**: Preserves all failures (`exit != 0` or status `failed`) occurring in the last **30 tool calls** 100% raw, full, and un-clamped (preventing loss of diagnostics in `journalctl`, panics, and compiler backtraces). Failures older than 30 calls are safely compacted to line-indexed receipts pointing to `transcript_full.jsonl`.
 * 🦀 **Pure Native Rust**: Precompiled multi-platform binaries for Linux (x86_64, aarch64), macOS (Universal Binary for Apple Silicon & Intel), and Windows (x86_64).
 
 ---
@@ -54,7 +54,8 @@ During long development sessions, AI coding agents accumulate tens of thousands 
 | **Payload Size on Disk** | `3.35 MB` | `750 KB` | **`455 KB`** |
 | **Estimated Token Load** | `~990,000 tokens` | `~220,000 tokens` | **`~138,000 tokens`** |
 | **Cumulative Savings** | *Baseline* | **`77.4% pruned`** | **`86.0% pruned`** |
-| **Active Working Window**| Unpruned | **Last 10 User Turns (100% Intact)** | **Last 10 User Turns (100% Intact)** |
+| **Active Working Window**| Unpruned | **Last 10 User Turns ∩ Last 20 Tools** | **Last 10 User Turns ∩ Last 20 Tools** |
+| **Error Retention** | All | **Last 30 Calls Verbatim (Un-clamped)** | **Last 30 Calls Verbatim (Un-clamped)** |
 | **Scratchpad Thoughts** | All | **100% Preserved** | **Last 20 Assistant Turns Only** |
 | **Milestone Horizon** | None | Verbatim Dialogue | **Turn 1 Genesis + Last 25 Turns** |
 
@@ -108,8 +109,8 @@ cp shake-prune-rs/target/release/shake-prune ~/.gemini/bin/shake-prune
 # Compact a specific transcript in-place (keeps last 10 user turns unpruned)
 shake-prune /path/to/transcript.jsonl
 
-# Custom human conversational working window (e.g. keep last 15 user turns)
-shake-prune /path/to/transcript.jsonl --recent-user-turns 15
+# Custom working window (e.g. keep last 15 user turns, last 30 tools, last 40 errors)
+shake-prune /path/to/transcript.jsonl --recent-user-turns 15 --tools-cap 30 --errors-cap 40
 
 # Run marathon full-shake with Milestone Horizon and thought windowing
 shake-prune /path/to/transcript.jsonl --full

@@ -1,6 +1,6 @@
 ---
 name: shake
-description: Deterministically compacts and tree-shakes conversation context by stripping verbose tool outputs, cargo/compiler dumps, and file reads while preserving 100% of User prompts, Assistant reasoning, Thoughts, and the last 10 user conversational turns. Trigger when context is full, prompt is laggy, before complex tasks, or to prune bloat.
+description: Deterministically compacts and tree-shakes conversation context by stripping verbose tool outputs, cargo/compiler dumps, and file reads while preserving 100% of User prompts, Assistant reasoning, Thoughts, active working memory (last 10 user turns and 20 tool runs), and the last 30 tool error traces. Trigger when context is full, prompt is laggy, before complex tasks, or to prune bloat.
 ---
 
 # Antigravity Context Tree-Shaking Skill (`/shake`)

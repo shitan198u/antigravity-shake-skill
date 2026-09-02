@@ -16,7 +16,7 @@ Run this skill when you are working on **marathon conversations (30+ turns)** an
 2. **🏛️ The Milestone Horizon (For Sessions > 30 User Turns)**:
    * **Turn 1 (Genesis)**: Preserved **100% verbatim** (project origin, guidelines, and constraints).
    * **Middle Horizon (Turns 2 to N-25)**: Compacted into a structured Milestone Checkpoint block with exact line-indexed backup links to the permanent disk archive.
-   * **Active Working Window (Last 25 turns)**: Preserved **100% verbatim** (with the last 10 turns of tool outputs completely unpruned).
+   * **Active Working Window (Last 25 turns)**: Preserved **100% verbatim** (with the last 10 user turns and 20 tool outputs completely unpruned, and last 30 error traces raw).
 3. **Natural Fallback**:
    * If a session has $\le 30$ user turns, all conversation turns are preserved verbatim, applying only thought windowing and tool pruning.
 

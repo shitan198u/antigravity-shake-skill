@@ -53,21 +53,35 @@ Instead of creating dozens of multi-megabyte `.bak_*` files on every run (which 
 
 ---
 
-### 3. 10-Turn Human Conversational Working Window (`recent_user_turns: 10`)
-* Replaces fragile step-count heuristics.
-* Retains all tool executions, diffs, compiler checks, and thoughts from the **last 10 back-and-forth user exchanges** completely unpruned in active working memory.
-* Completely eliminates agent amnesia and redundant command re-runs across all workflows.
+### 3. Dual-Boundary Working Memory Engine (`recent_user_turns: 10`, `recent_tools_cap: 20`)
+* **The Autonomous Loop Nuance**: In iterative chat, bounding context by the last 10 user turns is ideal. But when a user gives a long autonomous task (e.g. debugging a suite of 20 tests), the agent can run 40+ commands in a *single* user turn, accumulating massive terminal stdout bloat before the user turn counter ever increments.
+* **The Dual Boundary**: Working memory is strictly bounded by:
+  $$\text{Active Memory} = \text{Last 10 User Turns} \cap \text{Last 20 Tool Runs}$$
+  * If the last 10 user turns contain only 12 tools total, all 12 tools remain 100% unpruned.
+  * If an autonomous loop runs 35 tools in 1 turn, the **most recent 20 tool outputs remain 100% raw and unpruned** (preventing amnesia on recent compiler outputs or test diffs), while the earlier 15 tools from that same turn are converted to $O(1)$ line-indexed receipts.
 
 ---
 
-### 4. Proactive 80k Token Auto-Compaction Hook
-* `AUTO_SHAKE_TOKEN_THRESHOLD_BYTES` is calibrated to **`264,000` bytes (~80,000 tokens)**.
+### 4. Dual-Trigger Proactive Auto-Hook
+* Evaluates both file size and tool execution frequency on every agent turn:
+  1. **Token Size Ceiling**: File size reaches **`264,000` bytes (~80,000 tokens)**, OR
+  2. **Autonomous Tool Burst**: The transcript accumulates **$\ge 20$ unpruned tool execution outputs**, even within a single user prompt.
 * Proactively compacts the prompt payload before it ever approaches Antigravity's platform-level checkpoint ceiling (~150k–200k tokens), **completely preventing lossy server-side `{{ CHECKPOINT }}` truncation and Turn 1 amnesia**.
-* Protected by a **50 KB Growth Delta Guard** and **180s Cooldown**.
+* Protected by a **25 KB Growth Delta Guard** and **180s Cooldown** (3 minutes) to guarantee zero disk thrashing.
 
 ---
 
-### 5. Line-Indexed Receipts ($O(1)$ Direct Lookup)
+### 5. 30-Call Un-Clamped Error Retention Window (`recent_errors_cap: 30`)
+* **Full Fidelity for Active Debugging**: Any command or tool execution that fails (`exit != 0` or status `failed`) occurring within the **last 30 tool calls** is preserved **100% full, raw, and un-clamped**. Stack traces, `journalctl` system logs, and multi-file compiler errors are never truncated, giving the model complete ground truth for active troubleshooting.
+* **Ancient Error Compaction**: Once a failure is older than 30 tool calls (solved history), it is converted into a line-indexed receipt:
+  ```text
+  [PRUNED tool=RUN_COMMAND step=14 exit=1 lines=150 archive=.../transcript_full.jsonl line=48]
+  ```
+* Solves the unbounded memory leak where ancient stack traces from 80 steps ago would stay in `transcript.jsonl` forever, while preserving direct $O(1)$ retrievability from `transcript_full.jsonl`.
+
+---
+
+### 6. Line-Indexed Receipts ($O(1)$ Direct Lookup)
 * Receipts specify the exact 1-indexed line number in `transcript_full.jsonl`:
   ```text
   [PRUNED tool=write_to_file step=45 file=src/main.rs lines=80 archive=.../transcript_full.jsonl line=210]
