@@ -13,12 +13,14 @@ pub struct CompactionEvent {
     pub artifact_file: String,
 }
 
+#[allow(dead_code)]
 #[derive(Deserialize, Debug, Clone)]
 pub struct ToolCall {
     pub name: String,
     pub args: Option<serde_json::Value>,
 }
 
+#[allow(dead_code)]
 #[derive(Deserialize, Debug, Clone)]
 pub struct Step {
     #[serde(rename = "type")]
