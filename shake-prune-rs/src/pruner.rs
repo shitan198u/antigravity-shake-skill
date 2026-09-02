@@ -11,7 +11,8 @@ use std::path::Path;
 /// Options configuring the compaction and pruning pipeline.
 #[derive(Debug, Clone)]
 pub struct CompactionOptions {
-    pub recent_window_steps: usize,
+    pub recent_user_turns: usize, // Number of human conversational turns to keep unpruned (default: 10)
+    pub recent_window_steps: usize, // Fallback step-level minimum (default: 6)
     pub thought_window_turns: Option<usize>,
     pub keep_backups: usize,
     pub in_place: bool,
@@ -21,6 +22,7 @@ pub struct CompactionOptions {
 impl Default for CompactionOptions {
     fn default() -> Self {
         Self {
+            recent_user_turns: 10,
             recent_window_steps: 6,
             thought_window_turns: None,
             keep_backups: 5,
@@ -89,13 +91,11 @@ pub fn prune_old_backups(logs_dir: &Path, keep_count: usize) {
 
     for entry in entries.flatten() {
         let file_name = entry.file_name().to_string_lossy().to_string();
-        // Match timestamped backups like transcript.jsonl.bak_20260902_002039
         if file_name.contains(".jsonl.bak_") {
             timestamped_backups.push((file_name, entry.path()));
         }
     }
 
-    // Sort in descending order (newest timestamp first)
     timestamped_backups.sort_by(|a, b| b.0.cmp(&a.0));
 
     if timestamped_backups.len() > keep_count {
@@ -105,14 +105,30 @@ pub fn prune_old_backups(logs_dir: &Path, keep_count: usize) {
     }
 }
 
-/// Compacts large tool call arguments into structured receipts with FULL ABSOLUTE PATHS.
+/// Compacts large tool call arguments into structured receipts with FULL ABSOLUTE PATHS and 1-INDEXED LINE NUMBERS.
 fn compact_tool_call_args(
     tool_name: &str,
     args_map: &mut serde_json::Map<String, Value>,
     step_idx: u64,
     backup_abs_path: &str,
+    line_no: usize,
 ) {
     match tool_name {
+        "run_command" => {
+            if let Some(cmd_val) = args_map.get("CommandLine").and_then(|v| v.as_str()) {
+                if cmd_val.len() > 250 || cmd_val.contains("<< 'EOF'") || cmd_val.contains("<< 'END'") {
+                    let first_line = cmd_val.lines().next().unwrap_or("run_command").trim();
+                    let line_count = cmd_val.lines().count();
+                    args_map.insert(
+                        "CommandLine".to_string(),
+                        Value::String(format!(
+                            "[PRUNED heredoc command=\"{}\" lines={} archive={} line={}]",
+                            first_line, line_count, backup_abs_path, line_no
+                        )),
+                    );
+                }
+            }
+        }
         "write_to_file" => {
             if let Some(code_val) = args_map.get("CodeContent").and_then(|v| v.as_str()) {
                 if code_val.len() > 200 {
@@ -120,8 +136,8 @@ fn compact_tool_call_args(
                     args_map.insert(
                         "CodeContent".to_string(),
                         Value::String(format!(
-                            "[PRUNED tool=write_to_file step={} lines={} archive={}]",
-                            step_idx, line_count, backup_abs_path
+                            "[PRUNED tool=write_to_file step={} lines={} archive={} line={}]",
+                            step_idx, line_count, backup_abs_path, line_no
                         )),
                     );
                 }
@@ -133,8 +149,8 @@ fn compact_tool_call_args(
                     args_map.insert(
                         "ReplacementContent".to_string(),
                         Value::String(format!(
-                            "[PRUNED tool=replace_file_content step={} archive={}]",
-                            step_idx, backup_abs_path
+                            "[PRUNED tool=replace_file_content step={} archive={} line={}]",
+                            step_idx, backup_abs_path, line_no
                         )),
                     );
                 }
@@ -156,7 +172,10 @@ fn compact_tool_call_args(
                             if rc.len() > 100 {
                                 chunk_map.insert(
                                     "ReplacementContent".to_string(),
-                                    Value::String(format!("[PRUNED tool=multi_replace_file_content step={} archive={}]", step_idx, backup_abs_path)),
+                                    Value::String(format!(
+                                        "[PRUNED tool=multi_replace_file_content step={} archive={} line={}]",
+                                        step_idx, backup_abs_path, line_no
+                                    )),
                                 );
                             }
                         }
@@ -223,10 +242,14 @@ pub fn format_history_timeline(events: &[CompactionEvent]) -> String {
 /// Unified Single-Pass Compaction & Pruning Pipeline:
 /// 1. Locks `transcript.jsonl` exclusively.
 /// 2. Creates timestamped backup under lock and rotates older backups.
-/// 3. In a single execution loop, produces BOTH the in-memory compacted JSONL stream
-///    AND the exportable markdown report and pruning statistics.
-/// 4. Flushes, fsyncs, and unlocks `transcript.jsonl` in-place (Inode preserved).
-/// 5. Leaves `transcript_full.jsonl` untouched on disk so true raw history is never destroyed.
+/// 3. Pass 1: Indexes User conversational turns, assistant turns, and ephemeral message positions.
+/// 4. Pass 2: In a single loop:
+///    - Keeps all tool steps within the last N user conversational turns (default: 10) 100% intact.
+///    - Deduplicates historical EPHEMERAL_MESSAGE notices (keeps only the latest 1).
+///    - Compacts older tool outputs into line-indexed receipts: [PRUNED ... line=N].
+///    - Compacts older multi-line bash heredoc CommandLine inputs.
+///    - Produces the in-place compacted JSONL stream AND Markdown report simultaneously.
+/// 5. Inode-safe truncate-and-rewrite with `fsync` commitment.
 pub fn run_compaction_pipeline(
     transcript_path: &Path,
     options: &CompactionOptions,
@@ -266,23 +289,44 @@ pub fn run_compaction_pipeline(
     let mut lines_buffer: Vec<String> = Vec::new();
     let mut raw_bytes = 0usize;
     let mut total_assistant_turns = 0usize;
+    let mut user_turn_line_indices: Vec<usize> = Vec::new();
+    let mut ephemeral_message_indices: Vec<usize> = Vec::new();
 
-    for line in reader.lines() {
+    for (line_idx, line) in reader.lines().enumerate() {
         let line_str = line?;
         if line_str.trim().is_empty() {
             continue;
         }
         raw_bytes += line_str.len();
         if let Ok(val) = serde_json::from_str::<Value>(&line_str) {
-            if val.get("type").and_then(|v| v.as_str()) == Some("PLANNER_RESPONSE") {
+            let t = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            if t == "PLANNER_RESPONSE" {
                 total_assistant_turns += 1;
+            } else if t == "USER_INPUT" {
+                user_turn_line_indices.push(line_idx);
+            } else if t == "EPHEMERAL_MESSAGE" {
+                ephemeral_message_indices.push(line_idx);
             }
         }
         lines_buffer.push(line_str);
     }
 
     let total_steps = lines_buffer.len();
-    let recent_threshold = total_steps.saturating_sub(options.recent_window_steps);
+    let total_user_turns = user_turn_line_indices.len();
+
+    // Human Conversational Turn Boundary:
+    // Retains all tool executions from the last N user turns unpruned (default: 10 user turns)
+    let active_window_start = if options.recent_user_turns == 0 {
+        total_steps.saturating_sub(options.recent_window_steps)
+    } else if total_user_turns > options.recent_user_turns {
+        user_turn_line_indices[total_user_turns - options.recent_user_turns]
+    } else {
+        total_steps.saturating_sub(options.recent_window_steps)
+    };
+
+    // Identify latest ephemeral message to preserve; older ones are dropped
+    let latest_ephemeral_idx = ephemeral_message_indices.last().copied();
+
     let thought_threshold = options
         .thought_window_turns
         .map(|w| total_assistant_turns.saturating_sub(w))
@@ -290,15 +334,13 @@ pub fn run_compaction_pipeline(
 
     let conv_id = extract_conversation_id(&abs_target.to_string_lossy());
 
-    // Cumulative full bytes: read from transcript_full.jsonl if present, else raw_bytes
-    // transcript_full.jsonl remains completely uncompacted on disk
     let cumulative_full_bytes = logs_dir
         .join("transcript_full.jsonl")
         .metadata()
         .map(|m| m.len() as usize)
         .unwrap_or(raw_bytes);
 
-    // Processing buffers: compacted JSONL output and markdown blocks
+    // Processing buffers
     let mut compacted_output = String::with_capacity(raw_bytes / 2);
     let mut output_blocks = Vec::with_capacity(total_steps);
 
@@ -311,6 +353,8 @@ pub fn run_compaction_pipeline(
     let mut first_user_prompt = String::new();
 
     for (i, line_str) in lines_buffer.into_iter().enumerate() {
+        let line_no = i + 1; // Exact 1-indexed line number in backup file
+
         let mut step_val: Value = match serde_json::from_str(&line_str) {
             Ok(v) => v,
             Err(_) => {
@@ -326,7 +370,18 @@ pub fn run_compaction_pipeline(
         let status = step_val.get("status").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
         let exit_code = step_val.get("exit_code").and_then(|v| v.as_i64());
         let step_idx = step_val.get("step_index").and_then(|v| v.as_u64()).unwrap_or(i as u64 + 1);
-        let is_recent = i >= recent_threshold;
+
+        // Deduplicate EPHEMERAL_MESSAGE: only retain the latest one!
+        if stype == "EPHEMERAL_MESSAGE" {
+            if Some(i) == latest_ephemeral_idx {
+                compacted_output.push_str(&line_str);
+                compacted_output.push('\n');
+            }
+            continue;
+        }
+
+        // Active Working Window check based on human user conversational turns
+        let is_recent = i >= active_window_start;
 
         let is_error = exit_code.map(|c| c != 0).unwrap_or(false)
             || status.contains("error")
@@ -347,7 +402,6 @@ pub fn run_compaction_pipeline(
                 let assistant_text = step_val.get("content").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
                 let thinking_text = step_val.get("thinking").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
 
-                // Thought Windowing (/full-shake): Drop thoughts older than last N turns if enabled
                 let is_thought_retained = options.thought_window_turns.is_none() || assistant_count > thought_threshold;
 
                 if !is_thought_retained {
@@ -371,13 +425,12 @@ pub fn run_compaction_pipeline(
                     output_blocks.push(assistant_block);
                 }
 
-                // Compact tool calls in the JSONL and generate action lines in Markdown
                 if let Some(tool_calls) = step_val.get_mut("tool_calls").and_then(|v| v.as_array_mut()) {
                     for tc in tool_calls.iter_mut() {
                         let name = tc.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
                         if let Some(args_map) = tc.get_mut("args").and_then(|v| v.as_object_mut()) {
                             if !is_recent {
-                                compact_tool_call_args(&name, args_map, step_idx, &backup_abs_str);
+                                compact_tool_call_args(&name, args_map, step_idx, &backup_abs_str, line_no);
                             }
                             let mut arg_items = Vec::new();
                             for (k, v) in args_map.iter() {
@@ -385,8 +438,8 @@ pub fn run_compaction_pipeline(
                                     serde_json::Value::String(s) => s.replace('\n', " "),
                                     other => other.to_string().replace('\n', " "),
                                 };
-                                let v_formatted = if (k == "CodeContent" || k == "ReplacementContent" || k == "TargetContent") && v_str.len() > 100 {
-                                    format!("[PRUNED tool={} step={} archive={}]", name, step_idx, backup_abs_str)
+                                let v_formatted = if (k == "CodeContent" || k == "ReplacementContent" || k == "TargetContent" || k == "CommandLine") && v_str.contains("[PRUNED") {
+                                    v_str
                                 } else if v_str.chars().count() > 120 {
                                     format!("{}... [truncated]", safe_truncate(&v_str, 120))
                                 } else {
@@ -423,8 +476,8 @@ pub fn run_compaction_pipeline(
                         let line_count = content_str.lines().count();
                         pruned_tools_count += 1;
                         let receipt = format!(
-                            "[PRUNED tool=RUN_COMMAND step={} exit={} lines={} archive={}]",
-                            step_idx, exit_code.unwrap_or(0), line_count, backup_abs_str
+                            "[PRUNED tool=RUN_COMMAND step={} exit={} lines={} archive={} line={}]",
+                            step_idx, exit_code.unwrap_or(0), line_count, backup_abs_str, line_no
                         );
                         step_val["content"] = serde_json::json!(receipt);
                         output_blocks.push(format!("> ℹ️ *{}*\n", receipt));
@@ -433,16 +486,16 @@ pub fn run_compaction_pipeline(
                     let line_count = content_str.lines().count();
                     pruned_tools_count += 1;
                     let receipt = format!(
-                        "[PRUNED tool=VIEW_FILE step={} lines={} archive={}]",
-                        step_idx, line_count, backup_abs_str
+                        "[PRUNED tool=VIEW_FILE step={} lines={} archive={} line={}]",
+                        step_idx, line_count, backup_abs_str, line_no
                     );
                     step_val["content"] = serde_json::json!(receipt);
                     output_blocks.push(format!("> ℹ️ *{}*\n", receipt));
                 } else {
                     pruned_tools_count += 1;
                     let receipt = format!(
-                        "[PRUNED tool={} step={} archive={}]",
-                        stype, step_idx, backup_abs_str
+                        "[PRUNED tool={} step={} archive={} line={}]",
+                        stype, step_idx, backup_abs_str, line_no
                     );
                     step_val["content"] = serde_json::json!(receipt);
                     output_blocks.push(format!("> ℹ️ *{}*\n", receipt));
@@ -456,7 +509,6 @@ pub fn run_compaction_pipeline(
         compacted_output.push('\n');
     }
 
-    // Write back compacted JSONL in-place if not dry run
     if let Some(mut file) = file_opt {
         file.set_len(0)?;
         file.seek(SeekFrom::Start(0))?;
@@ -490,11 +542,11 @@ pub fn run_compaction_pipeline(
         > This document is a complete, verbatim transcript of earlier turns with token bloat removed via `/shake`.\n\
         > - **User prompts, Assistant explanations, and Decisions are 100% complete and verbatim.**\n\
         {}\
-        > - Actions marked `[PRUNED ...]` were successfully executed. Stored stdout is archived in the referenced backup.\n\
+        > - Actions marked `[PRUNED ...]` were successfully executed. Stored stdout is archived in the referenced backup with exact line pointers (`line=N`).\n\
+        > - You can inspect any archived file or execution at exact line `N` using `view_file`.\n\
         > - You do **NOT** need to re-run past successful commands unless the user explicitly requests it.\n\
         > - Any errors or failures encountered in past turns are explicitly preserved below with full stack traces.\n\
-        > - The active working state and immediate recent tool outputs are preserved at the end of the transcript.\n\
-        > - If exact historical diffs or raw outputs are ever required, inspect the timestamped `.bak` log on disk.\n\n\
+        > - The active working state (last {} user conversational turns) is preserved completely at the end of the transcript.\n\n\
         - **Session ID**: `{}`\n\
         - **Topic**: `{}`\n\
         - **Source Transcript**: `{}`\n\
@@ -504,6 +556,7 @@ pub fn run_compaction_pipeline(
         ---\n\n",
         topic_slug.replace('_', " ").to_uppercase(),
         mode_note,
+        options.recent_user_turns,
         conv_id,
         topic_slug.replace('_', " "),
         transcript_path.display(),
@@ -562,4 +615,3 @@ pub fn run_compaction_pipeline(
 
     Ok((compacted_output, full_document, stats, backup_abs_str))
 }
-

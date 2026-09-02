@@ -38,10 +38,10 @@ During long development sessions, AI coding agents accumulate tens of thousands 
 * ⚡ **Proactive 200k Token Auto-Shake**: Background `PreInvocation` hook automatically detects and compacts conversations that exceed 200k tokens (`660 KB`).
 * ⏱️ **50 KB Growth Delta Guard**: Prevents redundant CPU/disk cycles when conversations contain extensive clean dialogue.
 * 🧹 **Rolling Backup Retention**: Retains the latest $N$ timestamped backups (`.bak_*`) and automatically purges older snapshots to prevent disk bloat.
-* 🏷️ **Structured Receipt Schema**: Replaces noisy outputs with machine-parseable tags: `[PRUNED tool=... step=... archive=...]`.
+* 🏷️ **Line-Indexed Structured Receipts**: Replaces noisy outputs with machine-parseable tags including exact line numbers for $O(1)$ random-access retrieval: `[PRUNED tool=... step=... archive=... line=N]`.
 * 📜 **Untouched Permanent Raw History**: `transcript_full.jsonl` is left 100% unpruned for auditing and debugging.
 * 🧠 **100% Signal Retention**: Preserves all user prompts, assistant thoughts/reasoning, and non-zero exit error traces verbatim.
-* 🕒 **Active Working Window**: Retains the last 6 execution steps with 0% pruning so active momentum is never interrupted.
+* 🕒 **10-Turn Human Conversational Window**: Retains all tool executions, diffs, and thoughts across the last **10 user conversational turns** 100% unpruned, eliminating agent amnesia and redundant re-runs.
 * 🔒 **Hardened Security**: ReDoS-immune linear scanning, HTML/XSS sanitization, URL-encoded links, exclusive `0600` tempfiles, and strict canonical allowlists.
 * 🦀 **Pure Native Rust**: Precompiled multi-platform binaries for Linux (x86_64, aarch64), macOS (Universal Binary for Apple Silicon & Intel), and Windows (x86_64).
 
@@ -104,8 +104,11 @@ You don't even have to remember to run `/shake`! The included `PreInvocation` ho
 
 ### 3. Standalone CLI Usage
 ```bash
-# Compact a specific transcript in-place
+# Compact a specific transcript in-place (keeps last 10 user turns unpruned)
 shake-prune /path/to/transcript.jsonl
+
+# Custom human conversational working window (e.g. keep last 15 user turns)
+shake-prune /path/to/transcript.jsonl --recent-user-turns 15
 
 # Run full deep compaction with custom thought window
 shake-prune /path/to/transcript.jsonl --full --thought-window 25
