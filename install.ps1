@@ -95,18 +95,18 @@ if (Test-Path (Join-Path $ScriptDir "bin\shake-prune.exe")) {
 }
 
 if (-not $InstalledBinary) {
-    $DownloadFile = "shake-prune-x86_64-pc-windows-msvc.exe"
+    $DownloadFile = "shake-prune-windows-x86_64.exe"
     $BaseReleaseUrl = "https://github.com/$Repo/releases/latest/download"
     $TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid().ToString())
     New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
 
     $TempExe = Join-Path $TempDir "shake-prune.exe"
-    $TempSums = Join-Path $TempDir "SHA256SUMS"
+    $TempSums = Join-Path $TempDir "SHA256SUMS.txt"
 
     try {
         Write-Host "• Downloading latest precompiled release binary from GitHub..."
         Invoke-WebRequest -Uri "$BaseReleaseUrl/$DownloadFile" -OutFile $TempExe -UseBasicParsing
-        Invoke-WebRequest -Uri "$BaseReleaseUrl/SHA256SUMS" -OutFile $TempSums -UseBasicParsing
+        Invoke-WebRequest -Uri "$BaseReleaseUrl/SHA256SUMS.txt" -OutFile $TempSums -UseBasicParsing
 
         Write-Host "• Verifying SHA256 integrity checksum..."
         $SumsLines = Get-Content $TempSums

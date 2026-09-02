@@ -86,13 +86,13 @@ ARCH="$(uname -m)"
 case "${OS}" in
     linux)
         case "${ARCH}" in
-            x86_64|amd64) TARGET="x86_64-unknown-linux-gnu" ;;
-            aarch64|arm64) TARGET="aarch64-unknown-linux-gnu" ;;
+            x86_64|amd64) TARGET="linux-x86_64" ;;
+            aarch64|arm64) TARGET="linux-aarch64" ;;
             *) echo "❌ Unsupported Linux architecture: ${ARCH}"; exit 1 ;;
         esac
         ;;
     darwin)
-        TARGET="universal-apple-darwin"
+        TARGET="macos-universal"
         ;;
     *)
         echo "❌ Unsupported OS: ${OS}. On Windows, run install.ps1 via PowerShell."
@@ -118,19 +118,19 @@ else
     # Download latest release binary from GitHub
     echo "🌐 Fetching release asset for ${TARGET}..."
     DOWNLOAD_URL="https://github.com/${REPO}/releases/latest/download/${BIN_NAME}-${TARGET}"
-    CHECKSUM_URL="https://github.com/${REPO}/releases/latest/download/SHA256SUMS"
+    CHECKSUM_URL="https://github.com/${REPO}/releases/latest/download/SHA256SUMS.txt"
     
     TMP_DIR="$(mktemp -d)"
     trap 'rm -rf "${TMP_DIR}"' EXIT
     
     curl -fsSL "${DOWNLOAD_URL}" -o "${TMP_DIR}/${BIN_NAME}"
-    curl -fsSL "${CHECKSUM_URL}" -o "${TMP_DIR}/SHA256SUMS" 2>/dev/null || true
+    curl -fsSL "${CHECKSUM_URL}" -o "${TMP_DIR}/SHA256SUMS.txt" 2>/dev/null || true
     
     # Verify SHA256 checksum if available
-    if [ -f "${TMP_DIR}/SHA256SUMS" ]; then
+    if [ -f "${TMP_DIR}/SHA256SUMS.txt" ]; then
         echo "🔒 Verifying SHA256 integrity..."
         cd "${TMP_DIR}"
-        EXPECTED_HASH="$(awk -v asset="${BIN_NAME}-${TARGET}" '{gsub(/\r/, "", $2); if($2==asset) print $1}' SHA256SUMS)"
+        EXPECTED_HASH="$(awk -v asset="${BIN_NAME}-${TARGET}" '{gsub(/\r/, "", $2); if($2==asset) print $1}' SHA256SUMS.txt)"
         if [ -n "${EXPECTED_HASH}" ]; then
             ACTUAL_HASH="$(sha256sum "${BIN_NAME}" | awk '{print $1}')"
             if [ "${EXPECTED_HASH}" != "${ACTUAL_HASH}" ]; then
