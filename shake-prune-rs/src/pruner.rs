@@ -12,6 +12,7 @@ use std::path::Path;
 #[derive(Debug, Clone)]
 pub struct CompactionOptions {
     pub recent_user_turns: usize, // Number of human conversational turns to keep unpruned (default: 10)
+    pub recent_tools_cap: usize, // Maximum recent tool outputs to keep unpruned (default: 20)
     pub recent_window_steps: usize, // Fallback step-level minimum (default: 6)
     pub thought_window_turns: Option<usize>, // Thought window (e.g. Some(20) for /full-shake)
     pub marathon_horizon: bool, // Enable Milestone Horizon on marathon threads (>30 user turns)
@@ -23,6 +24,7 @@ impl Default for CompactionOptions {
     fn default() -> Self {
         Self {
             recent_user_turns: 10,
+            recent_tools_cap: 20,
             recent_window_steps: 6,
             thought_window_turns: None,
             marathon_horizon: false,
@@ -366,9 +368,10 @@ pub fn run_compaction_pipeline(
         effective_lines = lines_buffer;
     }
 
-    // Re-index effective user turns and ephemeral positions after milestone horizon
+    // Re-index effective user turns, ephemeral positions, and tool step positions after milestone horizon
     let mut effective_user_turn_indices: Vec<usize> = Vec::new();
     let mut effective_ephemeral_indices: Vec<usize> = Vec::new();
+    let mut effective_tool_indices: Vec<usize> = Vec::new();
 
     for (buf_idx, (_, line_str)) in effective_lines.iter().enumerate() {
         if let Ok(val) = serde_json::from_str::<Value>(line_str) {
@@ -377,6 +380,8 @@ pub fn run_compaction_pipeline(
                 effective_user_turn_indices.push(buf_idx);
             } else if t == "EPHEMERAL_MESSAGE" {
                 effective_ephemeral_indices.push(buf_idx);
+            } else if matches!(t, "RUN_COMMAND" | "VIEW_FILE" | "SEARCH_WEB" | "GREP_SEARCH" | "CODE_ACTION") {
+                effective_tool_indices.push(buf_idx);
             }
         }
     }
@@ -386,11 +391,23 @@ pub fn run_compaction_pipeline(
     let effective_total_user_turns = effective_user_turn_indices.len();
     let effective_total_steps = effective_lines.len();
 
-    // Active working window cutoff
-    let active_window_start = if options.recent_user_turns > 0 && effective_total_user_turns > options.recent_user_turns {
-        effective_user_turn_indices[effective_total_user_turns - options.recent_user_turns]
+    // Active working window cutoff (Human Conversational Horizon)
+    let active_window_start = if options.recent_user_turns > 0 {
+        if effective_total_user_turns > options.recent_user_turns {
+            effective_user_turn_indices[effective_total_user_turns - options.recent_user_turns]
+        } else {
+            0 // When total user turns <= 10, all user turns are recent!
+        }
     } else {
+        // User explicitly set --recent-user-turns 0: use step-based fallback window
         effective_total_steps.saturating_sub(options.recent_window_steps)
+    };
+
+    // Tool execution cap cutoff (Maximum recent tool outputs to keep unpruned)
+    let tool_cutoff_idx = if options.recent_tools_cap > 0 && effective_tool_indices.len() > options.recent_tools_cap {
+        effective_tool_indices[effective_tool_indices.len() - options.recent_tools_cap]
+    } else {
+        0
     };
 
 
@@ -447,6 +464,7 @@ pub fn run_compaction_pipeline(
 
         // Active Working Window check based on human user conversational turns
         let is_recent = i >= active_window_start;
+        let is_recent_tool = is_recent && (i >= tool_cutoff_idx);
 
         let is_error = exit_code.map(|c| c != 0).unwrap_or(false)
             || status.contains("error")
@@ -500,7 +518,7 @@ pub fn run_compaction_pipeline(
                     for tc in tool_calls.iter_mut() {
                         let name = tc.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
                         if let Some(args_map) = tc.get_mut("args").and_then(|v| v.as_object_mut()) {
-                            if !is_recent {
+                            if !is_recent_tool {
                                 compact_tool_call_args(&name, args_map, step_idx, &master_archive_abs_str, resolved_line_no);
                             }
                             let mut arg_items = Vec::new();
@@ -527,7 +545,7 @@ pub fn run_compaction_pipeline(
             "RUN_COMMAND" | "VIEW_FILE" | "SEARCH_WEB" | "GREP_SEARCH" | "CODE_ACTION" => {
                 let content_str = step_val.get("content").and_then(|v| v.as_str()).unwrap_or("");
 
-                if is_recent {
+                if is_recent_tool {
                     retained_recent_steps += 1;
                     let snippet = sanitize_markdown_snippet(&safe_truncate(content_str, 1500));
                     output_blocks.push(format!("> 🕒 **[Active Window Tool Output ({})]**:\n```\n{}\n```\n", stype, snippet));

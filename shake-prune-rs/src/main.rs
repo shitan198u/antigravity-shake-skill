@@ -192,6 +192,11 @@ fn main() {
                 options.recent_window_steps = val;
             }
             i += 2;
+        } else if args[i] == "--tools-cap" && i + 1 < args.len() {
+            if let Ok(val) = args[i + 1].parse::<usize>() {
+                options.recent_tools_cap = val;
+            }
+            i += 2;
         } else if args[i] == "--full" {
             options.thought_window_turns = Some(20);
             options.marathon_horizon = true;
@@ -336,7 +341,7 @@ fn main() {
     println!("| **Cumulative Session Pruning (vs Full Stream)** | `{}` | `{}` | **{:.1}% pruned overall** |", cumulative_full_fmt, after_fmt, stats.cumulative_savings_pct);
     println!("| **Exportable Summary Artifact (`.md`)** | — | `{}` | **~{} tokens saved** |\n", format_bytes(stats.pruned_bytes), tokens_saved);
     println!("- **Preserved Core Signals**: {} User turns (100%) | {} Assistant turns (100%) | {} Error traces (100%)\n", stats.user_turns, stats.assistant_turns, stats.retained_errors);
-    println!("- **Active Working Window**: Last **{} user conversational turns** kept 100% unpruned\n", options.recent_user_turns);
+    println!("- **Active Working Window**: Last **{} user conversational turns** (capped at last **{} tool runs**) kept 100% unpruned\n", options.recent_user_turns, options.recent_tools_cap);
     
     if !options.dry_run && !backup_file_str.is_empty() {
         println!("> 💾 **In-Place JSONL Compaction**: `transcript.jsonl` was physically pruned on disk (Inode preserved, Single Master Archive active). Subsequent turns in **this exact window** now transmit the compact payload over the wire.\n");

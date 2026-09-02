@@ -119,6 +119,8 @@ fn test_active_working_window_preservation() {
     let bin = get_binary_path();
     let output = std::process::Command::new(&bin)
         .arg(&transcript_path)
+        .arg("--recent-user-turns")
+        .arg("0")
         .output()
         .expect("Failed to execute shake-prune");
 
@@ -284,7 +286,7 @@ fn test_version_flag() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("shake-prune 0.1.9"), "Expected version 0.1.9, got: {}", stdout);
+    assert!(stdout.contains("shake-prune 0.1.10"), "Expected version 0.1.10, got: {}", stdout);
 }
 
 #[test]
@@ -512,5 +514,62 @@ fn test_full_shake_marathon_milestone_horizon() {
     for i in 11..=35 {
         assert!(compacted.contains(&format!("User turn {} unique prompt", i)), "Turn {} must be retained in active horizon!", i);
         assert!(compacted.contains(&format!("Reply for turn {}", i)), "Reply {} must be retained in active horizon!", i);
+    }
+}
+
+#[test]
+fn test_autonomous_loop_20_tools_cap() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let transcript_path = temp_dir.path().join("transcript.jsonl");
+
+    // Simulate an autonomous loop within a single user prompt:
+    // 1 user prompt, followed by 30 tool executions (tools 1 to 30)
+    // Tool #5 failed with exit_code: 1
+    {
+        let mut f = File::create(&transcript_path).unwrap();
+        writeln!(f, "{}", json!({"step_index": 1, "type": "USER_INPUT", "content": "Fix the entire test suite autonomously"})).unwrap();
+        for i in 1..=30 {
+            let is_err = i == 5;
+            let exit = if is_err { 1 } else { 0 };
+            let status = if is_err { "ERROR" } else { "DONE" };
+            let content = if is_err {
+                format!("CRITICAL_COMPILATION_ERROR_IN_TOOL_{}", i)
+            } else {
+                format!("Raw tool output for command execution number {} with lengthy compiler output {}", i, "x".repeat(300))
+            };
+            writeln!(f, "{}", json!({
+                "step_index": i + 1,
+                "type": "RUN_COMMAND",
+                "status": status,
+                "exit_code": exit,
+                "content": content
+            })).unwrap();
+        }
+    }
+
+    let bin = get_binary_path();
+    let output = std::process::Command::new(&bin)
+        .arg(&transcript_path)
+        .output()
+        .expect("Failed to execute shake-prune");
+
+    assert!(output.status.success());
+    let compacted = fs::read_to_string(&transcript_path).unwrap();
+
+    // 1. User prompt must be preserved
+    assert!(compacted.contains("Fix the entire test suite autonomously"));
+
+    // 2. Tools 1 to 10 (older than the last 20) should be converted to receipts (except tool 5 which failed)
+    for i in 1..=10 {
+        if i == 5 {
+            assert!(compacted.contains("CRITICAL_COMPILATION_ERROR_IN_TOOL_5"), "Failed tool 5 must be preserved verbatim even if older than 20 tools!");
+        } else {
+            assert!(!compacted.contains(&format!("Raw tool output for command execution number {} with lengthy compiler output {}", i, "x".repeat(300))), "Tool {} should have been compacted into a receipt!", i);
+        }
+    }
+
+    // 3. Tools 11 to 30 (the last 20 tool executions) MUST be preserved 100% unpruned
+    for i in 11..=30 {
+        assert!(compacted.contains(&format!("Raw tool output for command execution number {} with lengthy compiler output {}", i, "x".repeat(300))), "Tool {} must be preserved verbatim in the 20-tool cap window!", i);
     }
 }

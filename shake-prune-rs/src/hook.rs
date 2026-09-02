@@ -9,10 +9,13 @@ use std::panic;
 use std::path::{Path, PathBuf};
 
 // 200k tokens * ~3.3 bytes/token = 660,000 bytes
-const AUTO_SHAKE_TOKEN_THRESHOLD_BYTES: u64 = 660_000;
-// Minimum new unpruned growth (50 KB) required before triggering another auto-compaction
-const AUTO_SHAKE_GROWTH_DELTA_BYTES: u64 = 50_000;
-// Minimum seconds between auto-compaction attempts to prevent CPU loops in failure cases
+// Proactive 80k tokens threshold (~264,000 bytes)
+const AUTO_SHAKE_TOKEN_THRESHOLD_BYTES: u64 = 264_000;
+// Tool execution burst threshold (triggers after 20 unpruned tool executions)
+const AUTO_SHAKE_TOOL_RUN_THRESHOLD: usize = 20;
+// Minimum new unpruned growth (25 KB) required before triggering another auto-compaction
+const AUTO_SHAKE_GROWTH_DELTA_BYTES: u64 = 25_000;
+// Minimum seconds between auto-compaction attempts (3 minutes) to prevent thrashing
 const AUTO_SHAKE_COOLDOWN_SECONDS: i64 = 180;
 
 #[derive(Deserialize, Debug, Default)]
@@ -27,6 +30,29 @@ struct HookPayload {
 
 /// Strictly validates that a directory path is within the user's system-managed ~/.gemini directory
 /// to completely prevent context poisoning from arbitrary workspace git repositories.
+/// Counts the number of raw, unpruned tool execution outputs in the transcript.
+fn count_unpruned_tools(t_path: &Path) -> usize {
+    let file = match File::open(t_path) {
+        Ok(f) => f,
+        Err(_) => return 0,
+    };
+    let reader = io::BufReader::new(file);
+    use io::BufRead;
+    let mut count = 0;
+    for l in reader.lines().map_while(Result::ok) {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&l) {
+            let t = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            if matches!(t, "RUN_COMMAND" | "VIEW_FILE" | "SEARCH_WEB" | "GREP_SEARCH" | "CODE_ACTION") {
+                let content = val.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                if !content.starts_with("[PRUNED tool=") {
+                    count += 1;
+                }
+            }
+        }
+    }
+    count
+}
+
 fn is_trusted_storage_path(p: &Path) -> bool {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
@@ -162,7 +188,11 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
     // ⚡ PROACTIVE AUTO-SHAKE WITH GROWTH DELTA & COOLDOWN GUARDS
     if let (Some(t_path), Some(art_dir)) = (&resolved_transcript, &resolved_art_dir) {
         if let Ok(meta) = fs::metadata(t_path) {
-            if meta.len() >= AUTO_SHAKE_TOKEN_THRESHOLD_BYTES {
+            let unpruned_tools = count_unpruned_tools(t_path);
+            let size_threshold_hit = meta.len() >= AUTO_SHAKE_TOKEN_THRESHOLD_BYTES;
+            let tools_threshold_hit = unpruned_tools >= AUTO_SHAKE_TOOL_RUN_THRESHOLD;
+
+            if size_threshold_hit || tools_threshold_hit {
                 let now_ts = Utc::now().timestamp();
                 let should_auto_shake = match &found_anchor {
                     Some(anchor) => {
@@ -178,6 +208,7 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
                 if should_auto_shake {
                     let options = CompactionOptions {
                         recent_user_turns: 10,
+                        recent_tools_cap: 20,
                         recent_window_steps: 6,
                         thought_window_turns: None,
                         marathon_horizon: false,
