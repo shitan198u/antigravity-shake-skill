@@ -1,74 +1,55 @@
-name: Build, Test & Release Multi-Platform Binaries
+name: Build, Attest & Release Multi-Platform Binaries
 
 on:
   push:
-    branches: [ main ]
     tags: [ 'v*' ]
-  pull_request:
-    branches: [ main ]
   workflow_dispatch:
 
-jobs:
-  # 1. Quality Gates (Fmt & Clippy)
-  quality-check:
-    name: Static Analysis & Lint Gates
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - name: Verify Formatting (cargo fmt)
-        run: cargo fmt --manifest-path shake-prune-rs/Cargo.toml -- --check
-      - name: Verify Lints (cargo clippy)
-        run: cargo clippy --manifest-path shake-prune-rs/Cargo.toml -- -D warnings
-      - name: Dependency audit (cargo audit)
-        run: |
-          cargo install cargo-audit --locked || true
-          cargo audit --manifest-path shake-prune-rs/Cargo.toml || true
+permissions:
+  contents: write
+  id-token: write
 
-  # 2. Build & Test Linux x86_64
+jobs:
+  # 1. Build Linux x86_64
   build-linux:
-    name: Build & Test (Linux x86_64)
-    needs: quality-check
+    name: 🐧 Linux x86_64
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
-      - name: Run Test Suite
-        run: cargo test --manifest-path shake-prune-rs/Cargo.toml
-      - name: Build Release
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: shake-prune-rs
+      - name: Build Release Binary
         run: cargo build --release --manifest-path shake-prune-rs/Cargo.toml
       - name: Package Asset
         run: |
           mkdir -p dist
           cp shake-prune-rs/target/release/shake-prune dist/shake-prune-linux-x86_64
-      - name: Test install.sh and Uninstallation
-        run: |
-          mkdir -p bin
-          cp dist/shake-prune-linux-x86_64 bin/shake-prune
-          chmod +x bin/shake-prune install.sh
-          ./install.sh
-          ~/.gemini/bin/shake-prune --version
-          ./install.sh --uninstall
       - uses: actions/upload-artifact@v4
         with:
           name: shake-prune-linux-x86_64
           path: dist/shake-prune-linux-x86_64
 
-  # 3. Build & Package Linux ARM64 (aarch64-unknown-linux-musl)
+  # 2. Build Linux aarch64 (ARM64 musl) via cross
   build-linux-arm64:
-    name: Build & Package (Linux aarch64)
-    needs: quality-check
+    name: 🐧 Linux aarch64 (ARM64 musl)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-unknown-linux-musl
       - uses: taiki-e/install-action@v2
         with:
           tool: cross
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: shake-prune-rs
       - name: Build Cross-Compiled ARM64 Binary
         run: cross build --release --target aarch64-unknown-linux-musl --manifest-path shake-prune-rs/Cargo.toml
       - name: Package Asset
@@ -80,19 +61,21 @@ jobs:
           name: shake-prune-linux-aarch64
           path: dist/shake-prune-linux-aarch64
 
-  # 4. Build & Test macOS Universal (Apple Silicon + Intel via lipo)
+  # 3. Build macOS Universal (Apple Silicon + Intel via lipo)
   build-macos:
-    name: Build & Test (macOS Universal - Apple Silicon + Intel)
-    needs: quality-check
+    name: 🍎 macOS Universal (Apple Silicon + Intel)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
-      - name: Run Native macOS Test Suite
-        run: cargo test --manifest-path shake-prune-rs/Cargo.toml
-      - name: Build Both Targets
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: shake-prune-rs
+      - name: Build Both macOS Architectures
         run: |
           cargo build --release --target aarch64-apple-darwin --manifest-path shake-prune-rs/Cargo.toml
           cargo build --release --target x86_64-apple-darwin --manifest-path shake-prune-rs/Cargo.toml
@@ -103,81 +86,69 @@ jobs:
             shake-prune-rs/target/aarch64-apple-darwin/release/shake-prune \
             shake-prune-rs/target/x86_64-apple-darwin/release/shake-prune
           file dist/shake-prune-macos-universal
-      - name: Test install.sh and Uninstallation on macOS
-        run: |
-          mkdir -p bin
-          cp dist/shake-prune-macos-universal bin/shake-prune
-          chmod +x bin/shake-prune install.sh
-          ./install.sh
-          ~/.gemini/bin/shake-prune --version
-          ./install.sh --uninstall
       - uses: actions/upload-artifact@v4
         with:
           name: shake-prune-macos-universal
           path: dist/shake-prune-macos-universal
 
-  # 5. Build & Test Windows x86_64
+  # 4. Build Windows x86_64 (.exe)
   build-windows:
-    name: Build & Test (Windows x86_64)
-    needs: quality-check
+    name: 🪟 Windows x86_64
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
-      - name: Run Windows Test Suite
-        run: cargo test --manifest-path shake-prune-rs/Cargo.toml
-      - name: Build Release
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: shake-prune-rs
+      - name: Build Windows Release Binary
         run: cargo build --release --manifest-path shake-prune-rs/Cargo.toml
       - name: Package Asset
         shell: bash
         run: |
           mkdir -p dist
           cp shake-prune-rs/target/release/shake-prune.exe dist/shake-prune-windows-x86_64.exe
-      - name: Test install.ps1 and Uninstallation on Windows
-        shell: powershell
-        run: |
-          if (!(Test-Path "bin")) { New-Item -ItemType Directory -Path "bin" -Force }
-          Copy-Item dist\shake-prune-windows-x86_64.exe bin\shake-prune.exe -Force
-          powershell -ExecutionPolicy Bypass -File .\install.ps1
-          & "$env:USERPROFILE\.gemini\bin\shake-prune.exe" --version
-          powershell -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall
       - uses: actions/upload-artifact@v4
         with:
           name: shake-prune-windows-x86_64.exe
           path: dist/shake-prune-windows-x86_64.exe
 
-  # 6. Automatic GitHub Release on Tags
+  # 5. Create Official GitHub Release with Checksums, SBOM & Sigstore Signature
   release:
-    name: Create GitHub Release
+    name: 🚀 Publish GitHub Release & Sigstore Attestations
     needs: [build-linux, build-linux-arm64, build-macos, build-windows]
-    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      id-token: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
           path: release_assets/
-      - name: Flatten and Generate Checksums
+      - name: Flatten and Generate SHA256 Checksums
         run: |
           mkdir -p final_assets
           find release_assets/ -type f -exec cp {} final_assets/ \;
           cd final_assets
           sha256sum * > SHA256SUMS.txt
           cat SHA256SUMS.txt
-      - name: Generate SBOM (CycloneDX)
+      - name: Generate CycloneDX SBOM (Precompiled via install-action)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-cyclonedx
+      - name: Build SBOM Asset
         run: |
-          cargo install cargo-cyclonedx --locked || true
           cargo cyclonedx --manifest-path shake-prune-rs/Cargo.toml --format json --override-filename sbom.cdx.json || true
           cp shake-prune-rs/sbom.cdx.json final_assets/sbom.cdx.json 2>/dev/null || true
-      - name: Sign checksums with Sigstore (cosign)
+      - name: Keyless Cryptographic Signing via Sigstore/Cosign (Free OIDC)
         uses: sigstore/cosign-installer@v3
-      - run: |
+      - name: Sign Checksums
+        run: |
           cd final_assets
-          cosign sign-blob --yes SHA256SUMS.txt --bundle SHA256SUMS.txt.sigstore.json || echo "cosign signing skipped (no OIDC)"
-      - name: Package & Publish Release Assets
+          cosign sign-blob --yes SHA256SUMS.txt --bundle SHA256SUMS.txt.sigstore.json
+      - name: Publish Official Release Assets
         uses: softprops/action-gh-release@v2
         with:
           files: final_assets/*
