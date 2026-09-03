@@ -4,6 +4,11 @@
       {
         "command": "shake-prune --hook"
       }
+    ],
+    "Stop": [
+      {
+        "command": "shake-prune --hook"
+      }
     ]
   }
 }

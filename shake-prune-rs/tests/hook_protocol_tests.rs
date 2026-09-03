@@ -330,3 +330,126 @@ fn test_hook_circuit_breaker_engages_for_uncompacted_session() {
         log_content
     );
 }
+#[test]
+fn test_hook_mid_turn_invocation_bypasses_compaction_and_injection() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = fake_home(&tmp);
+    let conv = "conv_mid_turn";
+    let transcript = trusted_transcript_path(&home, conv);
+    let conv_dir = home.join(".gemini/antigravity-ide/brain").join(conv);
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+
+    let big_output = "x".repeat(300_000);
+    TranscriptBuilder::new()
+        .user("Large task execution")
+        .tool_output("RUN_COMMAND", &big_output, 0)
+        .assistant("Processing step 1")
+        .write(&transcript);
+
+    // Mid-turn tool sequence (invocationNum: 2)
+    let payload = serde_json::json!({
+        "transcriptPath": transcript.to_string_lossy(),
+        "artifactDirectoryPath": conv_dir.to_string_lossy(),
+        "invocationNum": 2
+    });
+
+    let mut child = Command::new(bin())
+        .arg("--hook")
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "{}",
+        "Mid-turn tool sequence (invocationNum > 1) must immediately output empty JSON"
+    );
+
+    // Transcript must NOT be compacted mid-flight
+    let len = std::fs::metadata(&transcript).unwrap().len();
+    assert!(
+        len >= 300_000,
+        "Transcript must remain unpruned during active mid-turn tool sequence"
+    );
+}
+
+#[test]
+fn test_hook_stop_event_compacts_in_background_silently() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = fake_home(&tmp);
+    let conv = "conv_stop_event";
+    let transcript = trusted_transcript_path(&home, conv);
+    let conv_dir = home.join(".gemini/antigravity-ide/brain").join(conv);
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+
+    let mut builder = TranscriptBuilder::new().user("Historic bulky task");
+    for _ in 0..10 {
+        builder = builder.tool_output("RUN_COMMAND", &"x".repeat(35_000), 0);
+    }
+    builder = builder.user("Recent turn");
+    for _ in 0..10 {
+        builder = builder.tool_output("RUN_COMMAND", &"y".repeat(500), 0);
+    }
+    builder = builder.assistant("All done! Execution complete.");
+    builder.write(&transcript);
+
+    // Stop event payload when agent finishes responding
+    let payload = serde_json::json!({
+        "transcriptPath": transcript.to_string_lossy(),
+        "artifactDirectoryPath": conv_dir.to_string_lossy(),
+        "terminationReason": "model_stop",
+        "fullyIdle": true
+    });
+
+    let mut child = Command::new(bin())
+        .arg("--hook")
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "{}",
+        "Stop hook must conclude silently with {{}}"
+    );
+
+    let log_path = home.join(".gemini/logs/shake_hook.log");
+    let log_text = std::fs::read_to_string(&log_path).unwrap_or_default();
+    assert!(
+        log_text.contains("Auto-shake complete"),
+        "Stop hook must complete auto-shake compaction. Log: {}",
+        log_text
+    );
+
+    let anchor_file = conv_dir.join("active_shake_anchor.json");
+    assert!(
+        anchor_file.exists(),
+        "Anchor file must be created by Stop hook"
+    );
+}

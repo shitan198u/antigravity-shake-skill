@@ -38,11 +38,16 @@ if [ "${1:-}" = "--uninstall" ] || [ "${1:-}" = "-u" ]; then
     if [ -f "${HOOKS_CONFIG}" ]; then
         if command -v jq >/dev/null 2>&1; then
             jq --arg bin "${INSTALL_DIR}/${BIN_NAME} --hook" '
-                if .hooks and .hooks.PreInvocation then
-                    .hooks.PreInvocation = (.hooks.PreInvocation | map(select(.command != $bin and (.command | contains("shake-prune") | not))))
+                if .hooks then
+                    if .hooks.PreInvocation then
+                        .hooks.PreInvocation = (.hooks.PreInvocation | map(select(.command != $bin and (.command | contains("shake-prune") | not))))
+                    else . end |
+                    if .hooks.Stop then
+                        .hooks.Stop = (.hooks.Stop | map(select(.command != $bin and (.command | contains("shake-prune") | not))))
+                    else . end
                 else . end
             ' "${HOOKS_CONFIG}" > "${HOOKS_CONFIG}.tmp" && mv "${HOOKS_CONFIG}.tmp" "${HOOKS_CONFIG}"
-            echo "  ✓ Cleaned PreInvocation hook from ${HOOKS_CONFIG}"
+            echo "  ✓ Cleaned PreInvocation and Stop hooks from ${HOOKS_CONFIG}"
         elif command -v python3 >/dev/null 2>&1; then
             python3 -c '
 import json, os
@@ -51,11 +56,17 @@ if os.path.exists(config_path):
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        if "hooks" in data and "PreInvocation" in data["hooks"]:
-            data["hooks"]["PreInvocation"] = [
-                h for h in data["hooks"]["PreInvocation"]
-                if not ("shake-prune" in str(h.get("command", "")))
-            ]
+        if "hooks" in data:
+            if "PreInvocation" in data["hooks"]:
+                data["hooks"]["PreInvocation"] = [
+                    h for h in data["hooks"]["PreInvocation"]
+                    if not ("shake-prune" in str(h.get("command", "")))
+                ]
+            if "Stop" in data["hooks"]:
+                data["hooks"]["Stop"] = [
+                    h for h in data["hooks"]["Stop"]
+                    if not ("shake-prune" in str(h.get("command", "")))
+                ]
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
         print("  ✓ Cleaned PreInvocation hook via python3")
@@ -216,6 +227,10 @@ if command -v jq >/dev/null 2>&1; then
         .hooks.PreInvocation = (
             ((.hooks.PreInvocation // []) | map(select((.command != $bin) and (.command | contains("shake-prune") | not)))) +
             [{"command": $bin}]
+        ) |
+        .hooks.Stop = (
+            ((.hooks.Stop // []) | map(select((.command != $bin) and (.command | contains("shake-prune") | not)))) +
+            [{"command": $bin}]
         )
     ' > "${HOOKS_CONFIG}.tmp"
     mv "${HOOKS_CONFIG}.tmp" "${HOOKS_CONFIG}"
@@ -241,17 +256,16 @@ if "shake-anchor" in data:
 if "hooks" not in data or not isinstance(data["hooks"], dict):
     data["hooks"] = {}
 
-pre_inv = data["hooks"].get("PreInvocation", [])
-if not isinstance(pre_inv, list):
-    pre_inv = []
-
-# Filter out any old or existing shake-prune command (matching jq behavior)
-filtered = [
-    h for h in pre_inv
-    if isinstance(h, dict) and not ("shake-prune" in str(h.get("command", "")))
-]
-filtered.append({"command": hook_cmd})
-data["hooks"]["PreInvocation"] = filtered
+for hook_name in ["PreInvocation", "Stop"]:
+    hook_list = data["hooks"].get(hook_name, [])
+    if not isinstance(hook_list, list):
+        hook_list = []
+    filtered = [
+        h for h in hook_list
+        if isinstance(h, dict) and not ("shake-prune" in str(h.get("command", "")))
+    ]
+    filtered.append({"command": hook_cmd})
+    data["hooks"][hook_name] = filtered
 
 with open(config_path, "w", encoding="utf-8") as f:
     json.dump(data, f, indent=2)

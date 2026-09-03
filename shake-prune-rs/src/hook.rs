@@ -70,6 +70,14 @@ struct HookPayload {
     transcript_path: Option<String>,
     #[serde(rename = "artifactDirectoryPath")]
     artifact_directory_path: Option<String>,
+    #[serde(rename = "invocationNum")]
+    invocation_num: Option<u64>,
+    #[serde(rename = "terminationReason")]
+    termination_reason: Option<String>,
+    #[serde(rename = "fullyIdle")]
+    fully_idle: Option<bool>,
+    #[serde(rename = "executionNum")]
+    execution_num: Option<u64>,
 }
 
 /// Strictly validates that a directory path is within the user's system-managed ~/.gemini directory
@@ -236,6 +244,23 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    let is_stop_event = payload.termination_reason.is_some()
+        || payload.fully_idle.is_some()
+        || payload.execution_num.is_some();
+    let is_turn_start = payload.invocation_num.map(|n| n <= 1).unwrap_or(true);
+
+    // 🛑 MID-TURN TOOL SEQUENCE GUARD:
+    // If running under PreInvocation and invocationNum > 1, the agent is actively executing
+    // in a multi-step tool sequence. Bypassing compaction and notice injection completely
+    // ensures the active tool chain is never disturbed mid-flight and context is not spammed.
+    if !is_stop_event && !is_turn_start {
+        log_diagnostic(
+            "Auto-shake bypassed: mid-turn tool sequence active (waiting for turn completion / next user turn)",
+        );
+        println!("{{}}");
+        return Ok(());
+    }
+
     // ⚡ PROACTIVE AUTO-SHAKE WITH GROWTH DELTA & COOLDOWN GUARDS
     if let (Some(t_path), Some(art_dir)) = (&resolved_transcript, &resolved_art_dir) {
         if let Ok(meta) = fs::metadata(t_path) {
@@ -375,6 +400,11 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
                             )
                         };
 
+                        if is_stop_event {
+                            println!("{{}}");
+                            return Ok(());
+                        }
+
                         let response = json!({
                             "injectSteps": [
                                 {
@@ -404,7 +434,13 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Normal anchor message injection if under threshold or already compacted
+    // On Stop event, the agent is now idle; conclude silently without prompt injection
+    if is_stop_event {
+        println!("{{}}");
+        return Ok(());
+    }
+
+    // On PreInvocation turn start (invocationNum == 1), inject the anchor notice once
     emit_anchor_or_empty(&found_anchor)
 }
 
