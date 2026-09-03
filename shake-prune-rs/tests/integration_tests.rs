@@ -721,3 +721,26 @@ fn test_permanent_master_archive_initialization() {
     assert!(compacted.contains("transcript_full.jsonl"), "Receipt should point to transcript_full.jsonl!");
     assert!(!compacted.contains("transcript.jsonl.bak"), "Receipt should NEVER point to temporary .bak fallback!");
 }
+
+#[test]
+fn test_system_path_denylist_rejections() {
+    let bin = get_binary_path();
+
+    // 1. Invalid suffix like foo.jsonl.bak.txt must be rejected
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let bad_suffix = tmp_dir.path().join("foo.jsonl.bak.txt");
+    fs::write(&bad_suffix, "dummy").unwrap();
+
+    let output = std::process::Command::new(&bin)
+        .arg(&bad_suffix)
+        .output()
+        .expect("Failed to execute shake-prune");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Invalid file type"),
+        "Invalid extension .bak.txt was not rejected! stderr: {}",
+        stderr
+    );
+}

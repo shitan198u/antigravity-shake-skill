@@ -50,8 +50,37 @@ fn format_bytes(bytes: usize) -> String {
     }
 }
 
+/// Checks if a path targets sensitive system directories on Unix or Windows
+pub fn is_sensitive_system_path(path: &Path) -> bool {
+    let path_str = path.to_string_lossy().to_lowercase().replace('\\', "/");
+
+    let unix_forbidden = [
+        "/etc", "/root", "/boot", "/dev", "/proc", "/sys",
+        "/usr", "/bin", "/sbin", "/var/log",
+    ];
+
+    for prefix in &unix_forbidden {
+        if path_str == *prefix || path_str.starts_with(&format!("{}/", prefix)) {
+            return true;
+        }
+    }
+
+    let windows_forbidden = [
+        "c:/windows", "c:/program files", "c:/program files (x86)",
+        "c:/programdata", "c:/system volume information",
+    ];
+
+    for prefix in &windows_forbidden {
+        if path_str == *prefix || path_str.starts_with(&format!("{}/", prefix)) {
+            return true;
+        }
+    }
+
+    false
+}
+
 /// Validates that the input path is a valid JSONL transcript file
-/// and prevents path traversal or arbitrary sensitive file modification.
+/// and strictly prevents path traversal or sensitive system file modification.
 fn validate_transcript_path(path: &Path) -> Result<(), String> {
     if !path.exists() {
         return Err(format!("Transcript file does not exist: {}", path.display()));
@@ -60,14 +89,26 @@ fn validate_transcript_path(path: &Path) -> Result<(), String> {
         return Err(format!("Target is not a file: {}", path.display()));
     }
 
+    let canonical = path.canonicalize().map_err(|e| {
+        format!("Failed to canonicalize transcript path '{}': {}", path.display(), e)
+    })?;
+
+    if is_sensitive_system_path(&canonical) || is_sensitive_system_path(path) {
+        return Err(format!(
+            "Security Error: Transcript path '{}' is located within a restricted sensitive system directory.",
+            path.display()
+        ));
+    }
+
     let file_name = path
         .file_name()
         .map(|s| s.to_string_lossy().to_lowercase())
         .unwrap_or_default();
 
-    if !file_name.ends_with(".jsonl") && !file_name.contains(".jsonl.bak") {
+    // Strict suffix check: only .jsonl or exact .jsonl.bak permitted
+    if !file_name.ends_with(".jsonl") && !file_name.ends_with(".jsonl.bak") {
         return Err(format!(
-            "Invalid file type: '{}'. /shake only operates on .jsonl transcript log files.",
+            "Invalid file type: '{}'. /shake only operates on .jsonl or .jsonl.bak transcript log files.",
             file_name
         ));
     }
@@ -93,6 +134,13 @@ fn validate_output_path_allowlist(target: &Path, transcript_path: &Path) -> Resu
     let canonical_target = target_parent.canonicalize().map_err(|_| {
         format!("Output target directory does not exist or is invalid: {}", target_parent.display())
     })?;
+
+    if is_sensitive_system_path(&canonical_target) || is_sensitive_system_path(target) {
+        return Err(format!(
+            "Security Error: Output path '{}' is located within a restricted sensitive system directory.",
+            target.display()
+        ));
+    }
 
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))

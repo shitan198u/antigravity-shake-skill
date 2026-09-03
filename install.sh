@@ -142,8 +142,17 @@ else
         cd "${SCRIPT_DIR}"
     fi
     
+    if [ ! -f "${TMP_DIR}/${BIN_NAME}" ]; then
+        echo "❌ Error: Failed to download precompiled binary for ${TARGET}" >&2
+        exit 1
+    fi
     cp "${TMP_DIR}/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}"
     chmod 755 "${INSTALL_DIR}/${BIN_NAME}"
+fi
+
+if [ ! -x "${INSTALL_DIR}/${BIN_NAME}" ]; then
+    echo "❌ Error: shake-prune binary was not installed successfully to ${INSTALL_DIR}/${BIN_NAME}" >&2
+    exit 1
 fi
 
 # Install Global Skills

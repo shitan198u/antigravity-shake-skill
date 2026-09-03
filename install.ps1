@@ -143,6 +143,11 @@ if (-not $InstalledBinary) {
     }
 }
 
+if (-not $InstalledBinary) {
+    Write-Error "Installation Failed: shake-prune binary could not be installed. Release download failed and local Cargo is not available. Please install Rust or check internet connectivity."
+    exit 1
+}
+
 # 3. Safely merge PreInvocation hook into hooks.json
 Write-Host "- Merging PreInvocation hook into ~/.gemini/config/hooks.json (preserving existing hooks)..."
 $EscapedHookExe = $TargetExe.Replace("\", "\\")

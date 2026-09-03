@@ -2,7 +2,6 @@
 shake-prune-rs/target/
 target/
 **/*.rs.bk
-Cargo.lock
 
 # Python cache
 __pycache__/
