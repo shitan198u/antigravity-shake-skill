@@ -46,6 +46,7 @@ SKIP_FILES = {
 
 # Preferred ordering for intuitive architectural review
 PRIORITY_ORDER = [
+    "LICENSE",
     "README.md",
     "AGENTS.md",
     "hooks.json",
@@ -84,7 +85,7 @@ def collect_files(repo_root: Path):
             rel_path = path.relative_to(repo_root)
             rel_str = str(rel_path).replace("\\", "/")
 
-            if f == "hooks.json" or path.suffix.lower() in VALID_EXTENSIONS:
+            if f in {"hooks.json", "LICENSE"} or path.suffix.lower() in VALID_EXTENSIONS:
                 collected.append(rel_str)
 
     def sort_key(item: str):
