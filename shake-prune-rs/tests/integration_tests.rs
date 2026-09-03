@@ -1096,3 +1096,39 @@ fn test_duplicate_step_index_robustness() {
     let compacted = fs::read_to_string(&transcript_path).unwrap();
     assert!(compacted.contains("transcript_full.jsonl"));
 }
+
+#[test]
+fn test_restore_subcommand() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let transcript_path = tmp_dir.path().join("transcript.jsonl");
+    let bak_path = tmp_dir.path().join("transcript.jsonl.bak");
+
+    // Write original and backup
+    fs::write(&transcript_path, "MODIFIED_COMPACTED_CONTENT").unwrap();
+    fs::write(&bak_path, "ORIGINAL_UNPRUNED_BACKUP_CONTENT").unwrap();
+
+    let bin = get_binary_path();
+    let output = std::process::Command::new(&bin)
+        .arg("restore")
+        .arg(&transcript_path)
+        .output()
+        .expect("Failed to execute shake-prune restore");
+
+    assert!(output.status.success());
+    let restored = fs::read_to_string(&transcript_path).unwrap();
+    assert_eq!(restored, "ORIGINAL_UNPRUNED_BACKUP_CONTENT");
+}
+
+#[test]
+fn test_doctor_subcommand() {
+    let bin = get_binary_path();
+    let output = std::process::Command::new(&bin)
+        .arg("doctor")
+        .output()
+        .expect("Failed to execute shake-prune doctor");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Antigravity /shake Diagnostic Doctor"));
+    assert!(stdout.contains("shake-prune"));
+}

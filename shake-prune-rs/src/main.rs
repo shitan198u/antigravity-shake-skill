@@ -1,3 +1,77 @@
+use std::fs;
+
+fn handle_restore(target: &Path) {
+    let abs_target = match target.canonicalize() {
+        Ok(p) => p,
+        Err(_) => target.to_path_buf(),
+    };
+    let bak_path = abs_target.with_extension("jsonl.bak");
+    if !bak_path.exists() {
+        eprintln!(
+            "Error: Backup file does not exist at '{}'. Cannot restore.",
+            bak_path.display()
+        );
+        process::exit(1);
+    }
+    match fs::copy(&bak_path, &abs_target) {
+        Ok(bytes) => {
+            println!(
+                "✅ Successfully restored '{}' from atomic backup '{}' ({} bytes restored).",
+                abs_target.display(),
+                bak_path.display(),
+                bytes
+            );
+        }
+        Err(e) => {
+            eprintln!("Error: Failed to restore backup: {}", e);
+            process::exit(1);
+        }
+    }
+}
+
+fn handle_doctor() {
+    println!("🩺 Antigravity /shake Diagnostic Doctor");
+    println!("--------------------------------------------------");
+    println!("Version: shake-prune {}", VERSION);
+    if let Ok(exe_path) = env::current_exe() {
+        println!("Binary Path: {}", exe_path.display());
+    }
+
+    let home = env::var("HOME")
+        .or_else(|_| env::var("USERPROFILE"))
+        .unwrap_or_default();
+    if home.is_empty() {
+        println!("❌ HOME / USERPROFILE environment variable is NOT set.");
+    } else {
+        let gemini_dir = Path::new(&home).join(".gemini");
+        if gemini_dir.exists() {
+            println!("✅ Storage Root: {} (Accessible)", gemini_dir.display());
+            let hooks_file = gemini_dir.join("config/hooks.json");
+            if hooks_file.exists() {
+                if let Ok(content) = fs::read_to_string(&hooks_file) {
+                    if content.contains("shake-prune") {
+                        println!("✅ Auto-Hook Registration: Active in hooks.json");
+                    } else {
+                        println!("⚠️ Auto-Hook Registration: hooks.json exists, but shake-prune hook is not registered.");
+                    }
+                }
+            } else {
+                println!(
+                    "⚠️ Auto-Hook Registration: hooks.json not found at {}",
+                    hooks_file.display()
+                );
+            }
+        } else {
+            println!(
+                "⚠️ Storage Root: {} does not exist yet.",
+                gemini_dir.display()
+            );
+        }
+    }
+    println!("--------------------------------------------------");
+    println!("Diagnostic check completed.");
+}
+
 mod hook;
 mod metadata;
 mod models;
@@ -242,6 +316,20 @@ fn main() {
         process::exit(0);
     }
 
+    if args[1] == "doctor" || args[1] == "--doctor" {
+        handle_doctor();
+        process::exit(0);
+    }
+
+    if args[1] == "restore" {
+        if args.len() < 3 {
+            eprintln!("Usage: shake-prune restore <path/to/transcript.jsonl>");
+            process::exit(1);
+        }
+        handle_restore(&PathBuf::from(&args[2]));
+        process::exit(0);
+    }
+
     let transcript_path = PathBuf::from(&args[1]);
     if let Err(err_msg) = validate_transcript_path(&transcript_path) {
         eprintln!("Security/Validation Error: {}", err_msg);
@@ -461,9 +549,18 @@ fn main() {
     println!("<summary>📋 Need to export or copy this session elsewhere?</summary>\n");
     println!("- **In-Chat Mention**: `@{}`", abs_str);
     println!("- **Copy to Project**: `cp {} ./`", quoted_path);
-    println!(
-        "- **Copy to Clipboard**: `xclip -sel clip < {} || wl-copy < {}`",
-        quoted_path, quoted_path
-    );
+    if cfg!(target_os = "windows") {
+        println!(
+            "- **Copy to Clipboard**: `powershell -c \"Get-Content {} | Set-Clipboard\"`",
+            quoted_path
+        );
+    } else if cfg!(target_os = "macos") {
+        println!("- **Copy to Clipboard**: `pbcopy < {}`", quoted_path);
+    } else {
+        println!(
+            "- **Copy to Clipboard**: `xclip -sel clip < {} || wl-copy < {}`",
+            quoted_path, quoted_path
+        );
+    }
     println!("</details>\n");
 }

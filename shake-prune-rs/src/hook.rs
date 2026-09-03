@@ -1,3 +1,34 @@
+fn log_diagnostic(msg: &str) {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default();
+    if home.is_empty() {
+        return;
+    }
+    let logs_dir = Path::new(&home).join(".gemini/logs");
+    let _ = fs::create_dir_all(&logs_dir);
+    let log_file = logs_dir.join("shake_hook.log");
+
+    if let Ok(meta) = fs::metadata(&log_file) {
+        if meta.len() > 1_000_000 {
+            let _ = fs::remove_file(&log_file);
+        }
+    }
+
+    if let Ok(mut f) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_file)
+    {
+        use std::io::Write;
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(f, "[{}] {}", ts, msg);
+    }
+}
+
 use crate::format_bytes;
 use crate::metadata::{write_active_anchor, write_artifact_metadata, AnchorFilePayload};
 use crate::pruner::{run_compaction_pipeline, CompactionOptions};
@@ -106,6 +137,7 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
         println!("{{}}");
         return Ok(());
     }
+    log_diagnostic("Hook triggered with PreInvocation payload");
 
     let payload: HookPayload = serde_json::from_str(&stdin_buffer).unwrap_or_default();
 
