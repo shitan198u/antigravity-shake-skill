@@ -1,4 +1,4 @@
-fn log_diagnostic(msg: &str) {
+fn log_with_level(level: &str, msg: &str) {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_default();
@@ -11,8 +11,12 @@ fn log_diagnostic(msg: &str) {
 
     if let Ok(meta) = fs::metadata(&log_file) {
         if meta.len() > 1_000_000 {
-            let rotated = logs_dir.join("shake_hook.log.1");
-            let _ = fs::rename(&log_file, &rotated);
+            // Rotate: .1 -> .2, current -> .1 (keeps two generations, P3-3).
+            let rotated1 = logs_dir.join("shake_hook.log.1");
+            let rotated2 = logs_dir.join("shake_hook.log.2");
+            let _ = fs::remove_file(&rotated2);
+            let _ = fs::rename(&rotated1, &rotated2);
+            let _ = fs::rename(&log_file, &rotated1);
         }
     }
 
@@ -26,12 +30,19 @@ fn log_diagnostic(msg: &str) {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let _ = writeln!(f, "[{}] {}", ts, msg);
+        let _ = writeln!(f, "[{}] [{}] {}", ts, level, msg);
     }
 }
 
+fn log_diagnostic(msg: &str) {
+    log_with_level("INFO", msg);
+}
+
 use crate::format_bytes;
-use crate::metadata::{write_active_anchor, write_artifact_metadata, AnchorFilePayload};
+use crate::metadata::{
+    is_circuit_open, record_compaction_failure, write_active_anchor, write_artifact_metadata,
+    AnchorFilePayload,
+};
 use crate::pruner::{run_compaction_pipeline, CompactionOptions};
 use chrono::Utc;
 use serde::Deserialize;
@@ -231,6 +242,21 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
             let file_size = meta.len();
             let now_ts = Utc::now().timestamp();
 
+            // Circuit breaker (P1-5): skip auto-shake while disabled.
+            if let Some(anchor) = &found_anchor {
+                if is_circuit_open(anchor, now_ts) {
+                    log_with_level(
+                        "WARN",
+                        &format!(
+                            "Auto-shake bypassed: circuit breaker open after {} consecutive failures",
+                            anchor.consecutive_failures.unwrap_or(0)
+                        ),
+                    );
+                    // Fall through to normal anchor injection below.
+                    return emit_anchor_or_empty(&found_anchor);
+                }
+            }
+
             // 1. Evaluate Cooldown & Growth Delta Guards first (O(1))
             let (cooldown_ok, growth_ok) = match &found_anchor {
                 Some(anchor) => {
@@ -247,29 +273,30 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
             let size_threshold_hit = file_size >= AUTO_SHAKE_TOKEN_THRESHOLD_BYTES;
 
             // 2. Short-circuit: only count tools if guards pass and size threshold has not already triggered
-            let should_auto_shake = if !guards_pass {
+            // P2-3: track WHICH threshold fired so messages/metrics are accurate.
+            let trigger_detail: Option<&str> = if !guards_pass {
                 if !cooldown_ok {
                     log_diagnostic("Auto-shake bypassed: cooldown active");
                 } else if !growth_ok {
                     log_diagnostic("Auto-shake bypassed: growth delta below threshold");
                 }
-                false
+                None
             } else if size_threshold_hit {
                 log_diagnostic("Auto-shake triggered: size threshold (>= 264 KB) hit");
-                true
+                Some("size")
             } else {
                 let unpruned_tools = count_unpruned_tools(t_path);
                 if unpruned_tools >= AUTO_SHAKE_TOOL_RUN_THRESHOLD {
                     log_diagnostic(
                         "Auto-shake triggered: unpruned tools burst threshold (>= 20 tools) hit",
                     );
-                    true
+                    Some("tools")
                 } else {
-                    false
+                    None
                 }
             };
 
-            if should_auto_shake {
+            if let Some(trigger) = trigger_detail {
                 let options = CompactionOptions {
                     recent_user_turns: 10,
                     recent_tools_cap: 20,
@@ -281,57 +308,116 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
                     dry_run: false,
                 };
 
-                if let Ok((_compacted_jsonl, pruned_md, stats, backup_file_str)) =
-                    run_compaction_pipeline(t_path, &options)
-                {
-                    let output_path = art_dir.join(&stats.suggested_filename);
-                    if let Ok(mut f) = File::create(&output_path) {
-                        let _ = f.write_all(pruned_md.as_bytes());
+                let auto_start = std::time::Instant::now();
+                match run_compaction_pipeline(t_path, &options) {
+                    Ok((_compacted_jsonl, pruned_md, mut stats, master_archive_str)) => {
+                        // Tag hook trigger detail for anchor metrics (P1-6).
+                        stats.trigger_detail = format!("auto-{}", trigger);
+                        let elapsed_ms = auto_start.elapsed().as_millis() as u64;
+                        log_with_level(
+                            "INFO",
+                            &format!(
+                                "Auto-shake complete trigger={} before={} after={} saved={:.1}% duration_ms={} archive={}",
+                                trigger,
+                                stats.this_run_before_bytes,
+                                stats.this_run_after_bytes,
+                                stats.this_run_savings_pct,
+                                elapsed_ms,
+                                master_archive_str,
+                            ),
+                        );
+                        let output_path = art_dir.join(&stats.suggested_filename);
+                        if let Ok(mut f) = File::create(&output_path) {
+                            let _ = f.write_all(pruned_md.as_bytes());
+                        }
+
+                        let trigger_label = if trigger == "size" {
+                            "Auto (80k Threshold)"
+                        } else {
+                            "Auto (Tool Burst)"
+                        };
+                        let summary_text = if trigger == "size" {
+                            format!(
+                                "Auto-compacted transcript at 80k token threshold for topic '{}'. Saved {:.1}% prompt payload ({} -> {}).",
+                                stats.topic_slug.replace('_', " "),
+                                stats.this_run_savings_pct,
+                                format_bytes(stats.this_run_before_bytes),
+                                format_bytes(stats.this_run_after_bytes)
+                            )
+                        } else {
+                            format!(
+                                "Auto-compacted transcript on unpruned tool burst (>= 20 tools) for topic '{}'. Saved {:.1}% prompt payload ({} -> {}).",
+                                stats.topic_slug.replace('_', " "),
+                                stats.this_run_savings_pct,
+                                format_bytes(stats.this_run_before_bytes),
+                                format_bytes(stats.this_run_after_bytes)
+                            )
+                        };
+                        let _ = write_artifact_metadata(&output_path, &summary_text);
+                        let _ = write_active_anchor(
+                            &output_path,
+                            &stats,
+                            trigger_label,
+                            &master_archive_str,
+                        );
+
+                        let ephemeral_msg = if trigger == "size" {
+                            format!(
+                                "[Context auto-compacted via /shake (exceeded 80k token threshold). Active state anchored in @{} (Step {}+). Treat prior raw tool stdout as archived.]",
+                                output_path.display(),
+                                stats.user_turns + stats.assistant_turns + stats.pruned_tools
+                            )
+                        } else {
+                            format!(
+                                "[Context auto-compacted via /shake (unpruned tool burst >= 20). Active state anchored in @{} (Step {}+). Treat prior raw tool stdout as archived.]",
+                                output_path.display(),
+                                stats.user_turns + stats.assistant_turns + stats.pruned_tools
+                            )
+                        };
+
+                        let response = json!({
+                            "injectSteps": [
+                                {
+                                    "ephemeralMessage": ephemeral_msg
+                                }
+                            ]
+                        });
+
+                        println!("{}", serde_json::to_string(&response)?);
+                        return Ok(());
                     }
-
-                    let summary_text = format!(
-                            "Auto-compacted transcript at 80k token threshold for topic '{}'. Saved {:.1}% prompt payload ({} -> {}).",
-                            stats.topic_slug.replace('_', " "),
-                            stats.this_run_savings_pct,
-                            format_bytes(stats.this_run_before_bytes),
-                            format_bytes(stats.this_run_after_bytes)
+                    Err(e) => {
+                        let elapsed_ms = auto_start.elapsed().as_millis() as u64;
+                        log_with_level(
+                            "ERROR",
+                            &format!(
+                                "Auto-shake failed trigger={} duration_ms={} error={}",
+                                trigger, elapsed_ms, e
+                            ),
                         );
-                    let _ = write_artifact_metadata(&output_path, &summary_text);
-                    let _ = write_active_anchor(
-                        &output_path,
-                        &stats,
-                        "Auto (80k Threshold)",
-                        &backup_file_str,
-                    );
-
-                    let ephemeral_msg = format!(
-                            "[Context auto-compacted via /shake (exceeded 80k token threshold). Active state anchored in @{} (Step {}+). Treat prior raw tool stdout as archived.]",
-                            output_path.display(),
-                            stats.user_turns + stats.assistant_turns + stats.pruned_tools
-                        );
-
-                    let response = json!({
-                        "injectSteps": [
-                            {
-                                "ephemeralMessage": ephemeral_msg
-                            }
-                        ]
-                    });
-
-                    println!("{}", serde_json::to_string(&response)?);
-                    return Ok(());
+                        // Record failure for circuit breaker (P1-5 / P1-6).
+                        let anchor_path = art_dir.join("active_shake_anchor.json");
+                        record_compaction_failure(&anchor_path, &e.to_string());
+                    }
                 }
             }
         }
     }
 
     // Normal anchor message injection if under threshold or already compacted
+    emit_anchor_or_empty(&found_anchor)
+}
+
+/// Shared tail: emit stored anchor notice or fail-open `{}`.
+fn emit_anchor_or_empty(
+    found_anchor: &Option<AnchorFilePayload>,
+) -> Result<(), Box<dyn std::error::Error>> {
     match found_anchor {
         Some(anchor) => {
-            let shaken_file = anchor.shaken_file.unwrap_or_default();
-            let anchored_step = match anchor.anchored_at_step {
+            let shaken_file = anchor.shaken_file.clone().unwrap_or_default();
+            let anchored_step = match &anchor.anchored_at_step {
                 Some(serde_json::Value::Number(n)) => n.to_string(),
-                Some(serde_json::Value::String(s)) => s,
+                Some(serde_json::Value::String(s)) => s.clone(),
                 _ => "recent".to_string(),
             };
 

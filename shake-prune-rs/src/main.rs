@@ -43,17 +43,49 @@ fn handle_restore(target: &Path) {
     }
 }
 
-fn handle_doctor() {
-    println!("🩺 Antigravity /shake Diagnostic Doctor");
-    println!("--------------------------------------------------");
-    println!("Version: shake-prune {}", VERSION);
-    if let Ok(exe_path) = env::current_exe() {
-        println!("Binary Path: {}", exe_path.display());
-    }
-
+fn handle_doctor(json_output: bool) {
     let home = env::var("HOME")
         .or_else(|_| env::var("USERPROFILE"))
         .unwrap_or_default();
+    let exe_path = env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    let (gemini_exists, hook_active, hooks_path) = if home.is_empty() {
+        (false, false, String::new())
+    } else {
+        let gemini_dir = Path::new(&home).join(".gemini");
+        let hooks_file = gemini_dir.join("config/hooks.json");
+        let mut active = false;
+        if hooks_file.exists() {
+            if let Ok(content) = fs::read_to_string(&hooks_file) {
+                active = content.contains("shake-prune");
+            }
+        }
+        (
+            gemini_dir.exists(),
+            active,
+            hooks_file.display().to_string(),
+        )
+    };
+
+    if json_output {
+        let val = serde_json::json!({
+            "version": VERSION,
+            "binary_path": exe_path,
+            "home_set": !home.is_empty(),
+            "storage_root_exists": gemini_exists,
+            "hook_registered": hook_active,
+            "hooks_config": hooks_path,
+        });
+        println!("{}", val);
+        return;
+    }
+
+    println!("🩺 Antigravity /shake Diagnostic Doctor");
+    println!("--------------------------------------------------");
+    println!("Version: shake-prune {}", VERSION);
+    println!("Binary Path: {}", exe_path);
+
     if home.is_empty() {
         println!("❌ HOME / USERPROFILE environment variable is NOT set.");
     } else {
@@ -135,7 +167,8 @@ fn main() {
     }
 
     if args[1] == "doctor" || args[1] == "--doctor" {
-        handle_doctor();
+        let json_flag = args.iter().any(|a| a == "--json");
+        handle_doctor(json_flag);
         process::exit(0);
     }
 
@@ -295,6 +328,8 @@ fn main() {
             "suggested_filename": stats.suggested_filename,
             "master_archive": master_archive_abs_str,
             "output_path": abs_output_path.display().to_string(),
+            "duration_ms": stats.duration_ms,
+            "trigger_detail": stats.trigger_detail,
         });
         println!("{}", json_val);
         return;

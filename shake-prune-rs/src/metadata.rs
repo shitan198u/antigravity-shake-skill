@@ -21,6 +21,44 @@ pub struct AnchorFilePayload {
     pub timestamp: Option<String>,
     #[serde(default)]
     pub compaction_history: Vec<CompactionEvent>,
+    /// Consecutive auto-compaction failures (circuit breaker, P1-5).
+    #[serde(default)]
+    pub consecutive_failures: Option<u32>,
+    /// Unix timestamp until which auto-shake is disabled after repeated failures.
+    #[serde(default)]
+    pub circuit_disabled_until: Option<i64>,
+    /// Last failure message for diagnostics.
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+/// Parse `transcript.jsonl.bak_YYYYMMDD_HHMMSS` suffix into
+/// `(iso_8601, display_HH:MM:SS)`. Falls back to raw suffix on parse failure.
+fn parse_legacy_backup_timestamp(ts_part: &str) -> (String, String) {
+    if ts_part.len() >= 15
+        && ts_part.as_bytes().get(8) == Some(&b'_')
+        && ts_part[..8].chars().all(|c| c.is_ascii_digit())
+        && ts_part[9..15].chars().all(|c| c.is_ascii_digit())
+    {
+        let (y, m, d) = (&ts_part[0..4], &ts_part[4..6], &ts_part[6..8]);
+        let (hh, mm, ss) = (&ts_part[9..11], &ts_part[11..13], &ts_part[13..15]);
+        return (
+            format!("{}-{}-{}T{}:{}:{}Z", y, m, d, hh, mm, ss),
+            format!("{}:{}:{}", hh, mm, ss),
+        );
+    }
+    // Fallback: preserve old HH:MM:SS slicing when possible.
+    let display = if ts_part.len() >= 15 {
+        format!(
+            "{}:{}:{}",
+            &ts_part[9..11],
+            &ts_part[11..13],
+            &ts_part[13..15]
+        )
+    } else {
+        ts_part.to_string()
+    };
+    (ts_part.to_string(), display)
 }
 
 pub fn load_or_discover_history(logs_dir: &Path, current_anchor: &Path) -> Vec<CompactionEvent> {
@@ -44,19 +82,10 @@ pub fn load_or_discover_history(logs_dir: &Path, current_anchor: &Path) -> Vec<C
                 let ts_part = name.trim_start_matches("transcript.jsonl.bak_");
                 let exists = history.iter().any(|h| h.backup_file.contains(ts_part));
                 if !exists {
-                    let display_time = if ts_part.len() >= 15 {
-                        format!(
-                            "{}:{}:{}",
-                            &ts_part[9..11],
-                            &ts_part[11..13],
-                            &ts_part[13..15]
-                        )
-                    } else {
-                        ts_part.to_string()
-                    };
+                    let (iso_time, display_time) = parse_legacy_backup_timestamp(ts_part);
                     let file_bytes = entry.metadata().map(|m| m.len() as usize).unwrap_or(0);
                     history.push(CompactionEvent {
-                        timestamp_iso: format!("2026-09-02T{}Z", display_time),
+                        timestamp_iso: iso_time,
                         timestamp_display: display_time,
                         trigger: "Checkpoint Snapshot".to_string(),
                         anchored_step: 0,
@@ -65,6 +94,8 @@ pub fn load_or_discover_history(logs_dir: &Path, current_anchor: &Path) -> Vec<C
                         reduction_pct: 0.0,
                         backup_file: path.to_string_lossy().to_string(),
                         artifact_file: "".to_string(),
+                        duration_ms: None,
+                        trigger_detail: Some("checkpoint".to_string()),
                     });
                 }
             }
@@ -107,7 +138,7 @@ pub fn write_active_anchor(
     markdown_path: &Path,
     stats: &PruningStats,
     trigger_type: &str,
-    backup_file_path: &str,
+    master_archive_path: &str,
 ) -> std::io::Result<()> {
     if let Some(parent_dir) = markdown_path.parent() {
         let anchor_path = parent_dir.join("active_shake_anchor.json");
@@ -119,6 +150,8 @@ pub fn write_active_anchor(
 
         let anchored_step = (stats.user_turns + stats.assistant_turns + stats.pruned_tools) as u64;
 
+        // `master_archive_path` is transcript_full.jsonl (permanent archive), not
+        // the ephemeral transcript.jsonl.bak crash fallback (P2-5 naming fix).
         let new_event = CompactionEvent {
             timestamp_iso: now_iso.clone(),
             timestamp_display: now_display,
@@ -127,8 +160,10 @@ pub fn write_active_anchor(
             bytes_before: stats.this_run_before_bytes,
             bytes_after: stats.this_run_after_bytes,
             reduction_pct: stats.this_run_savings_pct,
-            backup_file: backup_file_path.to_string(),
+            backup_file: master_archive_path.to_string(),
             artifact_file: markdown_path.to_string_lossy().to_string(),
+            duration_ms: Some(stats.duration_ms),
+            trigger_detail: Some(stats.trigger_detail.clone()),
         };
 
         history.push(new_event);
@@ -150,7 +185,10 @@ pub fn write_active_anchor(
             "raw_tokens": stats.raw_tokens,
             "pruned_tokens": stats.pruned_tokens,
             "timestamp": now_iso,
-            "compaction_history": history
+            "compaction_history": history,
+            "consecutive_failures": 0,
+            "circuit_disabled_until": 0,
+            "last_error": null,
         });
 
         let mut tmp_file = Builder::new()
@@ -163,4 +201,49 @@ pub fn write_active_anchor(
         tmp_file.persist(&anchor_path).map_err(|e| e.error)?;
     }
     Ok(())
+}
+
+/// Circuit breaker: auto-shake is disabled while `now < circuit_disabled_until`.
+pub fn is_circuit_open(anchor: &AnchorFilePayload, now_ts: i64) -> bool {
+    anchor.circuit_disabled_until.unwrap_or(0) > now_ts
+}
+
+/// Record an auto-compaction failure in the anchor file.
+///
+/// After 3 consecutive failures, disables auto-shake for 30 minutes (P1-5).
+/// Best-effort: never fails the hook.
+pub fn record_compaction_failure(anchor_path: &Path, err_msg: &str) {
+    let now = Utc::now().timestamp();
+    let mut payload = if anchor_path.exists() {
+        File::open(anchor_path)
+            .ok()
+            .and_then(|f| serde_json::from_reader::<_, AnchorFilePayload>(f).ok())
+            .unwrap_or_default()
+    } else {
+        AnchorFilePayload::default()
+    };
+    let failures = payload.consecutive_failures.unwrap_or(0).saturating_add(1);
+    payload.consecutive_failures = Some(failures);
+    payload.last_attempt_timestamp = Some(now);
+    payload.last_error = Some(err_msg.chars().take(500).collect());
+    if failures >= 3 {
+        // 30-minute backoff after 3 consecutive failures.
+        payload.circuit_disabled_until = Some(now + 1800);
+    }
+    if let Some(parent) = anchor_path.parent() {
+        let _ = fs::create_dir_all(parent);
+        if let Ok(mut tmp) = Builder::new().prefix(".shake_anchor_").tempfile_in(parent) {
+            if tmp
+                .write_all(
+                    serde_json::to_string_pretty(&payload)
+                        .unwrap_or_default()
+                        .as_bytes(),
+                )
+                .is_ok()
+            {
+                let _ = tmp.flush();
+                let _ = tmp.persist(anchor_path).map(|_| ());
+            }
+        }
+    }
 }

@@ -115,8 +115,8 @@ elif command -v cargo >/dev/null 2>&1 && [ -f "${SCRIPT_DIR}/shake-prune-rs/Carg
     cp "${SCRIPT_DIR}/shake-prune-rs/target/release/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}"
     chmod 755 "${INSTALL_DIR}/${BIN_NAME}"
 else
-    # Determine release URL (latest or pinned tag via SHAKE_VERSION)
-    SHAKE_VERSION="${SHAKE_VERSION:-latest}"
+    # Determine release URL (pinned tag via SHAKE_VERSION; explicit "latest" opts into floating)
+    SHAKE_VERSION="${SHAKE_VERSION:-v0.1.10}"
     if [ "${SHAKE_VERSION}" = "latest" ]; then
         BASE_RELEASE_URL="https://github.com/${REPO}/releases/latest/download"
     else

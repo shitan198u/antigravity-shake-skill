@@ -11,6 +11,12 @@ pub struct CompactionEvent {
     pub reduction_pct: f64,
     pub backup_file: String,
     pub artifact_file: String,
+    /// Wall-clock compaction duration in milliseconds (absent on pre-1.0 history entries).
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    /// Machine-readable trigger detail: "size" | "tools" | "manual" | "checkpoint".
+    #[serde(default)]
+    pub trigger_detail: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -35,4 +41,8 @@ pub struct PruningStats {
     pub topic_slug: String,
     pub suggested_filename: String,
     pub history_events: Vec<CompactionEvent>,
+    /// Wall-clock compaction duration in milliseconds.
+    pub duration_ms: u64,
+    /// Machine-readable trigger detail ("manual" for CLI; hook overrides in anchor).
+    pub trigger_detail: String,
 }

@@ -177,6 +177,59 @@ fn test_hook_corrupt_anchor_fails_open() {
 }
 
 #[test]
+fn test_hook_tool_burst_trigger_uses_tool_message() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = fake_home(&tmp);
+    let transcript = trusted_transcript_path(&home, "conv_tool_burst");
+    // Under 264KB but >= 20 unpruned tools -> tools trigger, not size trigger.
+    let mut builder = TranscriptBuilder::new().user("autonomous loop task");
+    for _ in 0..25 {
+        builder = builder.tool_output("RUN_COMMAND", &"x".repeat(500), 0);
+    }
+    builder = builder.assistant("done");
+    builder.write(&transcript);
+
+    let payload = serde_json::json!({
+        "transcriptPath": transcript.to_string_lossy()
+    });
+
+    let mut child = Command::new(bin())
+        .arg("--hook")
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("injectSteps"),
+        "tool burst should trigger auto-compaction, got: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("tool burst"),
+        "tool-triggered message must name tool burst, not 80k threshold. Got: {}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("80k token threshold"),
+        "tool-triggered message must not claim size threshold. Got: {}",
+        stdout
+    );
+}
+
+#[test]
 fn test_hook_bounded_stdin_handles_oversized_payload() {
     // 256 KB of garbage data (exceeding 64 KB limit)
     let huge_payload = "x".repeat(256 * 1024);

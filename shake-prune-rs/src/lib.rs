@@ -1,7 +1,9 @@
+pub mod atomic;
 pub mod hook;
 pub mod metadata;
 pub mod models;
 pub mod pruner;
+pub mod receipts;
 pub mod slug;
 
 use std::env;

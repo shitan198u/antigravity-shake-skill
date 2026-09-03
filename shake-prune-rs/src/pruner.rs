@@ -1,12 +1,15 @@
+use crate::atomic::{commit_staged_in_place, stage_compacted_output};
 use crate::metadata::load_or_discover_history;
 use crate::models::{CompactionEvent, PruningStats};
+use crate::receipts::count_warnings;
 use crate::slug::{extract_conversation_id, generate_suggested_filename, generate_topic_slug};
 use fs2::FileExt;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
+use std::time::Instant;
 
 // Explicit pruning, truncation, and retention thresholds
 pub const SHORT_CMD_RETENTION_CHARS: usize = 250;
@@ -104,7 +107,105 @@ pub fn purge_legacy_timestamped_backups(logs_dir: &Path) {
 }
 
 /// Builds an O(1) step_index -> 1-indexed line number lookup map for `transcript_full.jsonl`.
+///
+/// Uses a sidecar index cache (`transcript_full.index.json`) keyed by file
+/// size + mtime so marathon archives are not fully re-parsed on every
+/// compaction (P1-4). Falls back to a full scan when the cache is missing,
+/// stale, or corrupt.
 pub fn index_master_full_transcript(full_transcript_path: &Path) -> HashMap<u64, usize> {
+    if let Some(cached) = load_cached_master_index(full_transcript_path) {
+        return cached;
+    }
+    let map = scan_master_full_transcript(full_transcript_path);
+    store_cached_master_index(full_transcript_path, &map);
+    map
+}
+
+fn master_index_cache_path(full_transcript_path: &Path) -> std::path::PathBuf {
+    let fname = full_transcript_path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    full_transcript_path.with_file_name(format!("{}.index.json", fname))
+}
+
+fn load_cached_master_index(full_transcript_path: &Path) -> Option<HashMap<u64, usize>> {
+    let meta = fs::metadata(full_transcript_path).ok()?;
+    let mtime = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    let cache_path = master_index_cache_path(full_transcript_path);
+    let raw = fs::read_to_string(&cache_path).ok()?;
+    let val: Value = serde_json::from_str(&raw).ok()?;
+    if val.get("size").and_then(|v| v.as_u64()) != Some(meta.len()) {
+        return None;
+    }
+    if val.get("mtime").and_then(|v| v.as_u64()) != Some(mtime) {
+        return None;
+    }
+    let entries = val.get("index")?.as_object()?;
+    let mut map = HashMap::with_capacity(entries.len());
+    for (k, v) in entries {
+        if let (Ok(step), Some(line)) = (k.parse::<u64>(), v.as_u64()) {
+            map.insert(step, line as usize);
+        }
+    }
+    Some(map)
+}
+
+fn store_cached_master_index(full_transcript_path: &Path, map: &HashMap<u64, usize>) {
+    let meta = match fs::metadata(full_transcript_path) {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // Bound cache size: marathon archives with >200k steps skip caching to
+    // avoid a multi-MB JSON sidecar on every run.
+    if map.len() > 200_000 {
+        return;
+    }
+    let index_obj: serde_json::Map<String, Value> = map
+        .iter()
+        .map(|(k, v)| (k.to_string(), Value::from(*v as u64)))
+        .collect();
+    let payload = serde_json::json!({
+        "size": meta.len(),
+        "mtime": mtime,
+        "index": index_obj,
+    });
+    let cache_path = master_index_cache_path(full_transcript_path);
+    if let Ok(tmp) = tempfile::Builder::new()
+        .prefix(".shake_index_")
+        .tempfile_in(
+            full_transcript_path
+                .parent()
+                .unwrap_or_else(|| Path::new(".")),
+        )
+    {
+        if tmp
+            .as_file()
+            .write_all(
+                serde_json::to_string(&payload)
+                    .unwrap_or_default()
+                    .as_bytes(),
+            )
+            .is_ok()
+        {
+            let _ = tmp.persist(&cache_path);
+        }
+    }
+}
+
+fn scan_master_full_transcript(full_transcript_path: &Path) -> HashMap<u64, usize> {
     let mut map = HashMap::new();
     if let Ok(file) = File::open(full_transcript_path) {
         let reader = BufReader::new(file);
@@ -296,6 +397,7 @@ pub fn run_compaction_pipeline(
     transcript_path: &Path,
     options: &CompactionOptions,
 ) -> Result<(String, String, PruningStats, String), Box<dyn std::error::Error>> {
+    let pipeline_start = Instant::now();
     if !transcript_path.exists() {
         return Err(format!(
             "Transcript file does not exist: {}",
@@ -740,9 +842,7 @@ pub fn run_compaction_pipeline(
                         pruned_tools_count += 1;
 
                         // Check for warnings in historical output to surface in receipt
-                        let warn_count = content_str.matches("warning:").count()
-                            + content_str.matches("Warning:").count()
-                            + content_str.matches("WARN").count();
+                        let warn_count = count_warnings(content_str);
                         let warn_tag = if warn_count > 0 {
                             format!(" warnings={}", warn_count)
                         } else {
@@ -798,51 +898,25 @@ pub fn run_compaction_pipeline(
     }
 
     if let Some(mut file) = file_opt {
-        file.set_len(0)?;
-        file.seek(SeekFrom::Start(0))?;
-        file.write_all(compacted_output.as_bytes())?;
-        file.flush()?;
-        file.sync_all()?;
-
-        // Post-write integrity verification: verify file size matches on-disk and all generated lines are valid JSON
-        let verify_res: Result<(), Box<dyn std::error::Error>> = (|| {
-            let written_len = file.metadata()?.len();
-            if written_len == 0 && !compacted_output.is_empty() {
-                return Err("Compacted file size on disk is unexpectedly 0 bytes".into());
+        // P0-3 near-atomic path: stage + verify BEFORE touching the original
+        // inode, then commit in place with verified rollback (P0-1 / P0-2).
+        // Any error below leaves `transcript.jsonl.bak` intact for restore.
+        let staged = stage_compacted_output(&abs_target, &compacted_output)?;
+        match commit_staged_in_place(
+            &mut file,
+            &abs_target,
+            &backup_latest,
+            &staged,
+            &generated_json_lines,
+        ) {
+            Ok(()) => {
+                let _ = file.unlock();
             }
-            if written_len != compacted_output.len() as u64 {
-                return Err(format!(
-                    "Physical written disk length ({} bytes) does not match expected length ({} bytes)",
-                    written_len,
-                    compacted_output.len()
-                ).into());
+            Err(e) => {
+                let _ = file.unlock();
+                return Err(e);
             }
-            for line in &generated_json_lines {
-                serde_json::from_str::<Value>(line)
-                    .map_err(|e| format!("Corrupt JSON line generated during compaction: {}", e))?;
-            }
-            Ok(())
-        })();
-
-        if let Err(err) = verify_res {
-            // AUTOMATIC ROLLBACK: Restore from backup_latest while still holding lock
-            eprintln!("CRITICAL ERROR: {}", err);
-            eprintln!("Initiating immediate rollback from atomic backup...");
-            let _ = file.set_len(0);
-            let _ = file.seek(SeekFrom::Start(0));
-            if let Ok(mut bak_f) = File::open(&backup_latest) {
-                let _ = std::io::copy(&mut bak_f, &mut file);
-                let _ = file.flush();
-                let _ = file.sync_all();
-            }
-            let _ = file.unlock();
-            return Err(format!(
-                "Critical: Post-compaction integrity verification failed ({}). Automatically rolled back from backup.",
-                err
-            ).into());
         }
-
-        file.unlock()?;
     }
 
     let topic_slug = generate_topic_slug(&first_user_prompt);
@@ -923,6 +997,18 @@ pub fn run_compaction_pipeline(
         0.0
     };
 
+    let duration_ms = pipeline_start
+        .elapsed()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64;
+    let trigger_detail = if options.marathon_horizon {
+        "full-marathon".to_string()
+    } else if options.thought_window_turns.is_some() {
+        "full-thought-window".to_string()
+    } else {
+        "manual".to_string()
+    };
+
     let stats = PruningStats {
         conv_id,
         raw_bytes,
@@ -944,6 +1030,8 @@ pub fn run_compaction_pipeline(
         topic_slug,
         suggested_filename,
         history_events,
+        duration_ms,
+        trigger_detail,
     };
 
     Ok((
