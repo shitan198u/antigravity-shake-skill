@@ -234,6 +234,10 @@ if os.path.exists(config_path):
     except Exception:
         data = {}
 
+# Remove legacy shake-anchor property if present
+if "shake-anchor" in data:
+    del data["shake-anchor"]
+
 if "hooks" not in data or not isinstance(data["hooks"], dict):
     data["hooks"] = {}
 
@@ -241,7 +245,11 @@ pre_inv = data["hooks"].get("PreInvocation", [])
 if not isinstance(pre_inv, list):
     pre_inv = []
 
-filtered = [h for h in pre_inv if isinstance(h, dict) and h.get("command") != hook_cmd]
+# Filter out any old or existing shake-prune command (matching jq behavior)
+filtered = [
+    h for h in pre_inv
+    if isinstance(h, dict) and not ("shake-prune" in str(h.get("command", "")))
+]
 filtered.append({"command": hook_cmd})
 data["hooks"]["PreInvocation"] = filtered
 

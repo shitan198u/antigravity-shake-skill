@@ -95,8 +95,14 @@ if (Test-Path (Join-Path $ScriptDir "bin\shake-prune.exe")) {
 }
 
 if (-not $InstalledBinary) {
-    $DownloadFile = "shake-prune-windows-x86_64.exe"
-    $Version = if ($env:SHAKE_VERSION) { $env:SHAKE_VERSION } else { "latest" }
+    $Arch = if ($env:PROCESSOR_ARCHITECTURE) { $env:PROCESSOR_ARCHITECTURE.ToLower() } else { "amd64" }
+    $DownloadFile = if ($Arch -eq "arm64") {
+        Write-Host "- Detected Windows ARM64 architecture (using Windows x64 binary via emulation)..."
+        "shake-prune-windows-x86_64.exe"
+    } else {
+        "shake-prune-windows-x86_64.exe"
+    }
+    $Version = if ($env:SHAKE_VERSION) { $env:SHAKE_VERSION } else { $DefaultTag }
     $BaseReleaseUrl = if ($Version -eq "latest") {
         "https://github.com/$Repo/releases/latest/download"
     } else {
@@ -121,8 +127,10 @@ if (-not $InstalledBinary) {
 
         $SumsLines = Get-Content $TempSums
         $ExpectedHash = ""
+        $EscapedFile = [regex]::Escape($DownloadFile)
+        $Pattern = "^([a-fA-F0-9]{64})\s+(\*)?" + $EscapedFile + "\s*$"
         foreach ($line in $SumsLines) {
-            if ($line -match "^([a-fA-F0-9]{64})\s+(\*)?$DownloadFile$") {
+            if ($line -match $Pattern) {
                 $ExpectedHash = $Matches[1].ToLower()
                 break
             }

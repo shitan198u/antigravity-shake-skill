@@ -72,9 +72,9 @@ Ensure the `PreInvocation` hook is configured in `<Global Config Directory>/hook
 
 Any modifications or custom builds of the pruner engine **MUST adhere to these non-negotiable rules**:
 1. **100% Verbatim Prompts & Dialogue**: Never use an LLM to summarize conversation turns. User requests and assistant replies must be preserved character-for-character.
-2. **Signal Preservation**: Retain all assistant explanations, code diffs, decisions, and non-zero exit error traces (`exit_code != 0`).
-3. **Thought Windowing (`/full-shake`)**: When `--full` is specified, retain scratchpad thoughts for the latest 20 turns while dropping older thoughts.
-4. **Active Working Window**: Retain the outputs of the last 6 tool execution steps to prevent broken momentum.
+2. **Signal Preservation**: Retain all assistant explanations, code diffs, decisions, and un-clamped error traces within the recent 30-call tool error window.
+3. **Thought Windowing (`/full-shake`)**: When `--full` is specified, retain scratchpad thoughts for the latest 20 turns while dropping older thoughts (Turn 1 Genesis thoughts are always preserved verbatim).
+4. **Active Working Window**: Retain the outputs of the last 10 user turns verbatim (capped at the last 20 tool executions, retaining raw traces for any errors in the last 30 tools, with a fallback 6-step window when user-turns=0) to prevent broken agent momentum.
 5. **Fail-Open Hook**: The `--hook` command must exit with code `0` and output `{}` upon any unexpected error so it never blocks the user's chat.
 6. **Untouched Full Stream**: Never prune `transcript_full.jsonl` on disk. It serves as the developer's permanent unpruned audit log.
 
