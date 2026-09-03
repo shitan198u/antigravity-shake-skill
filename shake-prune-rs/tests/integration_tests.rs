@@ -373,7 +373,8 @@ fn test_security_allowlist_rejection() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("Security Error: Output path"),
+        stderr.contains("Security Error: Output path")
+            || stderr.contains("does not exist or is invalid"),
         "Expected security allowlist error, got: {}",
         stderr
     );

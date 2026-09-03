@@ -108,6 +108,15 @@ pub fn validate_output_path_allowlist(
         }
     };
 
+    // Check sensitive system denylist upfront before canonicalization so
+    // paths like /etc or C:\Windows are rejected on all platforms (§4.1 / cross-OS parity).
+    if is_sensitive_system_path(target) || is_sensitive_system_path(&target_parent) {
+        return Err(format!(
+            "Security Error: Output path '{}' is located within a restricted sensitive system directory.",
+            target.display()
+        ));
+    }
+
     let canonical_target = target_parent.canonicalize().map_err(|_| {
         format!(
             "Output target directory does not exist or is invalid: {}",
@@ -115,7 +124,7 @@ pub fn validate_output_path_allowlist(
         )
     })?;
 
-    if is_sensitive_system_path(&canonical_target) || is_sensitive_system_path(target) {
+    if is_sensitive_system_path(&canonical_target) {
         return Err(format!(
             "Security Error: Output path '{}' is located within a restricted sensitive system directory.",
             target.display()
