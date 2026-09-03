@@ -663,9 +663,11 @@ fn test_marathon_thought_windowing_with_milestone_horizon() {
     // 2. Turn 1 Genesis prompt must exist
     assert!(compacted.contains("Marathon user turn 1"));
 
-    // 3. Ancient thoughts (e.g. Turn 1 thinking or early horizon thinking like Turn 12) must be pruned
-    assert!(!compacted.contains("\"Detailed thought scratchpad for turn 1\""), "Turn 1 thought should have been windowed out!");
-    assert!(!compacted.contains("\"Detailed thought scratchpad for turn 12\""), "Turn 12 thought should have been windowed out!");
+    // 3. Genesis Turn 1 thoughts MUST be preserved 100% verbatim
+    assert!(compacted.contains("\"Detailed thought scratchpad for turn 1\""), "Turn 1 Genesis thought must be preserved verbatim!");
+
+    // 4. Intermediate thoughts (e.g. Turn 12 in Milestone Horizon) should be windowed out
+    assert!(!compacted.contains("\"Detailed thought scratchpad for turn 12\""), "Intermediate Turn 12 thought should have been windowed out!");
 
     // 4. Recent thoughts in the last 20 assistant turns (e.g. Turn 25 to 35) MUST be preserved verbatim!
     for i in 25..=35 {
@@ -674,4 +676,48 @@ fn test_marathon_thought_windowing_with_milestone_horizon() {
             "Thought for recent marathon turn {} must be preserved!", i
         );
     }
+}
+
+#[test]
+fn test_permanent_master_archive_initialization() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let logs_dir = tmp_dir.path().join(".gemini/brain/test-init-full/.system_generated/logs");
+    fs::create_dir_all(&logs_dir).unwrap();
+    let transcript_path = logs_dir.join("transcript.jsonl");
+    let full_transcript_path = logs_dir.join("transcript_full.jsonl");
+
+    // Ensure transcript_full.jsonl does NOT exist
+    assert!(!full_transcript_path.exists());
+
+    // Create 12 steps
+    {
+        let mut f = File::create(&transcript_path).unwrap();
+        writeln!(f, "{}", json!({"step_index": 1, "type": "USER_INPUT", "content": "test init full"})).unwrap();
+        let large_cmd = format!("echo bloat {}
+", "x".repeat(300));
+        writeln!(f, "{}", json!({"step_index": 2, "type": "RUN_COMMAND", "status": "DONE", "exit_code": 0, "content": large_cmd})).unwrap();
+        for i in 3..=12 {
+            writeln!(f, "{}", json!({"step_index": i, "type": "PLANNER_RESPONSE", "content": format!("Reply {}", i)})).unwrap();
+        }
+    }
+
+    let bin = get_binary_path();
+    let output = std::process::Command::new(&bin)
+        .arg(&transcript_path)
+        .arg("--recent-user-turns")
+        .arg("0")
+        .output()
+        .expect("Failed to execute shake-prune");
+
+    assert!(output.status.success());
+    
+    // 1. transcript_full.jsonl MUST have been initialized automatically!
+    assert!(full_transcript_path.exists(), "Permanent master archive was not initialized!");
+    let full_content = fs::read_to_string(&full_transcript_path).unwrap();
+    assert!(full_content.contains("test init full"));
+
+    // 2. Receipts in compacted transcript MUST point to transcript_full.jsonl, NEVER .bak!
+    let compacted = fs::read_to_string(&transcript_path).unwrap();
+    assert!(compacted.contains("transcript_full.jsonl"), "Receipt should point to transcript_full.jsonl!");
+    assert!(!compacted.contains("transcript.jsonl.bak"), "Receipt should NEVER point to temporary .bak fallback!");
 }

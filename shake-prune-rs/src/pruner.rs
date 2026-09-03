@@ -262,11 +262,18 @@ pub fn run_compaction_pipeline(
     let abs_target = fs::canonicalize(transcript_path).unwrap_or_else(|_| transcript_path.to_path_buf());
     let logs_dir = abs_target.parent().unwrap_or_else(|| Path::new("."));
 
-    // Single master archive resolution:
-    // If transcript_full.jsonl exists, all receipts point permanently to it!
-    // Otherwise, fall back to transcript.jsonl.bak
     let full_transcript_path = logs_dir.join("transcript_full.jsonl");
     let backup_latest = abs_target.with_extension("jsonl.bak");
+
+    // Guarantee permanent master archive before destructive in-place pruning
+    if !full_transcript_path.exists() && !options.dry_run && options.in_place {
+        fs::copy(&abs_target, &full_transcript_path).map_err(|e| {
+            format!(
+                "Critical: Failed to initialize permanent master archive at {}: {}. Compaction aborted to protect data integrity.",
+                full_transcript_path.display(), e
+            )
+        })?;
+    }
 
     let (master_archive_abs_str, master_step_to_line) = if full_transcript_path.exists() {
         let step_map = index_master_full_transcript(&full_transcript_path);
@@ -276,15 +283,31 @@ pub fn run_compaction_pipeline(
             .to_string();
         (abs_str, Some(step_map))
     } else {
-        (backup_latest.to_string_lossy().to_string(), None)
+        // Fallback representation for dry-run before first in-place execution
+        (full_transcript_path.to_string_lossy().to_string(), None)
     };
 
     let file_opt = if !options.dry_run && options.in_place {
         let file = File::options().read(true).write(true).open(&abs_target)?;
         file.lock_exclusive()?;
 
-        // Create single atomic crash fallback while holding the exclusive lock
-        let _ = fs::copy(&abs_target, &backup_latest);
+        // Mandatory fail-closed crash fallback while holding the exclusive lock
+        fs::copy(&abs_target, &backup_latest).map_err(|e| {
+            format!(
+                "Critical: Failed to create atomic backup at {}: {}. Compaction aborted to prevent data loss.",
+                backup_latest.display(), e
+            )
+        })?;
+
+        // Verify backup byte size exactly matches before allowing any truncation
+        let orig_len = file.metadata()?.len();
+        let backup_len = fs::metadata(&backup_latest)?.len();
+        if orig_len != backup_len {
+            return Err(format!(
+                "Critical: Backup size mismatch (original {} bytes, backup {} bytes). Compaction aborted.",
+                orig_len, backup_len
+            ).into());
+        }
 
         // Purge legacy timestamped backups to reclaim disk space
         purge_legacy_timestamped_backups(logs_dir);
@@ -325,10 +348,11 @@ pub fn run_compaction_pipeline(
     // ⚡ MILESTONE HORIZON (For Marathon Threads > 30 User Turns)
     let mut effective_lines: Vec<(usize, String)> = Vec::with_capacity(lines_buffer.len());
     let mut is_milestone_horizon_active = false;
+    let mut genesis_end_idx = 0usize;
 
     if options.marathon_horizon && total_user_turns > 30 {
         is_milestone_horizon_active = true;
-        let genesis_end_idx = if user_turn_positions.len() > 1 {
+        genesis_end_idx = if user_turn_positions.len() > 1 {
             user_turn_positions[1].1
         } else {
             1
@@ -351,11 +375,12 @@ pub fn run_compaction_pipeline(
             horizon_turn_idx, master_archive_abs_str
         );
         let milestone_step = serde_json::json!({
-            "step_index": 2,
             "source": "SYSTEM",
             "type": "PLANNER_RESPONSE",
             "status": "DONE",
-            "content": milestone_content
+            "content": milestone_content,
+            "is_milestone": true,
+            "synthetic": true
         });
         effective_lines.push((genesis_end_idx + 1, serde_json::to_string(&milestone_step)?));
 
@@ -501,7 +526,8 @@ pub fn run_compaction_pipeline(
                 let assistant_text = step_val.get("content").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
                 let thinking_text = step_val.get("thinking").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
 
-                let is_thought_retained = options.thought_window_turns.is_none() || assistant_count > thought_threshold;
+                let is_genesis = is_milestone_horizon_active && i < genesis_end_idx;
+                let is_thought_retained = is_genesis || options.thought_window_turns.is_none() || assistant_count > thought_threshold;
 
                 if !is_thought_retained {
                     if let Some(obj) = step_val.as_object_mut() {
@@ -633,6 +659,40 @@ pub fn run_compaction_pipeline(
         file.write_all(compacted_output.as_bytes())?;
         file.flush()?;
         file.sync_all()?;
+
+        // Post-write integrity verification: verify file size > 0 and every line is valid JSON
+        let verify_res: Result<(), Box<dyn std::error::Error>> = (|| {
+            let written_len = file.metadata()?.len();
+            if written_len == 0 && !compacted_output.is_empty() {
+                return Err("Compacted file size on disk is unexpectedly 0 bytes".into());
+            }
+            for line in compacted_output.lines() {
+                if !line.trim().is_empty() {
+                    serde_json::from_str::<Value>(line)
+                        .map_err(|e| format!("Corrupt JSON line generated during compaction: {}", e))?;
+                }
+            }
+            Ok(())
+        })();
+
+        if let Err(err) = verify_res {
+            // AUTOMATIC ROLLBACK: Restore from backup_latest while still holding lock
+            eprintln!("CRITICAL ERROR: {}", err);
+            eprintln!("Initiating immediate rollback from atomic backup...");
+            let _ = file.set_len(0);
+            let _ = file.seek(SeekFrom::Start(0));
+            if let Ok(mut bak_f) = File::open(&backup_latest) {
+                let _ = std::io::copy(&mut bak_f, &mut file);
+                let _ = file.flush();
+                let _ = file.sync_all();
+            }
+            let _ = file.unlock();
+            return Err(format!(
+                "Critical: Post-compaction integrity verification failed ({}). Automatically rolled back from backup.",
+                err
+            ).into());
+        }
+
         file.unlock()?;
     }
 
