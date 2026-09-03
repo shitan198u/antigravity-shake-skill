@@ -620,3 +620,58 @@ fn test_ancient_error_pruned_after_30_tools() {
     // 2. Tool 25 (20 tools ago, within last 30) MUST be preserved 100% verbatim and unclamped
     assert!(compacted.contains("FULL_UNCLAMPED_COMPILER_STACK_TRACE_FOR_TOOL_25"), "Recent tool 25 error within last 30 tools must be preserved verbatim!");
 }
+
+#[test]
+fn test_marathon_thought_windowing_with_milestone_horizon() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let transcript_path = temp_dir.path().join("transcript.jsonl");
+
+    // Create 35 conversational turns (> 30 turns: activates Milestone Horizon)
+    // Each turn has user input + planner response with thinking
+    {
+        let mut f = File::create(&transcript_path).unwrap();
+        for i in 1..=35 {
+            writeln!(f, "{}", json!({
+                "step_index": i * 2 - 1,
+                "type": "USER_INPUT",
+                "content": format!("Marathon user turn {}", i)
+            })).unwrap();
+            writeln!(f, "{}", json!({
+                "step_index": i * 2,
+                "type": "PLANNER_RESPONSE",
+                "thinking": format!("Detailed thought scratchpad for turn {}", i),
+                "content": format!("Assistant answer for turn {}", i)
+            })).unwrap();
+        }
+    }
+
+    let bin = get_binary_path();
+    let output = std::process::Command::new(&bin)
+        .arg(&transcript_path)
+        .arg("--full")
+        .arg("--thought-window")
+        .arg("20")
+        .output()
+        .expect("Failed to execute shake-prune");
+
+    assert!(output.status.success());
+    let compacted = fs::read_to_string(&transcript_path).unwrap();
+
+    // 1. Milestone Horizon must have synthesized
+    assert!(compacted.contains("Historical Milestone Horizon"), "Milestone block missing!");
+
+    // 2. Turn 1 Genesis prompt must exist
+    assert!(compacted.contains("Marathon user turn 1"));
+
+    // 3. Ancient thoughts (e.g. Turn 1 thinking or early horizon thinking like Turn 12) must be pruned
+    assert!(!compacted.contains("\"Detailed thought scratchpad for turn 1\""), "Turn 1 thought should have been windowed out!");
+    assert!(!compacted.contains("\"Detailed thought scratchpad for turn 12\""), "Turn 12 thought should have been windowed out!");
+
+    // 4. Recent thoughts in the last 20 assistant turns (e.g. Turn 25 to 35) MUST be preserved verbatim!
+    for i in 25..=35 {
+        assert!(
+            compacted.contains(&format!("Detailed thought scratchpad for turn {}", i)),
+            "Thought for recent marathon turn {} must be preserved!", i
+        );
+    }
+}

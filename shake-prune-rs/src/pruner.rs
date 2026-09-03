@@ -300,7 +300,6 @@ pub fn run_compaction_pipeline(
 
     let mut lines_buffer: Vec<(usize, String)> = Vec::new();
     let mut raw_bytes = 0usize;
-    let mut total_assistant_turns = 0usize;
     let mut user_turn_positions: Vec<(usize, usize)> = Vec::new();
 
     for (line_idx, line) in reader.lines().enumerate() {
@@ -314,9 +313,7 @@ pub fn run_compaction_pipeline(
 
         if let Ok(val) = serde_json::from_str::<Value>(&line_str) {
             let t = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            if t == "PLANNER_RESPONSE" {
-                total_assistant_turns += 1;
-            } else if t == "USER_INPUT" {
+            if t == "USER_INPUT" {
                 user_turn_positions.push((user_turn_positions.len() + 1, buf_idx));
             }
         }
@@ -370,16 +367,19 @@ pub fn run_compaction_pipeline(
         effective_lines = lines_buffer;
     }
 
-    // Re-index effective user turns, ephemeral positions, and tool step positions after milestone horizon
+    // Re-index effective user turns, assistant turns, ephemeral positions, and tool step positions after milestone horizon
     let mut effective_user_turn_indices: Vec<usize> = Vec::new();
     let mut effective_ephemeral_indices: Vec<usize> = Vec::new();
     let mut effective_tool_indices: Vec<usize> = Vec::new();
+    let mut effective_assistant_turns = 0usize;
 
     for (buf_idx, (_, line_str)) in effective_lines.iter().enumerate() {
         if let Ok(val) = serde_json::from_str::<Value>(line_str) {
             let t = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
             if t == "USER_INPUT" {
                 effective_user_turn_indices.push(buf_idx);
+            } else if t == "PLANNER_RESPONSE" {
+                effective_assistant_turns += 1;
             } else if t == "EPHEMERAL_MESSAGE" {
                 effective_ephemeral_indices.push(buf_idx);
             } else if matches!(t, "RUN_COMMAND" | "VIEW_FILE" | "SEARCH_WEB" | "GREP_SEARCH" | "CODE_ACTION") {
@@ -422,7 +422,7 @@ pub fn run_compaction_pipeline(
 
     let thought_threshold = options
         .thought_window_turns
-        .map(|w| total_assistant_turns.saturating_sub(w))
+        .map(|w| effective_assistant_turns.saturating_sub(w))
         .unwrap_or(0);
 
     let conv_id = extract_conversation_id(&abs_target.to_string_lossy());
@@ -646,7 +646,7 @@ pub fn run_compaction_pipeline(
     let mode_note = if is_milestone_horizon_active {
         "> - **Compaction Mode**: ⚡ Marathon Reset (/full-shake) (Turn 1 Genesis preserved; intermediate turns collapsed into Milestone Horizon; thoughts windowed; last 25 turns active).\n".to_string()
     } else if let Some(w) = options.thought_window_turns {
-        if total_assistant_turns > w {
+        if effective_assistant_turns > w {
             format!("> - **Compaction Mode**: ⚡ Full Deep Compaction (Scratchpad thoughts retained for last {} turns; older thoughts dropped).\n", w)
         } else {
             "> - **Compaction Mode**: 🟢 Standard Zero-Loss Compaction (All thoughts retained; session under 20 turns).\n".to_string()
