@@ -17,7 +17,9 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn print_usage() {
     println!("shake-prune {}", VERSION);
-    println!("High-performance in-place context compaction and tree-shaking for Google Antigravity\n");
+    println!(
+        "High-performance in-place context compaction and tree-shaking for Google Antigravity\n"
+    );
     println!("Usage: shake-prune <transcript.jsonl> [output_file_or_dir] [options]");
     println!("       shake-prune --hook");
     println!("       shake-prune --version\n");
@@ -31,7 +33,9 @@ fn print_usage() {
     println!("  --recent-user-turns N    Number of human conversational turns to keep 100% unpruned (default: 10)");
     println!("  --recent-window N        Fallback minimum steps to keep intact (default: 6)");
     println!("  --no-in-place            Disable physical in-place compaction of transcript.jsonl");
-    println!("  --dry-run                Simulate compaction and print report without modifying files");
+    println!(
+        "  --dry-run                Simulate compaction and print report without modifying files"
+    );
     println!("  --json                   Output report metrics as machine-readable JSON");
     println!("\nExamples:");
     println!("  shake-prune /path/to/transcript.jsonl");
@@ -55,8 +59,7 @@ pub fn is_sensitive_system_path(path: &Path) -> bool {
     let path_str = path.to_string_lossy().to_lowercase().replace('\\', "/");
 
     let unix_forbidden = [
-        "/etc", "/root", "/boot", "/dev", "/proc", "/sys",
-        "/usr", "/bin", "/sbin", "/var/log",
+        "/etc", "/root", "/boot", "/dev", "/proc", "/sys", "/usr", "/bin", "/sbin", "/var/log",
     ];
 
     for prefix in &unix_forbidden {
@@ -66,8 +69,11 @@ pub fn is_sensitive_system_path(path: &Path) -> bool {
     }
 
     let windows_forbidden = [
-        "c:/windows", "c:/program files", "c:/program files (x86)",
-        "c:/programdata", "c:/system volume information",
+        "c:/windows",
+        "c:/program files",
+        "c:/program files (x86)",
+        "c:/programdata",
+        "c:/system volume information",
     ];
 
     for prefix in &windows_forbidden {
@@ -83,14 +89,21 @@ pub fn is_sensitive_system_path(path: &Path) -> bool {
 /// and strictly prevents path traversal or sensitive system file modification.
 fn validate_transcript_path(path: &Path) -> Result<(), String> {
     if !path.exists() {
-        return Err(format!("Transcript file does not exist: {}", path.display()));
+        return Err(format!(
+            "Transcript file does not exist: {}",
+            path.display()
+        ));
     }
     if !path.is_file() {
         return Err(format!("Target is not a file: {}", path.display()));
     }
 
     let canonical = path.canonicalize().map_err(|e| {
-        format!("Failed to canonicalize transcript path '{}': {}", path.display(), e)
+        format!(
+            "Failed to canonicalize transcript path '{}': {}",
+            path.display(),
+            e
+        )
     })?;
 
     if is_sensitive_system_path(&canonical) || is_sensitive_system_path(path) {
@@ -121,18 +134,27 @@ fn validate_transcript_path(path: &Path) -> Result<(), String> {
 /// 1. The transcript's parent hierarchy (session brain folder: logs/, .system_generated/, and session root)
 /// 2. The active workspace directory (current_dir)
 /// 3. The user's system ~/.gemini directory
-fn validate_output_path_allowlist(target: &Path, transcript_path: &Path) -> Result<PathBuf, String> {
+fn validate_output_path_allowlist(
+    target: &Path,
+    transcript_path: &Path,
+) -> Result<PathBuf, String> {
     let target_parent = if target.is_dir() {
         target.to_path_buf()
     } else {
         match target.parent() {
             Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
-            _ => transcript_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf(),
+            _ => transcript_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf(),
         }
     };
 
     let canonical_target = target_parent.canonicalize().map_err(|_| {
-        format!("Output target directory does not exist or is invalid: {}", target_parent.display())
+        format!(
+            "Output target directory does not exist or is invalid: {}",
+            target_parent.display()
+        )
     })?;
 
     if is_sensitive_system_path(&canonical_target) || is_sensitive_system_path(target) {
@@ -189,7 +211,9 @@ fn validate_output_path_allowlist(target: &Path, transcript_path: &Path) -> Resu
         }
     }
 
-    let is_allowed = allowed_roots.iter().any(|root| canonical_target.starts_with(root));
+    let is_allowed = allowed_roots
+        .iter()
+        .any(|root| canonical_target.starts_with(root));
 
     if !is_allowed {
         return Err(format!(
@@ -265,7 +289,6 @@ fn main() {
                 options.thought_window_turns = Some(val);
             }
             i += 2;
-
         } else if args[i] == "--no-in-place" {
             options.in_place = false;
             i += 1;
@@ -294,7 +317,10 @@ fn main() {
         };
 
     // Determine output file path
-    let initial_output_path: PathBuf = if !raw_target.is_empty() && !Path::new(&raw_target).is_dir() && raw_target.ends_with(".md") {
+    let initial_output_path: PathBuf = if !raw_target.is_empty()
+        && !Path::new(&raw_target).is_dir()
+        && raw_target.ends_with(".md")
+    {
         PathBuf::from(&raw_target)
     } else if !raw_target.is_empty() && Path::new(&raw_target).is_dir() {
         Path::new(&raw_target).join(&stats.suggested_filename)
@@ -312,17 +338,24 @@ fn main() {
         PathBuf::from(&stats.suggested_filename)
     };
 
-    let abs_output_path = match validate_output_path_allowlist(&initial_output_path, &transcript_path) {
-        Ok(p) => p,
-        Err(err_msg) => {
-            eprintln!("{}", err_msg);
-            process::exit(1);
-        }
-    };
+    let abs_output_path =
+        match validate_output_path_allowlist(&initial_output_path, &transcript_path) {
+            Ok(p) => p,
+            Err(err_msg) => {
+                eprintln!("{}", err_msg);
+                process::exit(1);
+            }
+        };
 
     if !options.dry_run {
-        if let Err(e) = File::create(&abs_output_path).and_then(|mut f| f.write_all(pruned_markdown.as_bytes())) {
-            eprintln!("Failed to write output file '{}': {}", abs_output_path.display(), e);
+        if let Err(e) =
+            File::create(&abs_output_path).and_then(|mut f| f.write_all(pruned_markdown.as_bytes()))
+        {
+            eprintln!(
+                "Failed to write output file '{}': {}",
+                abs_output_path.display(),
+                e
+            );
             process::exit(1);
         }
 
@@ -355,14 +388,20 @@ fn main() {
 
     let abs_str = abs_output_path.display().to_string();
     let quoted_path = shell_quote(&abs_str);
-    let encoded_file_url = format!("file://{}", urlencoding::encode(&abs_str).replace("%2F", "/"));
+    let encoded_file_url = format!(
+        "file://{}",
+        urlencoding::encode(&abs_str).replace("%2F", "/")
+    );
     let before_fmt = format_bytes(stats.this_run_before_bytes);
     let after_fmt = format_bytes(stats.this_run_after_bytes);
     let cumulative_full_fmt = format_bytes(stats.cumulative_full_bytes);
     let tokens_saved = stats.raw_tokens.saturating_sub(stats.pruned_tokens);
 
     let logs_dir = transcript_path.parent().unwrap_or_else(|| Path::new("."));
-    let anchor_path = logs_dir.parent().unwrap_or_else(|| Path::new(".")).join("active_shake_anchor.json");
+    let anchor_path = logs_dir
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("active_shake_anchor.json");
     let all_history = load_or_discover_history(logs_dir, &anchor_path);
     let history_timeline_md = format_history_timeline(&all_history);
 
@@ -390,12 +429,19 @@ fn main() {
     println!("### 📊 Token Reduction & Storage Metrics\n");
     println!("| Metric Scope | Starting Size | Compacted Size | Net Reduction |");
     println!("| :--- | :---: | :---: | :---: |");
-    println!("| **This Compaction Pass (`transcript.jsonl`)** | `{}` | `{}` | **{:.1}% saved** |", before_fmt, after_fmt, stats.this_run_savings_pct);
+    println!(
+        "| **This Compaction Pass (`transcript.jsonl`)** | `{}` | `{}` | **{:.1}% saved** |",
+        before_fmt, after_fmt, stats.this_run_savings_pct
+    );
     println!("| **Cumulative Session Pruning (vs Full Stream)** | `{}` | `{}` | **{:.1}% pruned overall** |", cumulative_full_fmt, after_fmt, stats.cumulative_savings_pct);
-    println!("| **Exportable Summary Artifact (`.md`)** | — | `{}` | **~{} tokens saved** |\n", format_bytes(stats.pruned_bytes), tokens_saved);
+    println!(
+        "| **Exportable Summary Artifact (`.md`)** | — | `{}` | **~{} tokens saved** |\n",
+        format_bytes(stats.pruned_bytes),
+        tokens_saved
+    );
     println!("- **Preserved Core Signals**: {} User turns (100%) | {} Assistant turns (100%) | {} Error traces (100%)\n", stats.user_turns, stats.assistant_turns, stats.retained_errors);
     println!("- **Active Working Window**: Last **{} user conversational turns** (capped at last **{} tool runs**) kept 100% unpruned\n", options.recent_user_turns, options.recent_tools_cap);
-    
+
     if !options.dry_run && !backup_file_str.is_empty() {
         println!("> 💾 **In-Place JSONL Compaction**: `transcript.jsonl` was physically pruned on disk (Inode preserved, Single Master Archive active). Subsequent turns in **this exact window** now transmit the compact payload over the wire.\n");
     }
@@ -407,11 +453,17 @@ fn main() {
     println!("---\n");
     println!("### 🟢 In-Window Fresh Slate Active");
     println!("> **Ready to continue**: Your context memory is now physically pruned. Simply type your next prompt and press **Send** in this chat.\n");
-    println!("- **Interactive Artifact**: [📄 {}]({}) *(Click to preview in side pane)*\n", stats.suggested_filename, encoded_file_url);
+    println!(
+        "- **Interactive Artifact**: [📄 {}]({}) *(Click to preview in side pane)*\n",
+        stats.suggested_filename, encoded_file_url
+    );
     println!("<details>");
     println!("<summary>📋 Need to export or copy this session elsewhere?</summary>\n");
     println!("- **In-Chat Mention**: `@{}`", abs_str);
     println!("- **Copy to Project**: `cp {} ./`", quoted_path);
-    println!("- **Copy to Clipboard**: `xclip -sel clip < {} || wl-copy < {}`", quoted_path, quoted_path);
+    println!(
+        "- **Copy to Clipboard**: `xclip -sel clip < {} || wl-copy < {}`",
+        quoted_path, quoted_path
+    );
     println!("</details>\n");
 }

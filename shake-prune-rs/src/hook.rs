@@ -43,7 +43,10 @@ fn count_unpruned_tools(t_path: &Path) -> usize {
     for l in reader.lines().map_while(Result::ok) {
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(&l) {
             let t = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            if matches!(t, "RUN_COMMAND" | "VIEW_FILE" | "SEARCH_WEB" | "GREP_SEARCH" | "CODE_ACTION") {
+            if matches!(
+                t,
+                "RUN_COMMAND" | "VIEW_FILE" | "SEARCH_WEB" | "GREP_SEARCH" | "CODE_ACTION"
+            ) {
                 let content = val.get("content").and_then(|v| v.as_str()).unwrap_or("");
                 if !content.starts_with("[PRUNED tool=") {
                     count += 1;
@@ -66,7 +69,7 @@ fn is_trusted_storage_path(p: &Path) -> bool {
         Ok(c) => c,
         Err(_) => return false, // Fail closed if ~/.gemini does not exist or cannot be resolved
     };
-    
+
     let p_abs = if p.is_absolute() {
         p.to_path_buf()
     } else if let Ok(curr) = std::env::current_dir() {
@@ -105,7 +108,7 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let payload: HookPayload = serde_json::from_str(&stdin_buffer).unwrap_or_default();
-    
+
     let mut resolved_transcript: Option<PathBuf> = None;
     let mut resolved_art_dir: Option<PathBuf> = None;
 
@@ -125,7 +128,8 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
             let p = PathBuf::from(t_path);
             if p.exists() && is_trusted_storage_path(&p) {
                 resolved_transcript = Some(p.clone());
-                if let Some(conv_dir) = p.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) {
+                if let Some(conv_dir) = p.parent().and_then(|p| p.parent()).and_then(|p| p.parent())
+                {
                     if resolved_art_dir.is_none() && is_trusted_storage_path(conv_dir) {
                         resolved_art_dir = Some(conv_dir.to_path_buf());
                     }
@@ -201,7 +205,8 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
                     Some(anchor) => {
                         let last_bytes = anchor.last_compacted_bytes.unwrap_or(0);
                         let last_attempt = anchor.last_attempt_timestamp.unwrap_or(0);
-                        let cooldown_ok = (now_ts - last_attempt).abs() >= AUTO_SHAKE_COOLDOWN_SECONDS;
+                        let cooldown_ok =
+                            (now_ts - last_attempt).abs() >= AUTO_SHAKE_COOLDOWN_SECONDS;
                         let growth_ok = meta.len() > last_bytes + AUTO_SHAKE_GROWTH_DELTA_BYTES;
                         cooldown_ok && growth_ok
                     }
@@ -216,7 +221,7 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
                         recent_window_steps: 6,
                         thought_window_turns: None,
                         marathon_horizon: false,
-                                                in_place: true,
+                        in_place: true,
                         dry_run: false,
                     };
 
@@ -236,7 +241,12 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
                             format_bytes(stats.this_run_after_bytes)
                         );
                         let _ = write_artifact_metadata(&output_path, &summary_text);
-                        let _ = write_active_anchor(&output_path, &stats, "Auto (80k Threshold)", &backup_file_str);
+                        let _ = write_active_anchor(
+                            &output_path,
+                            &stats,
+                            "Auto (80k Threshold)",
+                            &backup_file_str,
+                        );
 
                         let ephemeral_msg = format!(
                             "[Context auto-compacted via /shake (exceeded 80k token threshold). Active state anchored in @{} (Step {}+). Treat prior raw tool stdout as archived.]",

@@ -19,10 +19,12 @@ pub fn generate_topic_slug(first_user_text: &str) -> String {
     let clean = re_non_alnum.replace_all(&clean, " ");
 
     let stop_words: HashSet<&'static str> = [
-        "please", "want", "also", "this", "that", "with", "from", "have", "need",
-        "make", "check", "the", "and", "for", "you", "are", "how", "what", "why",
-        "code", "file", "error", "output", "script", "test", "run", "help"
-    ].into_iter().collect();
+        "please", "want", "also", "this", "that", "with", "from", "have", "need", "make", "check",
+        "the", "and", "for", "you", "are", "how", "what", "why", "code", "file", "error", "output",
+        "script", "test", "run", "help",
+    ]
+    .into_iter()
+    .collect();
 
     let words: Vec<String> = clean
         .split_whitespace()
@@ -46,7 +48,9 @@ pub fn generate_suggested_filename(topic_slug: &str) -> String {
 pub fn extract_conversation_id(path_str: &str) -> String {
     let re = RE_CONV_ID.get_or_init(|| Regex::new(r"brain[/\\]([a-zA-Z0-9_-]+)[/\\]").unwrap());
     if let Some(caps) = re.captures(path_str) {
-        caps.get(1).map(|m| m.as_str().to_string()).unwrap_or_else(|| "unknown-session".to_string())
+        caps.get(1)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_else(|| "unknown-session".to_string())
     } else {
         "unknown-session".to_string()
     }

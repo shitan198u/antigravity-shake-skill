@@ -45,7 +45,12 @@ pub fn load_or_discover_history(logs_dir: &Path, current_anchor: &Path) -> Vec<C
                 let exists = history.iter().any(|h| h.backup_file.contains(ts_part));
                 if !exists {
                     let display_time = if ts_part.len() >= 15 {
-                        format!("{}:{}:{}", &ts_part[9..11], &ts_part[11..13], &ts_part[13..15])
+                        format!(
+                            "{}:{}:{}",
+                            &ts_part[9..11],
+                            &ts_part[11..13],
+                            &ts_part[13..15]
+                        )
                     } else {
                         ts_part.to_string()
                     };
@@ -72,7 +77,10 @@ pub fn load_or_discover_history(logs_dir: &Path, current_anchor: &Path) -> Vec<C
 
 pub fn write_artifact_metadata(markdown_path: &Path, summary: &str) -> std::io::Result<()> {
     let parent_dir = markdown_path.parent().unwrap_or_else(|| Path::new("."));
-    let filename_str = markdown_path.file_name().unwrap_or_default().to_string_lossy();
+    let filename_str = markdown_path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy();
     let meta_filename = format!("{}.metadata.json", filename_str);
     let meta_path = parent_dir.join(meta_filename);
     let now_iso = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
@@ -125,7 +133,8 @@ pub fn write_active_anchor(
 
         history.push(new_event);
 
-        let t_size = logs_dir.join("transcript.jsonl")
+        let t_size = logs_dir
+            .join("transcript.jsonl")
             .metadata()
             .map(|m| m.len())
             .unwrap_or(stats.this_run_after_bytes as u64);

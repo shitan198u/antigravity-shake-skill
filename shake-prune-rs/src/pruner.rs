@@ -12,11 +12,11 @@ use std::path::Path;
 #[derive(Debug, Clone)]
 pub struct CompactionOptions {
     pub recent_user_turns: usize, // Number of human conversational turns to keep unpruned (default: 10)
-    pub recent_tools_cap: usize, // Maximum recent tool outputs to keep unpruned (default: 20)
+    pub recent_tools_cap: usize,  // Maximum recent tool outputs to keep unpruned (default: 20)
     pub recent_errors_cap: usize, // Maximum recent tool calls to preserve raw errors (default: 30)
     pub recent_window_steps: usize, // Fallback step-level minimum (default: 6)
     pub thought_window_turns: Option<usize>, // Thought window (e.g. Some(20) for /full-shake)
-    pub marathon_horizon: bool, // Enable Milestone Horizon on marathon threads (>30 user turns)
+    pub marathon_horizon: bool,   // Enable Milestone Horizon on marathon threads (>30 user turns)
     pub in_place: bool,
     pub dry_run: bool,
 }
@@ -101,8 +101,14 @@ pub fn index_master_full_transcript(full_transcript_path: &Path) -> HashMap<u64,
             if let Ok(line_str) = line {
                 if let Ok(val) = serde_json::from_str::<Value>(&line_str) {
                     // Skip synthetic milestone records to prevent collision
-                    if val.get("synthetic").and_then(|v| v.as_bool()).unwrap_or(false)
-                        || val.get("is_milestone").and_then(|v| v.as_bool()).unwrap_or(false)
+                    if val
+                        .get("synthetic")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                        || val
+                            .get("is_milestone")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
                     {
                         continue;
                     }
@@ -129,7 +135,11 @@ fn compact_tool_call_args(
     match tool_name {
         "run_command" => {
             if let Some(cmd_val) = args_map.get("CommandLine").and_then(|v| v.as_str()) {
-                if !cmd_val.starts_with("[PRUNED") && (cmd_val.len() > 250 || cmd_val.contains("<< 'EOF'") || cmd_val.contains("<< 'END'")) {
+                if !cmd_val.starts_with("[PRUNED")
+                    && (cmd_val.len() > 250
+                        || cmd_val.contains("<< 'EOF'")
+                        || cmd_val.contains("<< 'END'"))
+                {
                     let first_line = cmd_val.lines().next().unwrap_or("run_command").trim();
                     let line_count = cmd_val.lines().count();
                     args_map.insert(
@@ -178,10 +188,15 @@ fn compact_tool_call_args(
             }
         }
         "multi_replace_file_content" => {
-            if let Some(chunks) = args_map.get_mut("ReplacementChunks").and_then(|v| v.as_array_mut()) {
+            if let Some(chunks) = args_map
+                .get_mut("ReplacementChunks")
+                .and_then(|v| v.as_array_mut())
+            {
                 for chunk in chunks {
                     if let Some(chunk_map) = chunk.as_object_mut() {
-                        if let Some(rc) = chunk_map.get("ReplacementContent").and_then(|v| v.as_str()) {
+                        if let Some(rc) =
+                            chunk_map.get("ReplacementContent").and_then(|v| v.as_str())
+                        {
                             if !rc.starts_with("[PRUNED") && rc.len() > 100 {
                                 chunk_map.insert(
                                     "ReplacementContent".to_string(),
@@ -194,7 +209,10 @@ fn compact_tool_call_args(
                         }
                         if let Some(tc) = chunk_map.get("TargetContent").and_then(|v| v.as_str()) {
                             if !tc.starts_with("[PRUNED") && tc.len() > 100 {
-                                chunk_map.insert("TargetContent".to_string(), Value::String("[Target chunk snippet]".to_string()));
+                                chunk_map.insert(
+                                    "TargetContent".to_string(),
+                                    Value::String("[Target chunk snippet]".to_string()),
+                                );
                             }
                         }
                     }
@@ -228,7 +246,10 @@ pub fn format_history_timeline(events: &[CompactionEvent]) -> String {
             "—".to_string()
         };
         let archive_link = if !ev.backup_file.is_empty() {
-            let enc_link = format!("file://{}", urlencoding::encode(&ev.backup_file).replace("%2F", "/"));
+            let enc_link = format!(
+                "file://{}",
+                urlencoding::encode(&ev.backup_file).replace("%2F", "/")
+            );
             format!("[📄 Archive #{}]({})", idx + 1, enc_link)
         } else {
             "—".to_string()
@@ -263,10 +284,15 @@ pub fn run_compaction_pipeline(
     options: &CompactionOptions,
 ) -> Result<(String, String, PruningStats, String), Box<dyn std::error::Error>> {
     if !transcript_path.exists() {
-        return Err(format!("Transcript file does not exist: {}", transcript_path.display()).into());
+        return Err(format!(
+            "Transcript file does not exist: {}",
+            transcript_path.display()
+        )
+        .into());
     }
 
-    let abs_target = fs::canonicalize(transcript_path).unwrap_or_else(|_| transcript_path.to_path_buf());
+    let abs_target =
+        fs::canonicalize(transcript_path).unwrap_or_else(|_| transcript_path.to_path_buf());
     let logs_dir = abs_target.parent().unwrap_or_else(|| Path::new("."));
 
     let full_transcript_path = logs_dir.join("transcript_full.jsonl");
@@ -414,7 +440,10 @@ pub fn run_compaction_pipeline(
                 effective_assistant_turns += 1;
             } else if t == "EPHEMERAL_MESSAGE" {
                 effective_ephemeral_indices.push(buf_idx);
-            } else if matches!(t, "RUN_COMMAND" | "VIEW_FILE" | "SEARCH_WEB" | "GREP_SEARCH" | "CODE_ACTION") {
+            } else if matches!(
+                t,
+                "RUN_COMMAND" | "VIEW_FILE" | "SEARCH_WEB" | "GREP_SEARCH" | "CODE_ACTION"
+            ) {
                 effective_tool_indices.push(buf_idx);
             }
         }
@@ -438,19 +467,22 @@ pub fn run_compaction_pipeline(
     };
 
     // Tool execution cap cutoff (Maximum recent tool outputs to keep unpruned)
-    let tool_cutoff_idx = if options.recent_tools_cap > 0 && effective_tool_indices.len() > options.recent_tools_cap {
+    let tool_cutoff_idx = if options.recent_tools_cap > 0
+        && effective_tool_indices.len() > options.recent_tools_cap
+    {
         effective_tool_indices[effective_tool_indices.len() - options.recent_tools_cap]
     } else {
         0
     };
 
     // Error retention cap cutoff (Maximum recent tool calls to preserve raw errors: default 30)
-    let error_cutoff_idx = if options.recent_errors_cap > 0 && effective_tool_indices.len() > options.recent_errors_cap {
+    let error_cutoff_idx = if options.recent_errors_cap > 0
+        && effective_tool_indices.len() > options.recent_errors_cap
+    {
         effective_tool_indices[effective_tool_indices.len() - options.recent_errors_cap]
     } else {
         0
     };
-
 
     let thought_threshold = options
         .thought_window_turns
@@ -484,15 +516,29 @@ pub fn run_compaction_pipeline(
                 compacted_output.push_str(&line_str);
                 compacted_output.push('\n');
                 let snippet = sanitize_markdown_snippet(&safe_truncate(&line_str, 500));
-                output_blocks.push(format!("> ⚠️ **[Unparsed Raw Log Line (Preserved)]**:\n```\n{}\n```\n", snippet));
+                output_blocks.push(format!(
+                    "> ⚠️ **[Unparsed Raw Log Line (Preserved)]**:\n```\n{}\n```\n",
+                    snippet
+                ));
                 continue;
             }
         };
 
-        let stype = step_val.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let status = step_val.get("status").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
+        let stype = step_val
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let status = step_val
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_lowercase();
         let exit_code = step_val.get("exit_code").and_then(|v| v.as_i64());
-        let step_idx = step_val.get("step_index").and_then(|v| v.as_u64()).unwrap_or(i as u64 + 1);
+        let step_idx = step_val
+            .get("step_index")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(i as u64 + 1);
 
         // Deduplicate EPHEMERAL_MESSAGE: only retain the latest one!
         if stype == "EPHEMERAL_MESSAGE" {
@@ -521,20 +567,38 @@ pub fn run_compaction_pipeline(
         match stype.as_str() {
             "USER_INPUT" => {
                 user_count += 1;
-                let raw_content = step_val.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                let raw_content = step_val
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let user_text = extract_user_request_text(raw_content);
                 if first_user_prompt.is_empty() {
                     first_user_prompt = user_text.to_string();
                 }
-                output_blocks.push(format!("### 👤 User (Turn {})\n\n{}\n", user_count, user_text));
+                output_blocks.push(format!(
+                    "### 👤 User (Turn {})\n\n{}\n",
+                    user_count, user_text
+                ));
             }
             "PLANNER_RESPONSE" => {
                 assistant_count += 1;
-                let assistant_text = step_val.get("content").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-                let thinking_text = step_val.get("thinking").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+                let assistant_text = step_val
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                let thinking_text = step_val
+                    .get("thinking")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
 
                 let is_genesis = is_milestone_horizon_active && i < genesis_end_idx;
-                let is_thought_retained = is_genesis || options.thought_window_turns.is_none() || assistant_count > thought_threshold;
+                let is_thought_retained = is_genesis
+                    || options.thought_window_turns.is_none()
+                    || assistant_count > thought_threshold;
 
                 if !is_thought_retained {
                     if let Some(obj) = step_val.as_object_mut() {
@@ -557,12 +621,25 @@ pub fn run_compaction_pipeline(
                     output_blocks.push(assistant_block);
                 }
 
-                if let Some(tool_calls) = step_val.get_mut("tool_calls").and_then(|v| v.as_array_mut()) {
+                if let Some(tool_calls) = step_val
+                    .get_mut("tool_calls")
+                    .and_then(|v| v.as_array_mut())
+                {
                     for tc in tool_calls.iter_mut() {
-                        let name = tc.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let name = tc
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         if let Some(args_map) = tc.get_mut("args").and_then(|v| v.as_object_mut()) {
                             if !is_recent_tool {
-                                compact_tool_call_args(&name, args_map, step_idx, &master_archive_abs_str, resolved_line_no);
+                                compact_tool_call_args(
+                                    &name,
+                                    args_map,
+                                    step_idx,
+                                    &master_archive_abs_str,
+                                    resolved_line_no,
+                                );
                             }
                             let mut arg_items = Vec::new();
                             for (k, v) in args_map.iter() {
@@ -570,7 +647,12 @@ pub fn run_compaction_pipeline(
                                     serde_json::Value::String(s) => s.replace('\n', " "),
                                     other => other.to_string().replace('\n', " "),
                                 };
-                                let v_formatted = if (k == "CodeContent" || k == "ReplacementContent" || k == "TargetContent" || k == "CommandLine") && v_str.contains("[PRUNED") {
+                                let v_formatted = if (k == "CodeContent"
+                                    || k == "ReplacementContent"
+                                    || k == "TargetContent"
+                                    || k == "CommandLine")
+                                    && v_str.contains("[PRUNED")
+                                {
                                     v_str
                                 } else if v_str.chars().count() > 120 {
                                     format!("{}... [truncated]", safe_truncate(&v_str, 120))
@@ -580,18 +662,27 @@ pub fn run_compaction_pipeline(
                                 arg_items.push(format!("{}={}", k, v_formatted));
                             }
                             let arg_summary = arg_items.join(", ");
-                            output_blocks.push(format!("- ⚙️ **Action Executed**: `{}({})`", name, arg_summary));
+                            output_blocks.push(format!(
+                                "- ⚙️ **Action Executed**: `{}({})`",
+                                name, arg_summary
+                            ));
                         }
                     }
                 }
             }
             "RUN_COMMAND" | "VIEW_FILE" | "SEARCH_WEB" | "GREP_SEARCH" | "CODE_ACTION" => {
-                let content_str = step_val.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                let content_str = step_val
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
 
                 if is_recent_tool {
                     retained_recent_steps += 1;
                     let snippet = sanitize_markdown_snippet(&safe_truncate(content_str, 1500));
-                    output_blocks.push(format!("> 🕒 **[Active Window Tool Output ({})]**:\n```\n{}\n```\n", stype, snippet));
+                    output_blocks.push(format!(
+                        "> 🕒 **[Active Window Tool Output ({})]**:\n```\n{}\n```\n",
+                        stype, snippet
+                    ));
                 } else if is_recent_error {
                     retained_errors_count += 1;
                     let snippet = sanitize_markdown_snippet(&safe_truncate(content_str, 1200));
@@ -606,7 +697,10 @@ pub fn run_compaction_pipeline(
                     } else if !is_error && content_str.trim().chars().count() < 250 {
                         retained_short_cmds += 1;
                         let safe_cmd = sanitize_markdown_snippet(content_str.trim());
-                        output_blocks.push(format!("> 📋 **[Command Output (exit 0)]**:\n```\n{}\n```\n", safe_cmd));
+                        output_blocks.push(format!(
+                            "> 📋 **[Command Output (exit 0)]**:\n```\n{}\n```\n",
+                            safe_cmd
+                        ));
                     } else {
                         let line_count = content_str.lines().count();
                         pruned_tools_count += 1;
@@ -675,8 +769,9 @@ pub fn run_compaction_pipeline(
             }
             for line in compacted_output.lines() {
                 if !line.trim().is_empty() {
-                    serde_json::from_str::<Value>(line)
-                        .map_err(|e| format!("Corrupt JSON line generated during compaction: {}", e))?;
+                    serde_json::from_str::<Value>(line).map_err(|e| {
+                        format!("Corrupt JSON line generated during compaction: {}", e)
+                    })?;
                 }
             }
             Ok(())
@@ -706,7 +801,10 @@ pub fn run_compaction_pipeline(
     let topic_slug = generate_topic_slug(&first_user_prompt);
     let suggested_filename = generate_suggested_filename(&topic_slug);
 
-    let anchor_path = logs_dir.parent().unwrap_or_else(|| Path::new(".")).join("active_shake_anchor.json");
+    let anchor_path = logs_dir
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("active_shake_anchor.json");
     let history_events = load_or_discover_history(logs_dir, &anchor_path);
     let timeline_section = format_history_timeline(&history_events);
 
@@ -719,7 +817,8 @@ pub fn run_compaction_pipeline(
             "> - **Compaction Mode**: 🟢 Standard Zero-Loss Compaction (All thoughts retained; session under 20 turns).\n".to_string()
         }
     } else {
-        "> - **Compaction Mode**: 🟢 Standard Zero-Loss Compaction (100% thoughts retained).\n".to_string()
+        "> - **Compaction Mode**: 🟢 Standard Zero-Loss Compaction (100% thoughts retained).\n"
+            .to_string()
     };
 
     let header = format!(
@@ -800,5 +899,10 @@ pub fn run_compaction_pipeline(
         history_events,
     };
 
-    Ok((compacted_output, full_document, stats, master_archive_abs_str))
+    Ok((
+        compacted_output,
+        full_document,
+        stats,
+        master_archive_abs_str,
+    ))
 }
