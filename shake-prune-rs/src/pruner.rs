@@ -7,7 +7,7 @@ use fs2::FileExt;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::Instant;
 
@@ -393,6 +393,18 @@ pub fn format_history_timeline(events: &[CompactionEvent]) -> String {
 /// 3. Purges all legacy redundant `.bak_*` files to eliminate disk bloat.
 /// 4. Maps receipts directly to `transcript_full.jsonl` (permanent zero dangling links).
 /// 5. Inode-safe truncate-and-rewrite with `fsync` commitment.
+// Copies bytes from an already open and locked file without opening secondary
+// file handles to the same path (avoiding Windows ERROR_LOCK_VIOLATION / os error 33).
+fn copy_from_locked_file(file: &mut File, dest_path: &Path) -> std::io::Result<u64> {
+    file.seek(SeekFrom::Start(0))?;
+    let mut dest = File::create(dest_path)?;
+    let bytes = std::io::copy(file, &mut dest)?;
+    dest.flush()?;
+    dest.sync_all()?;
+    file.seek(SeekFrom::Start(0))?;
+    Ok(bytes)
+}
+
 pub fn run_compaction_pipeline(
     transcript_path: &Path,
     options: &CompactionOptions,
@@ -413,34 +425,28 @@ pub fn run_compaction_pipeline(
     let full_transcript_path = logs_dir.join("transcript_full.jsonl");
     let backup_latest = abs_target.with_extension("jsonl.bak");
 
-    let file_opt = if !options.dry_run && options.in_place {
-        let file = File::options().read(true).write(true).open(&abs_target)?;
+    let mut file_opt = if !options.dry_run && options.in_place {
+        let mut file = File::options().read(true).write(true).open(&abs_target)?;
         file.lock_exclusive()?;
 
-        // Guarantee permanent master archive under exclusive lock before destructive in-place pruning
+        // Guarantee permanent master archive under exclusive lock before destructive in-place pruning.
+        // Copy directly from `file` handle to avoid Windows ERROR_LOCK_VIOLATION (os error 33).
         if !full_transcript_path.exists() {
-            fs::copy(&abs_target, &full_transcript_path).map_err(|e| {
+            copy_from_locked_file(&mut file, &full_transcript_path).map_err(|e| {
                 format!(
                     "Critical: Failed to initialize permanent master archive at {}: {}. Compaction aborted to protect data integrity.",
                     full_transcript_path.display(), e
                 )
             })?;
-            if let Ok(f) = File::open(&full_transcript_path) {
-                let _ = f.sync_all();
-            }
         }
 
-        // Mandatory fail-closed crash fallback while holding the exclusive lock
-        fs::copy(&abs_target, &backup_latest).map_err(|e| {
+        // Mandatory fail-closed crash fallback while holding the exclusive lock.
+        copy_from_locked_file(&mut file, &backup_latest).map_err(|e| {
             format!(
                 "Critical: Failed to create atomic backup at {}: {}. Compaction aborted to prevent data loss.",
                 backup_latest.display(), e
             )
         })?;
-
-        if let Ok(f) = File::open(&backup_latest) {
-            let _ = f.sync_all();
-        }
 
         // Verify backup byte size exactly matches before allowing any truncation
         let orig_len = file.metadata()?.len();
@@ -471,8 +477,15 @@ pub fn run_compaction_pipeline(
         (full_transcript_path.to_string_lossy().to_string(), None)
     };
 
-    // Read and buffer lines for the single pass
-    let file_for_reading = File::open(&abs_target)?;
+    // Read and buffer lines for the single pass. Clone existing locked handle
+    // to avoid secondary handle open on Windows while locked.
+    let file_for_reading = match &mut file_opt {
+        Some(f) => {
+            f.seek(SeekFrom::Start(0))?;
+            f.try_clone()?
+        }
+        None => File::open(&abs_target)?,
+    };
     let reader = BufReader::new(file_for_reading);
 
     let mut lines_buffer: Vec<(usize, String)> = Vec::new();
