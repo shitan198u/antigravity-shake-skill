@@ -125,7 +125,7 @@ pub fn index_master_full_transcript(full_transcript_path: &Path) -> HashMap<u64,
 
 /// Compacts large tool call arguments into structured receipts with FULL ABSOLUTE PATHS and 1-INDEXED LINE NUMBERS.
 /// Strictly idempotent: never double-wraps already-pruned receipts.
-fn compact_tool_call_args(
+pub fn compact_tool_call_args(
     tool_name: &str,
     args_map: &mut serde_json::Map<String, Value>,
     step_idx: u64,
@@ -556,7 +556,7 @@ pub fn run_compaction_pipeline(
         let is_error = exit_code.map(|c| c != 0).unwrap_or(false)
             || status.contains("error")
             || status.contains("failed");
-        let is_recent_error = is_error && (i >= error_cutoff_idx);
+        let is_recent_error = is_error && options.recent_errors_cap > 0 && (i >= error_cutoff_idx);
 
         // Exact line number in the master archive (transcript_full.jsonl or fallback backup)
         let resolved_line_no = master_step_to_line
@@ -715,9 +715,17 @@ pub fn run_compaction_pipeline(
                             String::new()
                         };
 
+                        let exit_str = if let Some(code) = exit_code {
+                            code.to_string()
+                        } else if is_error {
+                            "failed".to_string()
+                        } else {
+                            "0".to_string()
+                        };
+
                         let receipt = format!(
                             "[PRUNED tool=RUN_COMMAND step={} exit={}{} lines={} archive={} line={}]",
-                            step_idx, exit_code.unwrap_or(0), warn_tag, line_count, master_archive_abs_str, resolved_line_no
+                            step_idx, exit_str, warn_tag, line_count, master_archive_abs_str, resolved_line_no
                         );
                         step_val["content"] = serde_json::json!(receipt);
                         output_blocks.push(format!("> ℹ️ *{}*\n", receipt));

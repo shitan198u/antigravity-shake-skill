@@ -1,8 +1,10 @@
+mod support;
 use serde_json::json;
 use std::fs::{self, File};
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+use support::{bin, TranscriptBuilder};
 
 fn get_binary_path() -> std::path::PathBuf {
     let mut path = std::env::current_exe().unwrap();
@@ -1131,4 +1133,165 @@ fn test_doctor_subcommand() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Antigravity /shake Diagnostic Doctor"));
     assert!(stdout.contains("shake-prune"));
+}
+
+#[test]
+fn test_backup_failure_aborts_without_truncation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let transcript = tmp.path().join("transcript.jsonl");
+    TranscriptBuilder::new()
+        .user("Critical task")
+        .tool_output("RUN_COMMAND", &"x".repeat(1000), 0)
+        .assistant("Done")
+        .write(&transcript);
+
+    let original_content = fs::read_to_string(&transcript).unwrap();
+
+    // Force backup failure by creating transcript.jsonl.bak as a directory
+    let backup_dir = transcript.with_extension("jsonl.bak");
+    fs::create_dir_all(&backup_dir).unwrap();
+
+    let output = std::process::Command::new(bin())
+        .arg(&transcript)
+        .output()
+        .expect("Failed to run shake-prune");
+
+    assert!(
+        !output.status.success(),
+        "Compaction must abort if backup fails!"
+    );
+    let after_content = fs::read_to_string(&transcript).unwrap();
+    assert_eq!(
+        original_content, after_content,
+        "Transcript must remain completely unmodified when backup fails!"
+    );
+}
+
+#[test]
+fn test_archive_line_resolution_integrity() {
+    let tmp = tempfile::tempdir().unwrap();
+    let logs_dir = tmp
+        .path()
+        .join(".gemini/brain/test-line-integrity/.system_generated/logs");
+    fs::create_dir_all(&logs_dir).unwrap();
+    let transcript = logs_dir.join("transcript.jsonl");
+
+    let marker_tool_2 = "UNIQUE_VERIFIABLE_OUTPUT_MARKER_FOR_STEP_2";
+
+    TranscriptBuilder::new()
+        .user("Start task")
+        .tool_output(
+            "RUN_COMMAND",
+            &format!("{}\n{}", marker_tool_2, "x".repeat(300)),
+            0,
+        )
+        .assistant("Processed")
+        .user("Recent turn")
+        .tool_output("RUN_COMMAND", "recent output", 0)
+        .assistant("All done")
+        .write(&transcript);
+
+    let output = std::process::Command::new(bin())
+        .arg(&transcript)
+        .arg("--recent-user-turns")
+        .arg("1")
+        .output()
+        .expect("Failed to execute shake-prune");
+
+    assert!(output.status.success());
+    let compacted = fs::read_to_string(&transcript).unwrap();
+    let full_archive = logs_dir.join("transcript_full.jsonl");
+    assert!(full_archive.exists(), "Master archive must exist");
+    let full_archive_lines: Vec<String> = fs::read_to_string(&full_archive)
+        .unwrap()
+        .lines()
+        .map(|s| s.to_string())
+        .collect();
+
+    let re = regex::Regex::new(r"\[PRUNED tool=RUN_COMMAND step=2.*? line=(\d+)\]").unwrap();
+    let caps = re
+        .captures(&compacted)
+        .expect("Receipt for step 2 not found!");
+    let line_no: usize = caps.get(1).unwrap().as_str().parse().unwrap();
+
+    let target_line = &full_archive_lines[line_no - 1];
+    assert!(
+        target_line.contains(marker_tool_2),
+        "Line {} in master archive did not contain marker! Line content: {}",
+        line_no,
+        target_line
+    );
+}
+
+#[test]
+fn test_repeated_compaction_idempotency() {
+    let tmp = tempfile::tempdir().unwrap();
+    let logs_dir = tmp
+        .path()
+        .join(".gemini/brain/test-idempotency/.system_generated/logs");
+    fs::create_dir_all(&logs_dir).unwrap();
+    let transcript = logs_dir.join("transcript.jsonl");
+
+    TranscriptBuilder::new()
+        .user("First turn")
+        .tool_output("RUN_COMMAND", &"output bloat ".repeat(50), 0)
+        .assistant("Done 1")
+        .user("Second turn")
+        .tool_output("RUN_COMMAND", &"more bloat ".repeat(50), 0)
+        .assistant("Done 2")
+        .write(&transcript);
+
+    for run in 1..=3 {
+        let output = std::process::Command::new(bin())
+            .arg(&transcript)
+            .arg("--recent-user-turns")
+            .arg("0")
+            .output()
+            .expect("Failed to execute shake-prune");
+
+        assert!(output.status.success(), "Run {} failed!", run);
+    }
+
+    let final_content = fs::read_to_string(&transcript).unwrap();
+    assert!(
+        !final_content.contains("[PRUNED [PRUNED"),
+        "Receipts were nested/double-wrapped across multiple compactions!"
+    );
+}
+
+#[test]
+fn test_failed_tool_without_explicit_exit_code_receipt() {
+    let tmp = tempfile::tempdir().unwrap();
+    let transcript = tmp.path().join("transcript.jsonl");
+
+    TranscriptBuilder::new()
+        .user("Task")
+        .tool_output_with_status(
+            "RUN_COMMAND",
+            &"command error log ".repeat(20),
+            "ERROR",
+            None,
+        )
+        .assistant("Failed")
+        .user("Recent turn")
+        .assistant("Ok")
+        .write(&transcript);
+
+    let output = std::process::Command::new(bin())
+        .arg(&transcript)
+        .arg("--recent-user-turns")
+        .arg("1")
+        .arg("--errors-cap")
+        .arg("0")
+        .output()
+        .expect("Failed to execute shake-prune");
+
+    assert!(output.status.success());
+    let compacted = fs::read_to_string(&transcript).unwrap();
+    assert!(
+        compacted.contains("exit=failed"),
+        "Failed tool without explicit exit_code should emit exit=failed! Compacted was: {}",
+        compacted
+    );
+    assert!(!compacted.contains("exit=0"));
 }

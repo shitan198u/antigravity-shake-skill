@@ -1,4 +1,18 @@
-use std::fs;
+use std::env;
+use std::fs::{self, File};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process;
+
+use shake_prune::hook::handle_hook;
+use shake_prune::metadata::{write_active_anchor, write_artifact_metadata};
+
+use shake_prune::pruner::{
+    estimate_tokens, run_compaction_pipeline, shell_quote, CompactionOptions,
+};
+use shake_prune::{
+    format_bytes, validate_output_path_allowlist, validate_transcript_path, VERSION,
+};
 
 fn handle_restore(target: &Path) {
     let abs_target = match target.canonicalize() {
@@ -72,231 +86,35 @@ fn handle_doctor() {
     println!("Diagnostic check completed.");
 }
 
-mod hook;
-mod metadata;
-mod models;
-mod pruner;
-mod slug;
-
-use hook::handle_hook;
-use metadata::{load_or_discover_history, write_active_anchor, write_artifact_metadata};
-use pruner::{format_history_timeline, run_compaction_pipeline, shell_quote, CompactionOptions};
-use std::env;
-use std::fs::File;
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::process;
-
-const VERSION: &str = env!("CARGO_PKG_VERSION");
-
 fn print_usage() {
-    println!("shake-prune {}", VERSION);
     println!(
-        "High-performance in-place context compaction and tree-shaking for Google Antigravity\n"
+        r#"shake-prune {} - Deterministic In-Place Context Compactor for Antigravity
+
+USAGE:
+    shake-prune <transcript_path.jsonl> [output_path.md] [OPTIONS]
+    shake-prune --hook
+    shake-prune doctor
+    shake-prune restore <transcript_path.jsonl>
+
+ARGUMENTS:
+    <transcript_path.jsonl>  Path to active transcript.jsonl
+    [output_path.md]         Optional path for markdown summary artifact
+
+OPTIONS:
+    --recent-user-turns <N>  Number of recent user turns to retain unpruned (default: 10)
+    --tools-cap <N>          Maximum recent tool outputs to retain unpruned (default: 20)
+    --errors-cap <N>         Maximum recent tool calls to preserve raw errors (default: 30)
+    --recent-window <N>      Fallback raw tool step window if user-turns=0 (default: 6)
+    --full                   Full deep compaction (prunes thoughts older than window)
+    --thought-window <N>     Number of recent turns to retain thoughts in full mode (default: 20)
+    --dry-run                Simulate compaction without modifying transcript.jsonl
+    --no-in-place            Generate markdown summary artifact without truncating JSONL
+    --json                   Emit machine-readable JSON metrics on stdout
+    --help, -h               Show this help message
+    --version, -v            Show version
+"#,
+        VERSION
     );
-    println!("Usage: shake-prune <transcript.jsonl> [output_file_or_dir] [options]");
-    println!("       shake-prune --hook");
-    println!("       shake-prune --version\n");
-    println!("Options:");
-    println!("  -h, --help               Show this help message and exit");
-    println!("  -v, -V, --version        Print version information and exit");
-    println!("  --hook                   Run as Antigravity PreInvocation hook (reads stdin JSON)");
-    println!("  --full                   Enable full deep compaction (20-turn thoughts + Milestone Horizon on 30+ turn sessions)");
-    println!("  --horizon                Enable Milestone Horizon (preserves Turn 1 Genesis + last 25 turns, collapses middle)");
-    println!("  --thought-window N       Number of recent assistant turns to retain thoughts for (default: 20 with --full)");
-    println!("  --recent-user-turns N    Number of human conversational turns to keep 100% unpruned (default: 10)");
-    println!("  --recent-window N        Fallback minimum steps to keep intact (default: 6)");
-    println!("  --no-in-place            Disable physical in-place compaction of transcript.jsonl");
-    println!(
-        "  --dry-run                Simulate compaction and print report without modifying files"
-    );
-    println!("  --json                   Output report metrics as machine-readable JSON");
-    println!("\nExamples:");
-    println!("  shake-prune /path/to/transcript.jsonl");
-    println!("  shake-prune /path/to/transcript.jsonl --recent-user-turns 15");
-    println!("  shake-prune /path/to/transcript.jsonl --full");
-    println!("  shake-prune /path/to/transcript.jsonl --dry-run");
-}
-
-pub fn format_bytes(bytes: usize) -> String {
-    if bytes >= 1024 * 1024 {
-        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
-    } else if bytes >= 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{} B", bytes)
-    }
-}
-
-/// Checks if a path targets sensitive system directories on Unix or Windows
-pub fn is_sensitive_system_path(path: &Path) -> bool {
-    let path_str = path.to_string_lossy().to_lowercase().replace('\\', "/");
-
-    let unix_forbidden = [
-        "/etc", "/root", "/boot", "/dev", "/proc", "/sys", "/usr", "/bin", "/sbin", "/var/log",
-    ];
-
-    for prefix in &unix_forbidden {
-        if path_str == *prefix || path_str.starts_with(&format!("{}/", prefix)) {
-            return true;
-        }
-    }
-
-    let windows_forbidden = [
-        "c:/windows",
-        "c:/program files",
-        "c:/program files (x86)",
-        "c:/programdata",
-        "c:/system volume information",
-    ];
-
-    for prefix in &windows_forbidden {
-        if path_str == *prefix || path_str.starts_with(&format!("{}/", prefix)) {
-            return true;
-        }
-    }
-
-    false
-}
-
-/// Validates that the input path is a valid JSONL transcript file
-/// and strictly prevents path traversal or sensitive system file modification.
-fn validate_transcript_path(path: &Path) -> Result<(), String> {
-    if !path.exists() {
-        return Err(format!(
-            "Transcript file does not exist: {}",
-            path.display()
-        ));
-    }
-    if !path.is_file() {
-        return Err(format!("Target is not a file: {}", path.display()));
-    }
-
-    let canonical = path.canonicalize().map_err(|e| {
-        format!(
-            "Failed to canonicalize transcript path '{}': {}",
-            path.display(),
-            e
-        )
-    })?;
-
-    if is_sensitive_system_path(&canonical) || is_sensitive_system_path(path) {
-        return Err(format!(
-            "Security Error: Transcript path '{}' is located within a restricted sensitive system directory.",
-            path.display()
-        ));
-    }
-
-    let file_name = path
-        .file_name()
-        .map(|s| s.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-
-    // Strict suffix check: only .jsonl or exact .jsonl.bak permitted
-    if !file_name.ends_with(".jsonl") && !file_name.ends_with(".jsonl.bak") {
-        return Err(format!(
-            "Invalid file type: '{}'. /shake only operates on .jsonl or .jsonl.bak transcript log files.",
-            file_name
-        ));
-    }
-
-    Ok(())
-}
-
-/// Strict ALLOWLIST Validation:
-/// Ensures output files can ONLY be written within:
-/// 1. The transcript's parent hierarchy (session brain folder: logs/, .system_generated/, and session root)
-/// 2. The active workspace directory (current_dir)
-/// 3. The user's system ~/.gemini directory
-fn validate_output_path_allowlist(
-    target: &Path,
-    transcript_path: &Path,
-) -> Result<PathBuf, String> {
-    let target_parent = if target.is_dir() {
-        target.to_path_buf()
-    } else {
-        match target.parent() {
-            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
-            _ => transcript_path
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .to_path_buf(),
-        }
-    };
-
-    let canonical_target = target_parent.canonicalize().map_err(|_| {
-        format!(
-            "Output target directory does not exist or is invalid: {}",
-            target_parent.display()
-        )
-    })?;
-
-    if is_sensitive_system_path(&canonical_target) || is_sensitive_system_path(target) {
-        return Err(format!(
-            "Security Error: Output path '{}' is located within a restricted sensitive system directory.",
-            target.display()
-        ));
-    }
-
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_default();
-
-    let mut allowed_roots: Vec<PathBuf> = Vec::new();
-
-    let forbidden_parents = [
-        Path::new("/"),
-        Path::new("/tmp"),
-        Path::new("/var"),
-        Path::new("/var/tmp"),
-        Path::new("C:\\"),
-    ];
-
-    if let Some(t_parent) = transcript_path.parent() {
-        if let Ok(c) = t_parent.canonicalize() {
-            if !forbidden_parents.contains(&c.as_path()) {
-                allowed_roots.push(c.clone());
-            }
-            if let Some(c_parent) = c.parent() {
-                if !forbidden_parents.contains(&c_parent) {
-                    allowed_roots.push(c_parent.to_path_buf());
-                    if let Some(c_grand) = c_parent.parent() {
-                        if !forbidden_parents.contains(&c_grand) {
-                            allowed_roots.push(c_grand.to_path_buf());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if let Ok(curr) = env::current_dir().and_then(|p| p.canonicalize()) {
-        if !forbidden_parents.contains(&curr.as_path()) {
-            allowed_roots.push(curr);
-        }
-    }
-
-    if !home.is_empty() {
-        let gemini_dir = Path::new(&home).join(".gemini");
-        if let Ok(c) = gemini_dir.canonicalize() {
-            if !forbidden_parents.contains(&c.as_path()) {
-                allowed_roots.push(c);
-            }
-        }
-    }
-
-    let is_allowed = allowed_roots
-        .iter()
-        .any(|root| canonical_target.starts_with(root));
-
-    if !is_allowed {
-        return Err(format!(
-            "Security Error: Output path '{}' is outside allowed session, workspace, and ~/.gemini directories.",
-            target.display()
-        ));
-    }
-
-    Ok(canonical_target.join(target.file_name().unwrap_or_default()))
 }
 
 fn main() {
@@ -362,31 +180,27 @@ fn main() {
                 options.recent_errors_cap = val;
             }
             i += 2;
-        } else if args[i] == "--full" {
-            options.thought_window_turns = Some(20);
-            options.marathon_horizon = true;
-            i += 1;
-        } else if args[i] == "--horizon" {
-            options.marathon_horizon = true;
-            i += 1;
-        } else if args[i] == "--no-horizon" {
-            options.marathon_horizon = false;
-            i += 1;
         } else if args[i] == "--thought-window" && i + 1 < args.len() {
             if let Ok(val) = args[i + 1].parse::<usize>() {
                 options.thought_window_turns = Some(val);
             }
             i += 2;
-        } else if args[i] == "--no-in-place" {
-            options.in_place = false;
+        } else if args[i] == "--full" {
+            options.marathon_horizon = true;
+            if options.thought_window_turns.is_none() {
+                options.thought_window_turns = Some(20);
+            }
             i += 1;
         } else if args[i] == "--dry-run" {
             options.dry_run = true;
             i += 1;
+        } else if args[i] == "--no-in-place" {
+            options.in_place = false;
+            i += 1;
         } else if args[i] == "--json" {
             json_output = true;
             i += 1;
-        } else if raw_target.is_empty() && !args[i].starts_with("--") {
+        } else if !args[i].starts_with('-') && raw_target.is_empty() {
             raw_target = args[i].clone();
             i += 1;
         } else {
@@ -394,28 +208,21 @@ fn main() {
         }
     }
 
-    // Execute Unified Single-Pass Pipeline
-    let (_compacted_jsonl, pruned_markdown, stats, backup_file_str) =
+    let (_compacted_jsonl, pruned_markdown, stats, master_archive_abs_str) =
         match run_compaction_pipeline(&transcript_path, &options) {
             Ok(res) => res,
             Err(e) => {
-                eprintln!("Error during compaction pipeline: {}", e);
+                eprintln!("Error during compaction: {}", e);
                 process::exit(1);
             }
         };
 
-    // Determine output file path
-    let initial_output_path: PathBuf = if !raw_target.is_empty()
-        && !Path::new(&raw_target).is_dir()
-        && raw_target.ends_with(".md")
-    {
+    let initial_output_path = if !raw_target.is_empty() {
         PathBuf::from(&raw_target)
-    } else if !raw_target.is_empty() && Path::new(&raw_target).is_dir() {
-        Path::new(&raw_target).join(&stats.suggested_filename)
     } else if let Some(parent) = transcript_path.parent() {
-        if parent.file_name().map(|s| s == "logs").unwrap_or(false) {
-            if let Some(conv_dir) = parent.parent().and_then(|p| p.parent()) {
-                conv_dir.join(&stats.suggested_filename)
+        if parent.ends_with("logs") {
+            if let Some(grandparent) = parent.parent().and_then(|p| p.parent()) {
+                grandparent.join(&stats.suggested_filename)
             } else {
                 parent.join(&stats.suggested_filename)
             }
@@ -452,99 +259,84 @@ fn main() {
         } else {
             "Manual (/shake)"
         };
-
-        let summary_text = format!(
-            "Shaken & pruned verbatim history for topic '{}'. Saved {:.1}% context tokens ({} tokens vs {} raw). Preserved {} user prompts, all reasoning, thoughts, and last {} user conversational turns.",
-            stats.topic_slug.replace('_', " "),
-            stats.reduction_pct,
-            stats.pruned_tokens,
-            stats.raw_tokens,
-            stats.user_turns,
-            options.recent_user_turns
+        let _ = write_artifact_metadata(&abs_output_path, &stats.topic_slug);
+        let _ = write_active_anchor(
+            &abs_output_path,
+            &stats,
+            trigger_label,
+            &master_archive_abs_str,
         );
-
-        let _ = write_artifact_metadata(&abs_output_path, &summary_text);
-        let _ = write_active_anchor(&abs_output_path, &stats, trigger_label, &backup_file_str);
     }
 
     if json_output {
-        if let Ok(json_str) = serde_json::to_string_pretty(&stats) {
-            println!("{}", json_str);
-            process::exit(0);
-        }
+        let json_val = serde_json::json!({
+            "raw_bytes": stats.raw_bytes,
+            "this_run_before_bytes": stats.this_run_before_bytes,
+            "this_run_after_bytes": stats.this_run_after_bytes,
+            "this_run_savings_pct": stats.this_run_savings_pct,
+            "cumulative_full_bytes": stats.cumulative_full_bytes,
+            "cumulative_savings_pct": stats.cumulative_savings_pct,
+            "user_turns": stats.user_turns,
+            "assistant_turns": stats.assistant_turns,
+            "pruned_tools": stats.pruned_tools,
+            "retained_errors": stats.retained_errors,
+            "retained_short_cmds": stats.retained_short_cmds,
+            "retained_recent_steps": stats.retained_recent_steps,
+            "topic_slug": stats.topic_slug,
+            "suggested_filename": stats.suggested_filename,
+            "master_archive": master_archive_abs_str,
+            "output_path": abs_output_path.display().to_string(),
+        });
+        println!("{}", json_val);
+        return;
     }
 
-    let abs_str = abs_output_path.display().to_string();
+    let abs_str = abs_output_path.to_string_lossy().to_string();
     let quoted_path = shell_quote(&abs_str);
-    let encoded_file_url = format!(
-        "file://{}",
-        urlencoding::encode(&abs_str).replace("%2F", "/")
+
+    let est_prompt_tokens_before = estimate_tokens(stats.this_run_before_bytes);
+    let est_prompt_tokens_after = estimate_tokens(stats.this_run_after_bytes);
+
+    println!("\n# ⚡ Context Compaction Completed");
+    println!("> - **Session Topic**: `{}`", stats.topic_slug);
+    println!("> - **Working Window**: Preserved last {} user turns verbatim (capped at {} tool outputs, {} error retention).", options.recent_user_turns, options.recent_tools_cap, options.recent_errors_cap);
+    println!("> - **Master Archive**: `{}`", master_archive_abs_str);
+    println!("> - **Executive Summary**: `{}`\n", abs_str);
+
+    println!("| Metric | Pre-Shake | Shaken (Active Memory) | Savings |");
+    println!("| :--- | :--- | :--- | :--- |");
+    println!(
+        "| **Live Prompt Payload** | `{}` | **`{}`** | **`{:.1}%`** |",
+        format_bytes(stats.this_run_before_bytes),
+        format_bytes(stats.this_run_after_bytes),
+        stats.this_run_savings_pct
     );
-    let before_fmt = format_bytes(stats.this_run_before_bytes);
-    let after_fmt = format_bytes(stats.this_run_after_bytes);
-    let cumulative_full_fmt = format_bytes(stats.cumulative_full_bytes);
-    let tokens_saved = stats.raw_tokens.saturating_sub(stats.pruned_tokens);
+    println!(
+        "| **Estimated Prompt Tokens** | `~{}` | **`~{}`** | **`{:.1}%`** |",
+        est_prompt_tokens_before, est_prompt_tokens_after, stats.this_run_savings_pct
+    );
+    println!(
+        "| **Tool Outputs Compacted** | `{}` | `0` (compacted to receipts) | `-` |",
+        stats.pruned_tools
+    );
+    println!(
+        "| **Retained Errors (Un-Clamped)** | - | `{}` (full traces kept verbatim) | `-` |",
+        stats.retained_errors
+    );
+    println!(
+        "| **Active Working Tools** | - | `{}` (unpruned output kept verbatim) | `-` |\n",
+        stats.retained_recent_steps
+    );
 
-    let logs_dir = transcript_path.parent().unwrap_or_else(|| Path::new("."));
-    let anchor_path = logs_dir
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("active_shake_anchor.json");
-    let all_history = load_or_discover_history(logs_dir, &anchor_path);
-    let history_timeline_md = format_history_timeline(&all_history);
-
-    let mode_header = if options.dry_run {
-        "🔍 Dry Run (Simulation Only - No Files Modified)".to_string()
-    } else if let Some(w) = options.thought_window_turns {
-        if stats.assistant_turns > w {
-            format!("⚡ Full Deep Compaction (Last {} Thoughts Retained)", w)
-        } else {
-            "🟢 Standard Zero-Loss Compaction (All Thoughts Retained)".to_string()
-        }
-    } else {
-        "🟢 Standard Zero-Loss Compaction (100% Thoughts Retained)".to_string()
-    };
-
-    println!("\n# ⚡ Context Compaction & Tree-Shaking Report\n");
     if options.dry_run {
-        println!("> [!NOTE]\n> **Dry Run Active**: Simulated compaction metrics displayed below. No disk files were modified.\n");
+        println!(
+            "> ⚠️ **[Dry Run Active]**: No changes were written to `{}`.",
+            transcript_path.display()
+        );
     } else {
-        println!("Context for this session has been **physically compacted and anchored in this chat window**.");
-    }
-    println!("Mode: **{}**.\n", mode_header);
-    println!("All **User prompts, Assistant reasoning, Decisions, and Error signals are 100% preserved verbatim**.\n");
-    println!("---\n");
-    println!("### 📊 Token Reduction & Storage Metrics\n");
-    println!("| Metric Scope | Starting Size | Compacted Size | Net Reduction |");
-    println!("| :--- | :---: | :---: | :---: |");
-    println!(
-        "| **This Compaction Pass (`transcript.jsonl`)** | `{}` | `{}` | **{:.1}% saved** |",
-        before_fmt, after_fmt, stats.this_run_savings_pct
-    );
-    println!("| **Cumulative Session Pruning (vs Full Stream)** | `{}` | `{}` | **{:.1}% pruned overall** |", cumulative_full_fmt, after_fmt, stats.cumulative_savings_pct);
-    println!(
-        "| **Exportable Summary Artifact (`.md`)** | — | `{}` | **~{} tokens saved** |\n",
-        format_bytes(stats.pruned_bytes),
-        tokens_saved
-    );
-    println!("- **Preserved Core Signals**: {} User turns (100%) | {} Assistant turns (100%) | {} Error traces (100%)\n", stats.user_turns, stats.assistant_turns, stats.retained_errors);
-    println!("- **Active Working Window**: Last **{} user conversational turns** (capped at last **{} tool runs**) kept 100% unpruned\n", options.recent_user_turns, options.recent_tools_cap);
-
-    if !options.dry_run && !backup_file_str.is_empty() {
-        println!("> 💾 **In-Place JSONL Compaction**: `transcript.jsonl` was physically pruned on disk (Inode preserved, Single Master Archive active). Subsequent turns in **this exact window** now transmit the compact payload over the wire.\n");
+        println!("> 🔒 **Inode Preserved**: File rewritten in place. Open file descriptors remain valid.\n");
     }
 
-    if !history_timeline_md.is_empty() {
-        println!("{}", history_timeline_md);
-    }
-
-    println!("---\n");
-    println!("### 🟢 In-Window Fresh Slate Active");
-    println!("> **Ready to continue**: Your context memory is now physically pruned. Simply type your next prompt and press **Send** in this chat.\n");
-    println!(
-        "- **Interactive Artifact**: [📄 {}]({}) *(Click to preview in side pane)*\n",
-        stats.suggested_filename, encoded_file_url
-    );
     println!("<details>");
     println!("<summary>📋 Need to export or copy this session elsewhere?</summary>\n");
     println!("- **In-Chat Mention**: `@{}`", abs_str);
