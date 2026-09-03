@@ -298,31 +298,19 @@ pub fn run_compaction_pipeline(
     let full_transcript_path = logs_dir.join("transcript_full.jsonl");
     let backup_latest = abs_target.with_extension("jsonl.bak");
 
-    // Guarantee permanent master archive before destructive in-place pruning
-    if !full_transcript_path.exists() && !options.dry_run && options.in_place {
-        fs::copy(&abs_target, &full_transcript_path).map_err(|e| {
-            format!(
-                "Critical: Failed to initialize permanent master archive at {}: {}. Compaction aborted to protect data integrity.",
-                full_transcript_path.display(), e
-            )
-        })?;
-    }
-
-    let (master_archive_abs_str, master_step_to_line) = if full_transcript_path.exists() {
-        let step_map = index_master_full_transcript(&full_transcript_path);
-        let abs_str = fs::canonicalize(&full_transcript_path)
-            .unwrap_or(full_transcript_path.clone())
-            .to_string_lossy()
-            .to_string();
-        (abs_str, Some(step_map))
-    } else {
-        // Fallback representation for dry-run before first in-place execution
-        (full_transcript_path.to_string_lossy().to_string(), None)
-    };
-
     let file_opt = if !options.dry_run && options.in_place {
         let file = File::options().read(true).write(true).open(&abs_target)?;
         file.lock_exclusive()?;
+
+        // Guarantee permanent master archive under exclusive lock before destructive in-place pruning
+        if !full_transcript_path.exists() {
+            fs::copy(&abs_target, &full_transcript_path).map_err(|e| {
+                format!(
+                    "Critical: Failed to initialize permanent master archive at {}: {}. Compaction aborted to protect data integrity.",
+                    full_transcript_path.display(), e
+                )
+            })?;
+        }
 
         // Mandatory fail-closed crash fallback while holding the exclusive lock
         fs::copy(&abs_target, &backup_latest).map_err(|e| {
@@ -348,6 +336,17 @@ pub fn run_compaction_pipeline(
         Some(file)
     } else {
         None
+    };
+
+    let (master_archive_abs_str, master_step_to_line) = if full_transcript_path.exists() {
+        let step_map = index_master_full_transcript(&full_transcript_path);
+        let abs_str = fs::canonicalize(&full_transcript_path)
+            .unwrap_or(full_transcript_path.clone())
+            .to_string_lossy()
+            .to_string();
+        (abs_str, Some(step_map))
+    } else {
+        (full_transcript_path.to_string_lossy().to_string(), None)
     };
 
     // Read and buffer lines for the single pass
@@ -500,6 +499,7 @@ pub fn run_compaction_pipeline(
     // Processing buffers
     let mut compacted_output = String::with_capacity(raw_bytes / 2);
     let mut output_blocks = Vec::with_capacity(effective_total_steps);
+    let mut generated_json_lines: Vec<String> = Vec::with_capacity(effective_total_steps);
 
     let mut user_count = 0usize;
     let mut assistant_count = 0usize;
@@ -758,6 +758,7 @@ pub fn run_compaction_pipeline(
         }
 
         let compacted_line = serde_json::to_string(&step_val)?;
+        generated_json_lines.push(compacted_line.clone());
         compacted_output.push_str(&compacted_line);
         compacted_output.push('\n');
     }
@@ -769,18 +770,22 @@ pub fn run_compaction_pipeline(
         file.flush()?;
         file.sync_all()?;
 
-        // Post-write integrity verification: verify file size > 0 and every line is valid JSON
+        // Post-write integrity verification: verify file size matches on-disk and all generated lines are valid JSON
         let verify_res: Result<(), Box<dyn std::error::Error>> = (|| {
             let written_len = file.metadata()?.len();
             if written_len == 0 && !compacted_output.is_empty() {
                 return Err("Compacted file size on disk is unexpectedly 0 bytes".into());
             }
-            for line in compacted_output.lines() {
-                if !line.trim().is_empty() {
-                    serde_json::from_str::<Value>(line).map_err(|e| {
-                        format!("Corrupt JSON line generated during compaction: {}", e)
-                    })?;
-                }
+            if written_len != compacted_output.len() as u64 {
+                return Err(format!(
+                    "Physical written disk length ({} bytes) does not match expected length ({} bytes)",
+                    written_len,
+                    compacted_output.len()
+                ).into());
+            }
+            for line in &generated_json_lines {
+                serde_json::from_str::<Value>(line)
+                    .map_err(|e| format!("Corrupt JSON line generated during compaction: {}", e))?;
             }
             Ok(())
         })();

@@ -218,7 +218,16 @@ fn main() {
         };
 
     let initial_output_path = if !raw_target.is_empty() {
-        PathBuf::from(&raw_target)
+        let p = PathBuf::from(&raw_target);
+        if p.is_dir()
+            || raw_target.ends_with('/')
+            || raw_target.ends_with('\\')
+            || (!raw_target.ends_with(".md") && !raw_target.contains('.'))
+        {
+            p.join(&stats.suggested_filename)
+        } else {
+            p
+        }
     } else if let Some(parent) = transcript_path.parent() {
         if parent.ends_with("logs") {
             if let Some(grandparent) = parent.parent().and_then(|p| p.parent()) {

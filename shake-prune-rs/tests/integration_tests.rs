@@ -1295,3 +1295,119 @@ fn test_failed_tool_without_explicit_exit_code_receipt() {
     );
     assert!(!compacted.contains("exit=0"));
 }
+
+#[test]
+fn test_cli_output_when_second_arg_is_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let logs_dir = tmp
+        .path()
+        .join(".gemini/brain/test-dir-output/.system_generated/logs");
+    fs::create_dir_all(&logs_dir).unwrap();
+    let transcript = logs_dir.join("transcript.jsonl");
+
+    let artifact_dir = tmp.path().join(".gemini/brain/test-dir-output");
+
+    TranscriptBuilder::new()
+        .user("Test directory argument")
+        .tool_output("RUN_COMMAND", &"x".repeat(500), 0)
+        .assistant("Done")
+        .write(&transcript);
+
+    // Pass artifact directory as 2nd argument (standard skill invocation)
+    let output = std::process::Command::new(bin())
+        .arg(&transcript)
+        .arg(&artifact_dir)
+        .output()
+        .expect("Failed to execute shake-prune");
+
+    assert!(
+        output.status.success(),
+        "Command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Verify markdown summary was created inside artifact_dir
+    let mut found_md = false;
+    for entry in fs::read_dir(&artifact_dir).unwrap() {
+        let entry = entry.unwrap();
+        let fname = entry.file_name().to_string_lossy().to_string();
+        if fname.starts_with("shake_") && fname.ends_with(".md") {
+            found_md = true;
+            break;
+        }
+    }
+    assert!(
+        found_md,
+        "Expected shake_*.md artifact to be generated inside artifact_dir!"
+    );
+}
+
+#[test]
+fn test_cli_output_when_second_arg_has_trailing_slash() {
+    let tmp = tempfile::tempdir().unwrap();
+    let logs_dir = tmp
+        .path()
+        .join(".gemini/brain/test-slash-output/.system_generated/logs");
+    fs::create_dir_all(&logs_dir).unwrap();
+    let transcript = logs_dir.join("transcript.jsonl");
+
+    let artifact_dir_str = format!(
+        "{}/",
+        tmp.path().join(".gemini/brain/test-slash-output").display()
+    );
+
+    TranscriptBuilder::new()
+        .user("Test trailing slash argument")
+        .assistant("Done")
+        .write(&transcript);
+
+    let output = std::process::Command::new(bin())
+        .arg(&transcript)
+        .arg(&artifact_dir_str)
+        .output()
+        .expect("Failed to execute shake-prune");
+
+    assert!(
+        output.status.success(),
+        "Command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_malformed_lines_preserved_without_triggering_rollback() {
+    let tmp = tempfile::tempdir().unwrap();
+    let logs_dir = tmp
+        .path()
+        .join(".gemini/brain/test-malformed/.system_generated/logs");
+    fs::create_dir_all(&logs_dir).unwrap();
+    let transcript = logs_dir.join("transcript.jsonl");
+
+    // Construct a transcript with raw non-JSON line
+    {
+        let mut f = File::create(&transcript).unwrap();
+        writeln!(f, r#"{{"step_index":1,"type":"USER_INPUT","content":"<USER_REQUEST>Fix bugs</USER_REQUEST>"}}"#).unwrap();
+        writeln!(f, "THIS_IS_A_RAW_MALFORMED_NON_JSON_LINE").unwrap();
+        writeln!(
+            f,
+            r#"{{"step_index":2,"type":"PLANNER_RESPONSE","content":"Understood"}}"#
+        )
+        .unwrap();
+    }
+
+    let output = std::process::Command::new(bin())
+        .arg(&transcript)
+        .output()
+        .expect("Failed to execute shake-prune");
+
+    assert!(
+        output.status.success(),
+        "Compaction must not fail on malformed lines! Stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let content = fs::read_to_string(&transcript).unwrap();
+    assert!(
+        content.contains("THIS_IS_A_RAW_MALFORMED_NON_JSON_LINE"),
+        "Malformed line must be preserved verbatim in output!"
+    );
+}

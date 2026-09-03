@@ -115,37 +115,55 @@ elif command -v cargo >/dev/null 2>&1 && [ -f "${SCRIPT_DIR}/shake-prune-rs/Carg
     cp "${SCRIPT_DIR}/shake-prune-rs/target/release/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}"
     chmod 755 "${INSTALL_DIR}/${BIN_NAME}"
 else
-    # Download latest release binary from GitHub
-    echo "🌐 Fetching release asset for ${TARGET}..."
-    DOWNLOAD_URL="https://github.com/${REPO}/releases/latest/download/${BIN_NAME}-${TARGET}"
-    CHECKSUM_URL="https://github.com/${REPO}/releases/latest/download/SHA256SUMS.txt"
+    # Determine release URL (latest or pinned tag via SHAKE_VERSION)
+    SHAKE_VERSION="${SHAKE_VERSION:-latest}"
+    if [ "${SHAKE_VERSION}" = "latest" ]; then
+        BASE_RELEASE_URL="https://github.com/${REPO}/releases/latest/download"
+    else
+        BASE_RELEASE_URL="https://github.com/${REPO}/releases/download/${SHAKE_VERSION}"
+    fi
+
+    DOWNLOAD_URL="${BASE_RELEASE_URL}/${BIN_NAME}-${TARGET}"
+    CHECKSUM_URL="${BASE_RELEASE_URL}/SHA256SUMS.txt"
     
     TMP_DIR="$(mktemp -d)"
     trap 'rm -rf "${TMP_DIR}"' EXIT
     
-    curl -fsSL "${DOWNLOAD_URL}" -o "${TMP_DIR}/${BIN_NAME}"
-    curl -fsSL "${CHECKSUM_URL}" -o "${TMP_DIR}/SHA256SUMS.txt" 2>/dev/null || true
-    
-    # Verify SHA256 checksum if available
-    if [ -f "${TMP_DIR}/SHA256SUMS.txt" ]; then
-        echo "🔒 Verifying SHA256 integrity..."
-        cd "${TMP_DIR}"
-        EXPECTED_HASH="$(awk -v asset="${BIN_NAME}-${TARGET}" '{gsub(/\r/, "", $2); if($2==asset) print $1}' SHA256SUMS.txt)"
-        if [ -n "${EXPECTED_HASH}" ]; then
-            ACTUAL_HASH="$(sha256sum "${BIN_NAME}" | awk '{print $1}')"
-            if [ "${EXPECTED_HASH}" != "${ACTUAL_HASH}" ]; then
-                echo "❌ SHA256 verification failed!"
-                exit 1
-            fi
-            echo "  ✓ Checksum verified!"
-        fi
-        cd "${SCRIPT_DIR}"
-    fi
-    
-    if [ ! -f "${TMP_DIR}/${BIN_NAME}" ]; then
-        echo "❌ Error: Failed to download precompiled binary for ${TARGET}" >&2
+    echo "🌐 Downloading precompiled binary (${BIN_NAME}-${TARGET}) from ${BASE_RELEASE_URL}..."
+    if ! curl -fsSL "${DOWNLOAD_URL}" -o "${TMP_DIR}/${BIN_NAME}"; then
+        echo "❌ Error: Failed to download precompiled binary from ${DOWNLOAD_URL}" >&2
         exit 1
     fi
+
+    echo "🔒 Downloading and verifying SHA256 integrity checksum..."
+    if ! curl -fsSL "${CHECKSUM_URL}" -o "${TMP_DIR}/SHA256SUMS.txt"; then
+        echo "❌ Error: Failed to download SHA256SUMS.txt checksums from ${CHECKSUM_URL}. Aborting for supply-chain integrity." >&2
+        exit 1
+    fi
+
+    EXPECTED_HASH="$(awk -v asset="${BIN_NAME}-${TARGET}" '{gsub(/\r/, "", $2); if($2==asset) print $1}' "${TMP_DIR}/SHA256SUMS.txt")"
+    if [ -z "${EXPECTED_HASH}" ]; then
+        echo "❌ Error: Asset ${BIN_NAME}-${TARGET} not found in SHA256SUMS.txt. Aborting." >&2
+        exit 1
+    fi
+
+    if command -v sha256sum >/dev/null 2>&1; then
+        ACTUAL_HASH="$(sha256sum "${TMP_DIR}/${BIN_NAME}" | awk '{print $1}')"
+    elif command -v shasum >/dev/null 2>&1; then
+        ACTUAL_HASH="$(shasum -a 256 "${TMP_DIR}/${BIN_NAME}" | awk '{print $1}')"
+    else
+        echo "❌ Error: Neither sha256sum nor shasum is available to verify binary integrity." >&2
+        exit 1
+    fi
+
+    if [ "${EXPECTED_HASH}" != "${ACTUAL_HASH}" ]; then
+        echo "❌ Error: SHA256 checksum mismatch for ${BIN_NAME}-${TARGET}!" >&2
+        echo "  Expected: ${EXPECTED_HASH}" >&2
+        echo "  Actual:   ${ACTUAL_HASH}" >&2
+        exit 1
+    fi
+    echo "  ✓ Checksum successfully verified: ${ACTUAL_HASH}"
+
     cp "${TMP_DIR}/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}"
     chmod 755 "${INSTALL_DIR}/${BIN_NAME}"
 fi

@@ -96,7 +96,13 @@ if (Test-Path (Join-Path $ScriptDir "bin\shake-prune.exe")) {
 
 if (-not $InstalledBinary) {
     $DownloadFile = "shake-prune-windows-x86_64.exe"
-    $BaseReleaseUrl = "https://github.com/$Repo/releases/latest/download"
+    $Version = if ($env:SHAKE_VERSION) { $env:SHAKE_VERSION } else { "latest" }
+    $BaseReleaseUrl = if ($Version -eq "latest") {
+        "https://github.com/$Repo/releases/latest/download"
+    } else {
+        "https://github.com/$Repo/releases/download/$Version"
+    }
+
     $TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid().ToString())
     New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
 
@@ -104,11 +110,15 @@ if (-not $InstalledBinary) {
     $TempSums = Join-Path $TempDir "SHA256SUMS.txt"
 
     try {
-        Write-Host "- Downloading latest precompiled release binary from GitHub..."
+        Write-Host "- Downloading precompiled release binary ($DownloadFile) from $BaseReleaseUrl..."
         Invoke-WebRequest -Uri "$BaseReleaseUrl/$DownloadFile" -OutFile $TempExe -UseBasicParsing
         Invoke-WebRequest -Uri "$BaseReleaseUrl/SHA256SUMS.txt" -OutFile $TempSums -UseBasicParsing
 
         Write-Host "- Verifying SHA256 integrity checksum..."
+        if (-not (Test-Path $TempSums)) {
+            throw "SHA256SUMS.txt could not be retrieved from $BaseReleaseUrl"
+        }
+
         $SumsLines = Get-Content $TempSums
         $ExpectedHash = ""
         foreach ($line in $SumsLines) {
@@ -118,18 +128,22 @@ if (-not $InstalledBinary) {
             }
         }
 
+        if (-not $ExpectedHash) {
+            throw "Asset $DownloadFile was not found in SHA256SUMS.txt"
+        }
+
         $ActualHash = (Get-FileHash $TempExe -Algorithm SHA256).Hash.ToLower()
 
-        if ($ExpectedHash -and ($ExpectedHash -eq $ActualHash)) {
-            Write-Host "  [OK] SHA256 checksum verified: $ActualHash" -ForegroundColor Green
-            Copy-Item $TempExe $TargetExe -Force
-            Copy-Item $TempExe (Join-Path $GlobalSkillsDir "bin\shake-prune.exe") -Force
-            $InstalledBinary = $true
-        } else {
-            Write-Warning "SHA256 checksum mismatch! Building from local source..."
+        if ($ExpectedHash -ne $ActualHash) {
+            throw "SHA256 checksum mismatch! Expected $ExpectedHash, got $ActualHash. Possible download corruption."
         }
+
+        Write-Host "  [OK] SHA256 checksum verified: $ActualHash" -ForegroundColor Green
+        Copy-Item $TempExe $TargetExe -Force
+        Copy-Item $TempExe (Join-Path $GlobalSkillsDir "bin\shake-prune.exe") -Force
+        $InstalledBinary = $true
     } catch {
-        Write-Warning "Could not download precompiled binary: $_"
+        Write-Warning "Precompiled binary verification failed: $_"
     } finally {
         Remove-Item -Recurse -Force $TempDir -ErrorAction SilentlyContinue
     }
