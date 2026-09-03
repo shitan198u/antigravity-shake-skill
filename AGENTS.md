@@ -82,7 +82,7 @@ Any modifications or custom builds of the pruner engine **MUST adhere to these n
 
 ## ⚡ Self-Verification & Uninstallation
 After installing, run:
-- `<Global Binary Directory>/shake-prune --version` (Prints `shake-prune 0.1.8`).
+- `<Global Binary Directory>/shake-prune --version` (Prints `shake-prune 0.1.10`).
 - `<Global Binary Directory>/shake-prune --help` (Exit code must be `0`).
 - Confirm `<Global Skill Directory>/SKILL.md` exists and is non-empty.
 

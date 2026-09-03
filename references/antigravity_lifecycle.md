@@ -102,7 +102,7 @@ Antigravity provides lifecycle hooks defined in `~/.gemini/config/hooks.json`.
 
 On every prompt submission:
 1. The IDE executes `shake-prune --hook`, piping session metadata (conversation ID, transcript path, artifact directory) via `stdin`.
-2. The hook checks `transcript.jsonl` size. If $\ge 660\text{ KB}$ (~200k tokens), it triggers auto-compaction.
+2. The hook checks `transcript.jsonl` size. If $\ge 264\text{ KB}$ (~80k tokens), it triggers auto-compaction.
 3. If compacted, it injects an ephemeral anchor message into the prompt stream:
    `[Context compacted via /shake. Active state anchored in @... (Step N+). Treat prior raw tool stdout as archived.]`
 4. The hook runs with `panic::catch_unwind` protection—if any error occurs, it emits `{}` and exits `0` immediately (fail-open guarantee).

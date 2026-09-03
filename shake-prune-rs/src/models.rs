@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 pub struct CompactionEvent {
     pub timestamp_iso: String,
     pub timestamp_display: String,
-    pub trigger: String, // "Manual (/shake)", "Manual (/full-shake)", or "Auto (200k Threshold)"
+    pub trigger: String, // "Manual (/shake)", "Manual (/full-shake)", or "Auto (80k Threshold)"
     pub anchored_step: u64,
     pub bytes_before: usize,
     pub bytes_after: usize,

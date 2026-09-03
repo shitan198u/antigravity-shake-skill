@@ -100,8 +100,15 @@ pub fn index_master_full_transcript(full_transcript_path: &Path) -> HashMap<u64,
         for (line_idx, line) in reader.lines().enumerate() {
             if let Ok(line_str) = line {
                 if let Ok(val) = serde_json::from_str::<Value>(&line_str) {
+                    // Skip synthetic milestone records to prevent collision
+                    if val.get("synthetic").and_then(|v| v.as_bool()).unwrap_or(false)
+                        || val.get("is_milestone").and_then(|v| v.as_bool()).unwrap_or(false)
+                    {
+                        continue;
+                    }
                     if let Some(step_idx) = val.get("step_index").and_then(|v| v.as_u64()) {
-                        map.insert(step_idx, line_idx + 1);
+                        // If duplicate step_index occurs, retain first occurrence to preserve historical provenance
+                        map.entry(step_idx).or_insert(line_idx + 1);
                     }
                 }
             }

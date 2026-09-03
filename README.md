@@ -36,7 +36,7 @@ During long development sessions, AI coding agents accumulate tens of thousands 
 * 🟢 **Same-Tab In-Place Compaction**: Modifies active session logs directly on disk without breaking open file descriptors or requiring new chat tabs.
 * 🛡️ **Inode Preservation & File Locking**: Uses POSIX/Windows truncate-and-rewrite with `fs2` exclusive locking and `fsync` durability.
 * ⚡ **Dual-Trigger Proactive Auto-Hook**: Background `PreInvocation` hook automatically detects and compacts conversations whenever file size crosses **80,000 tokens** (`264 KB`) **OR** the transcript accumulates **$\ge 20$ unpruned tool runs**, completely preventing lossy server-side `{{ CHECKPOINT }}` truncation and autonomous burst bloat!
-* ⏱️ **50 KB Growth Delta Guard**: Prevents redundant CPU/disk cycles when conversations contain extensive clean dialogue.
+* ⏱️ **25 KB Growth Delta Guard**: Prevents redundant CPU/disk cycles when conversations contain extensive clean dialogue.
 * 🏛️ **Single Master Archive Architecture**: Receipts point directly to `transcript_full.jsonl` with exact 1-indexed line numbers (`line=N`). No broken links, ever.
 * 🧹 **Zero Disk Bloat Guarantee**: Eliminates redundant multi-megabyte `.bak_*` duplicates, maintaining only one atomic crash-recovery fallback (`transcript.jsonl.bak`).
 * 🎯 **Dual-Boundary Working Memory Engine**: Working memory is bounded by both human conversational context (last **10 user turns**) and autonomous tool volume (capped at last **20 tool outputs**). Autonomous tasks executing 30+ tools in 1 turn keep the last 20 outputs raw while compacting earlier tools into indexed receipts.

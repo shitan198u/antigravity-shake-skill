@@ -1,3 +1,4 @@
+use crate::format_bytes;
 use crate::metadata::{write_active_anchor, write_artifact_metadata, AnchorFilePayload};
 use crate::pruner::{run_compaction_pipeline, CompactionOptions};
 use chrono::Utc;
@@ -8,7 +9,7 @@ use std::io::{self, Read, Write};
 use std::panic;
 use std::path::{Path, PathBuf};
 
-// 200k tokens * ~3.3 bytes/token = 660,000 bytes
+// 80k tokens * ~3.3 bytes/token = 264,000 bytes
 // Proactive 80k tokens threshold (~264,000 bytes)
 const AUTO_SHAKE_TOKEN_THRESHOLD_BYTES: u64 = 264_000;
 // Tool execution burst threshold (triggers after 20 unpruned tool executions)
@@ -228,15 +229,17 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
                         }
 
                         let summary_text = format!(
-                            "Auto-compacted verbatim history at 200k token threshold for topic '{}'. Saved {:.1}% context tokens.",
+                            "Auto-compacted transcript at 80k token threshold for topic '{}'. Saved {:.1}% prompt payload ({} -> {}).",
                             stats.topic_slug.replace('_', " "),
-                            stats.reduction_pct
+                            stats.this_run_savings_pct,
+                            format_bytes(stats.this_run_before_bytes),
+                            format_bytes(stats.this_run_after_bytes)
                         );
                         let _ = write_artifact_metadata(&output_path, &summary_text);
-                        let _ = write_active_anchor(&output_path, &stats, "Auto (200k Threshold)", &backup_file_str);
+                        let _ = write_active_anchor(&output_path, &stats, "Auto (80k Threshold)", &backup_file_str);
 
                         let ephemeral_msg = format!(
-                            "[Context auto-compacted via /shake (exceeded 200k token threshold). Active state anchored in @{} (Step {}+). Treat prior raw tool stdout as archived.]",
+                            "[Context auto-compacted via /shake (exceeded 80k token threshold). Active state anchored in @{} (Step {}+). Treat prior raw tool stdout as archived.]",
                             output_path.display(),
                             stats.user_turns + stats.assistant_turns + stats.pruned_tools
                         );

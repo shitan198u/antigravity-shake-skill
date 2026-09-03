@@ -744,3 +744,34 @@ fn test_system_path_denylist_rejections() {
         stderr
     );
 }
+
+#[test]
+fn test_duplicate_step_index_robustness() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let logs_dir = tmp_dir.path().join(".gemini/brain/test-dups/.system_generated/logs");
+    fs::create_dir_all(&logs_dir).unwrap();
+    let transcript_path = logs_dir.join("transcript.jsonl");
+
+    // Create transcript with duplicate step_index values
+    {
+        let mut f = File::create(&transcript_path).unwrap();
+        writeln!(f, "{}", json!({"step_index": 1, "type": "USER_INPUT", "content": "hello"})).unwrap();
+        writeln!(f, "{}", json!({"step_index": 2, "type": "RUN_COMMAND", "status": "DONE", "exit_code": 0, "content": "echo first step 2 bloat ".repeat(20)})).unwrap();
+        writeln!(f, "{}", json!({"step_index": 2, "type": "RUN_COMMAND", "status": "DONE", "exit_code": 0, "content": "echo duplicate step 2 bloat ".repeat(20)})).unwrap();
+        for i in 3..=10 {
+            writeln!(f, "{}", json!({"step_index": i, "type": "PLANNER_RESPONSE", "content": format!("turn {}", i)})).unwrap();
+        }
+    }
+
+    let bin = get_binary_path();
+    let output = std::process::Command::new(&bin)
+        .arg(&transcript_path)
+        .arg("--recent-user-turns")
+        .arg("0")
+        .output()
+        .expect("Failed to run shake-prune");
+
+    assert!(output.status.success(), "Duplicate step_index must not crash compaction!");
+    let compacted = fs::read_to_string(&transcript_path).unwrap();
+    assert!(compacted.contains("transcript_full.jsonl"));
+}
