@@ -257,3 +257,76 @@ fn test_hook_bounded_stdin_handles_oversized_payload() {
         "Oversized invalid payload must safely return empty json"
     );
 }
+#[test]
+fn test_hook_circuit_breaker_engages_for_uncompacted_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = fake_home(&tmp);
+    let conv = "conv_breaker_fresh";
+    let transcript = trusted_transcript_path(&home, conv);
+    let conv_dir = home.join(".gemini/antigravity-ide/brain").join(conv);
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+
+    let big_output = "x".repeat(300_000);
+    TranscriptBuilder::new()
+        .user("Large task execution")
+        .tool_output("RUN_COMMAND", &big_output, 0)
+        .assistant("Completed large task")
+        .write(&transcript);
+
+    let anchor_path = conv_dir.join("active_shake_anchor.json");
+    let now = chrono::Utc::now().timestamp();
+    let anchor_json = serde_json::json!({
+        "consecutive_failures": 3,
+        "circuit_disabled_until": now + 1800,
+        "last_error": "disk failure simulation"
+    });
+    std::fs::write(&anchor_path, anchor_json.to_string()).unwrap();
+
+    let payload = serde_json::json!({
+        "transcriptPath": transcript.to_string_lossy(),
+        "artifactDirectoryPath": conv_dir.to_string_lossy()
+    });
+
+    let mut child = Command::new(bin())
+        .arg("--hook")
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "Hook must exit 0 when circuit breaker is open"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "{}",
+        "Must emit empty json without injecting anchor"
+    );
+
+    let after_len = std::fs::metadata(&transcript).unwrap().len();
+    assert!(
+        after_len >= 300_000,
+        "Transcript must remain uncompacted while breaker is open"
+    );
+
+    let log_path = home.join(".gemini/logs/shake_hook.log");
+    assert!(log_path.exists(), "Hook log should exist");
+    let log_content = std::fs::read_to_string(&log_path).unwrap();
+    assert!(
+        log_content.contains("circuit breaker open"),
+        "Log must record circuit breaker bypass. Got: {}",
+        log_content
+    );
+}

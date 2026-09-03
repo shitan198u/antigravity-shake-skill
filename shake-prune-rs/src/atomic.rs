@@ -112,9 +112,9 @@ pub fn stage_compacted_output(
         f.read_to_end(&mut staged)
             .map_err(|e| format!("Failed to read back staging temp file: {}", e))?;
     }
-    if staged.len() as u64 != bytes.len() as u64 {
+    if staged != bytes {
         return Err(format!(
-            "Staging verification failed (expected {} bytes, staged {} bytes)",
+            "Staging byte verification failed (expected {} bytes, staged {} bytes)",
             bytes.len(),
             staged.len()
         )

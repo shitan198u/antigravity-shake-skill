@@ -137,7 +137,7 @@ fn load_cached_master_index(full_transcript_path: &Path) -> Option<HashMap<u64, 
         .ok()?
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
-        .as_secs();
+        .as_millis() as u64;
     let cache_path = master_index_cache_path(full_transcript_path);
     let raw = fs::read_to_string(&cache_path).ok()?;
     let val: Value = serde_json::from_str(&raw).ok()?;
@@ -166,7 +166,7 @@ fn store_cached_master_index(full_transcript_path: &Path, map: &HashMap<u64, usi
         .modified()
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
+        .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     // Bound cache size: marathon archives with >200k steps skip caching to
     // avoid a multi-MB JSON sidecar on every run.

@@ -3,7 +3,7 @@
 //! Extracted from `pruner.rs` (P2-7). The old implementation counted every
 //! case-sensitive `"WARN"` substring, which false-positived on words like
 //! `SWARM`, `WARRANTY`, or `REWARN`. This counts case-insensitive `warning`
-//! tokens and `warn:`-style prefixes instead.
+//! tokens and `warn:`-style prefixes instead without heap allocations (§4.3).
 
 /// Count warning signals in tool output.
 ///
@@ -14,19 +14,18 @@
 /// Does NOT match `swarm`, `warranty`, `rewarn` because those lack a word
 /// boundary before `warn` followed by `ing`, `:`, or whitespace/end.
 pub fn count_warnings(content: &str) -> usize {
-    let lower = content.to_lowercase();
-    let bytes = lower.as_bytes();
+    let bytes = content.as_bytes();
     let mut count = 0usize;
     let mut i = 0usize;
     while i < bytes.len() {
-        // Match "warning" substring.
-        if lower[i..].starts_with("warning") {
+        // Zero-alloc case-insensitive substring match (§4.3).
+        if i + 7 <= bytes.len() && bytes[i..i + 7].eq_ignore_ascii_case(b"warning") {
             count += 1;
-            i += "warning".len();
+            i += 7;
             continue;
         }
         // Match standalone "warn" followed by ':' / whitespace / end / '(' / '['.
-        if lower[i..].starts_with("warn") {
+        if i + 4 <= bytes.len() && bytes[i..i + 4].eq_ignore_ascii_case(b"warn") {
             let prev_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
             let after = i + 4;
             let next_ok = after >= bytes.len()

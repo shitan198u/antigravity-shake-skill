@@ -227,10 +227,10 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
         if path.exists() {
             if let Ok(file) = File::open(&path) {
                 if let Ok(data) = serde_json::from_reader::<_, AnchorFilePayload>(file) {
-                    if data.active.unwrap_or(false) {
-                        found_anchor = Some(data);
-                        break;
-                    }
+                    // Load anchor state regardless of active status so circuit breaker
+                    // and cooldown guards function on fresh sessions with failures (§4.1).
+                    found_anchor = Some(data);
+                    break;
                 }
             }
         }
@@ -413,7 +413,7 @@ fn emit_anchor_or_empty(
     found_anchor: &Option<AnchorFilePayload>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match found_anchor {
-        Some(anchor) => {
+        Some(anchor) if anchor.active.unwrap_or(false) => {
             let shaken_file = anchor.shaken_file.clone().unwrap_or_default();
             let anchored_step = match &anchor.anchored_at_step {
                 Some(serde_json::Value::Number(n)) => n.to_string(),
@@ -441,7 +441,7 @@ fn emit_anchor_or_empty(
 
             println!("{}", serde_json::to_string(&response)?);
         }
-        None => {
+        _ => {
             println!("{{}}");
         }
     }
