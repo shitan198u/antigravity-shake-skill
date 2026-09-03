@@ -11,7 +11,8 @@ fn log_diagnostic(msg: &str) {
 
     if let Ok(meta) = fs::metadata(&log_file) {
         if meta.len() > 1_000_000 {
-            let _ = fs::remove_file(&log_file);
+            let rotated = logs_dir.join("shake_hook.log.1");
+            let _ = fs::rename(&log_file, &rotated);
         }
     }
 
@@ -131,7 +132,7 @@ pub fn handle_hook() {
 
 fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
     let mut stdin_buffer = String::new();
-    let _ = io::stdin().read_to_string(&mut stdin_buffer);
+    let _ = io::stdin().take(65_536).read_to_string(&mut stdin_buffer);
 
     if stdin_buffer.trim().is_empty() {
         println!("{{}}");
@@ -227,76 +228,98 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
     // ⚡ PROACTIVE AUTO-SHAKE WITH GROWTH DELTA & COOLDOWN GUARDS
     if let (Some(t_path), Some(art_dir)) = (&resolved_transcript, &resolved_art_dir) {
         if let Ok(meta) = fs::metadata(t_path) {
-            let unpruned_tools = count_unpruned_tools(t_path);
-            let size_threshold_hit = meta.len() >= AUTO_SHAKE_TOKEN_THRESHOLD_BYTES;
-            let tools_threshold_hit = unpruned_tools >= AUTO_SHAKE_TOOL_RUN_THRESHOLD;
+            let file_size = meta.len();
+            let now_ts = Utc::now().timestamp();
 
-            if size_threshold_hit || tools_threshold_hit {
-                let now_ts = Utc::now().timestamp();
-                let should_auto_shake = match &found_anchor {
-                    Some(anchor) => {
-                        let last_bytes = anchor.last_compacted_bytes.unwrap_or(0);
-                        let last_attempt = anchor.last_attempt_timestamp.unwrap_or(0);
-                        let cooldown_ok =
-                            (now_ts - last_attempt).abs() >= AUTO_SHAKE_COOLDOWN_SECONDS;
-                        let growth_ok = meta.len() > last_bytes + AUTO_SHAKE_GROWTH_DELTA_BYTES;
-                        cooldown_ok && growth_ok
-                    }
-                    None => true,
+            // 1. Evaluate Cooldown & Growth Delta Guards first (O(1))
+            let (cooldown_ok, growth_ok) = match &found_anchor {
+                Some(anchor) => {
+                    let last_bytes = anchor.last_compacted_bytes.unwrap_or(0);
+                    let last_attempt = anchor.last_attempt_timestamp.unwrap_or(0);
+                    let cd_ok = (now_ts - last_attempt).abs() >= AUTO_SHAKE_COOLDOWN_SECONDS;
+                    let gr_ok = file_size > last_bytes + AUTO_SHAKE_GROWTH_DELTA_BYTES;
+                    (cd_ok, gr_ok)
+                }
+                None => (true, true),
+            };
+
+            let guards_pass = cooldown_ok && growth_ok;
+            let size_threshold_hit = file_size >= AUTO_SHAKE_TOKEN_THRESHOLD_BYTES;
+
+            // 2. Short-circuit: only count tools if guards pass and size threshold has not already triggered
+            let should_auto_shake = if !guards_pass {
+                if !cooldown_ok {
+                    log_diagnostic("Auto-shake bypassed: cooldown active");
+                } else if !growth_ok {
+                    log_diagnostic("Auto-shake bypassed: growth delta below threshold");
+                }
+                false
+            } else if size_threshold_hit {
+                log_diagnostic("Auto-shake triggered: size threshold (>= 264 KB) hit");
+                true
+            } else {
+                let unpruned_tools = count_unpruned_tools(t_path);
+                if unpruned_tools >= AUTO_SHAKE_TOOL_RUN_THRESHOLD {
+                    log_diagnostic(
+                        "Auto-shake triggered: unpruned tools burst threshold (>= 20 tools) hit",
+                    );
+                    true
+                } else {
+                    false
+                }
+            };
+
+            if should_auto_shake {
+                let options = CompactionOptions {
+                    recent_user_turns: 10,
+                    recent_tools_cap: 20,
+                    recent_errors_cap: 30,
+                    recent_window_steps: 6,
+                    thought_window_turns: None,
+                    marathon_horizon: false,
+                    in_place: true,
+                    dry_run: false,
                 };
 
-                if should_auto_shake {
-                    let options = CompactionOptions {
-                        recent_user_turns: 10,
-                        recent_tools_cap: 20,
-                        recent_errors_cap: 30,
-                        recent_window_steps: 6,
-                        thought_window_turns: None,
-                        marathon_horizon: false,
-                        in_place: true,
-                        dry_run: false,
-                    };
+                if let Ok((_compacted_jsonl, pruned_md, stats, backup_file_str)) =
+                    run_compaction_pipeline(t_path, &options)
+                {
+                    let output_path = art_dir.join(&stats.suggested_filename);
+                    if let Ok(mut f) = File::create(&output_path) {
+                        let _ = f.write_all(pruned_md.as_bytes());
+                    }
 
-                    if let Ok((_compacted_jsonl, pruned_md, stats, backup_file_str)) =
-                        run_compaction_pipeline(t_path, &options)
-                    {
-                        let output_path = art_dir.join(&stats.suggested_filename);
-                        if let Ok(mut f) = File::create(&output_path) {
-                            let _ = f.write_all(pruned_md.as_bytes());
-                        }
-
-                        let summary_text = format!(
+                    let summary_text = format!(
                             "Auto-compacted transcript at 80k token threshold for topic '{}'. Saved {:.1}% prompt payload ({} -> {}).",
                             stats.topic_slug.replace('_', " "),
                             stats.this_run_savings_pct,
                             format_bytes(stats.this_run_before_bytes),
                             format_bytes(stats.this_run_after_bytes)
                         );
-                        let _ = write_artifact_metadata(&output_path, &summary_text);
-                        let _ = write_active_anchor(
-                            &output_path,
-                            &stats,
-                            "Auto (80k Threshold)",
-                            &backup_file_str,
-                        );
+                    let _ = write_artifact_metadata(&output_path, &summary_text);
+                    let _ = write_active_anchor(
+                        &output_path,
+                        &stats,
+                        "Auto (80k Threshold)",
+                        &backup_file_str,
+                    );
 
-                        let ephemeral_msg = format!(
+                    let ephemeral_msg = format!(
                             "[Context auto-compacted via /shake (exceeded 80k token threshold). Active state anchored in @{} (Step {}+). Treat prior raw tool stdout as archived.]",
                             output_path.display(),
                             stats.user_turns + stats.assistant_turns + stats.pruned_tools
                         );
 
-                        let response = json!({
-                            "injectSteps": [
-                                {
-                                    "ephemeralMessage": ephemeral_msg
-                                }
-                            ]
-                        });
+                    let response = json!({
+                        "injectSteps": [
+                            {
+                                "ephemeralMessage": ephemeral_msg
+                            }
+                        ]
+                    });
 
-                        println!("{}", serde_json::to_string(&response)?);
-                        return Ok(());
-                    }
+                    println!("{}", serde_json::to_string(&response)?);
+                    return Ok(());
                 }
             }
         }

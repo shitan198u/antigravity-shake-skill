@@ -175,3 +175,32 @@ fn test_hook_corrupt_anchor_fails_open() {
         "Hook must fail-open on corrupt anchor"
     );
 }
+
+#[test]
+fn test_hook_bounded_stdin_handles_oversized_payload() {
+    // 256 KB of garbage data (exceeding 64 KB limit)
+    let huge_payload = "x".repeat(256 * 1024);
+
+    let mut child = Command::new(bin())
+        .arg("--hook")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(huge_payload.as_bytes());
+    }
+
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "Hook must handle oversized stdin and exit 0"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "{}",
+        "Oversized invalid payload must safely return empty json"
+    );
+}

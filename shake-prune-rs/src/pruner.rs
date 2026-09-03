@@ -8,6 +8,17 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::Path;
 
+// Explicit pruning, truncation, and retention thresholds
+pub const SHORT_CMD_RETENTION_CHARS: usize = 250;
+pub const TOOL_ARG_CODE_PRUNE_CHARS: usize = 200;
+pub const TOOL_ARG_REPLACE_PRUNE_CHARS: usize = 200;
+pub const TOOL_ARG_CHUNK_PRUNE_CHARS: usize = 100;
+pub const TOOL_ARG_HEREDOC_PRUNE_CHARS: usize = 250;
+pub const DISPLAY_ARG_TRUNCATE_CHARS: usize = 120;
+pub const ACTIVE_TOOL_SNIPPET_CHARS: usize = 1500;
+pub const ERROR_TOOL_SNIPPET_CHARS: usize = 1200;
+pub const UNPARSED_LINE_SNIPPET_CHARS: usize = 500;
+
 /// Options configuring the compaction and pruning pipeline.
 #[derive(Debug, Clone)]
 pub struct CompactionOptions {
@@ -136,7 +147,7 @@ pub fn compact_tool_call_args(
         "run_command" => {
             if let Some(cmd_val) = args_map.get("CommandLine").and_then(|v| v.as_str()) {
                 if !cmd_val.starts_with("[PRUNED")
-                    && (cmd_val.len() > 250
+                    && (cmd_val.len() > TOOL_ARG_HEREDOC_PRUNE_CHARS
                         || cmd_val.contains("<< 'EOF'")
                         || cmd_val.contains("<< 'END'"))
                 {
@@ -154,7 +165,7 @@ pub fn compact_tool_call_args(
         }
         "write_to_file" => {
             if let Some(code_val) = args_map.get("CodeContent").and_then(|v| v.as_str()) {
-                if !code_val.starts_with("[PRUNED") && code_val.len() > 200 {
+                if !code_val.starts_with("[PRUNED") && code_val.len() > TOOL_ARG_CODE_PRUNE_CHARS {
                     let line_count = code_val.lines().count();
                     args_map.insert(
                         "CodeContent".to_string(),
@@ -168,7 +179,7 @@ pub fn compact_tool_call_args(
         }
         "replace_file_content" => {
             if let Some(rep_val) = args_map.get("ReplacementContent").and_then(|v| v.as_str()) {
-                if !rep_val.starts_with("[PRUNED") && rep_val.len() > 200 {
+                if !rep_val.starts_with("[PRUNED") && rep_val.len() > TOOL_ARG_REPLACE_PRUNE_CHARS {
                     args_map.insert(
                         "ReplacementContent".to_string(),
                         Value::String(format!(
@@ -179,7 +190,9 @@ pub fn compact_tool_call_args(
                 }
             }
             if let Some(target_val) = args_map.get("TargetContent").and_then(|v| v.as_str()) {
-                if !target_val.starts_with("[PRUNED") && target_val.len() > 200 {
+                if !target_val.starts_with("[PRUNED")
+                    && target_val.len() > TOOL_ARG_REPLACE_PRUNE_CHARS
+                {
                     args_map.insert(
                         "TargetContent".to_string(),
                         Value::String("[Original target code snippet]".to_string()),
@@ -197,7 +210,7 @@ pub fn compact_tool_call_args(
                         if let Some(rc) =
                             chunk_map.get("ReplacementContent").and_then(|v| v.as_str())
                         {
-                            if !rc.starts_with("[PRUNED") && rc.len() > 100 {
+                            if !rc.starts_with("[PRUNED") && rc.len() > TOOL_ARG_CHUNK_PRUNE_CHARS {
                                 chunk_map.insert(
                                     "ReplacementContent".to_string(),
                                     Value::String(format!(
@@ -208,7 +221,7 @@ pub fn compact_tool_call_args(
                             }
                         }
                         if let Some(tc) = chunk_map.get("TargetContent").and_then(|v| v.as_str()) {
-                            if !tc.starts_with("[PRUNED") && tc.len() > 100 {
+                            if !tc.starts_with("[PRUNED") && tc.len() > TOOL_ARG_CHUNK_PRUNE_CHARS {
                                 chunk_map.insert(
                                     "TargetContent".to_string(),
                                     Value::String("[Target chunk snippet]".to_string()),
@@ -310,6 +323,9 @@ pub fn run_compaction_pipeline(
                     full_transcript_path.display(), e
                 )
             })?;
+            if let Ok(f) = File::open(&full_transcript_path) {
+                let _ = f.sync_all();
+            }
         }
 
         // Mandatory fail-closed crash fallback while holding the exclusive lock
@@ -319,6 +335,10 @@ pub fn run_compaction_pipeline(
                 backup_latest.display(), e
             )
         })?;
+
+        if let Ok(f) = File::open(&backup_latest) {
+            let _ = f.sync_all();
+        }
 
         // Verify backup byte size exactly matches before allowing any truncation
         let orig_len = file.metadata()?.len();
@@ -515,7 +535,10 @@ pub fn run_compaction_pipeline(
             Err(_) => {
                 compacted_output.push_str(&line_str);
                 compacted_output.push('\n');
-                let snippet = sanitize_markdown_snippet(&safe_truncate(&line_str, 500));
+                let snippet = sanitize_markdown_snippet(&safe_truncate(
+                    &line_str,
+                    UNPARSED_LINE_SNIPPET_CHARS,
+                ));
                 output_blocks.push(format!(
                     "> ⚠️ **[Unparsed Raw Log Line (Preserved)]**:\n```\n{}\n```\n",
                     snippet
@@ -654,8 +677,11 @@ pub fn run_compaction_pipeline(
                                     && v_str.contains("[PRUNED")
                                 {
                                     v_str
-                                } else if v_str.chars().count() > 120 {
-                                    format!("{}... [truncated]", safe_truncate(&v_str, 120))
+                                } else if v_str.chars().count() > DISPLAY_ARG_TRUNCATE_CHARS {
+                                    format!(
+                                        "{}... [truncated]",
+                                        safe_truncate(&v_str, DISPLAY_ARG_TRUNCATE_CHARS)
+                                    )
                                 } else {
                                     v_str
                                 };
@@ -678,14 +704,20 @@ pub fn run_compaction_pipeline(
 
                 if is_recent_tool {
                     retained_recent_steps += 1;
-                    let snippet = sanitize_markdown_snippet(&safe_truncate(content_str, 1500));
+                    let snippet = sanitize_markdown_snippet(&safe_truncate(
+                        content_str,
+                        ACTIVE_TOOL_SNIPPET_CHARS,
+                    ));
                     output_blocks.push(format!(
                         "> 🕒 **[Active Window Tool Output ({})]**:\n```\n{}\n```\n",
                         stype, snippet
                     ));
                 } else if is_recent_error {
                     retained_errors_count += 1;
-                    let snippet = sanitize_markdown_snippet(&safe_truncate(content_str, 1200));
+                    let snippet = sanitize_markdown_snippet(&safe_truncate(
+                        content_str,
+                        ERROR_TOOL_SNIPPET_CHARS,
+                    ));
                     output_blocks.push(format!(
                         "> ⚠️ **[Tool Execution Error / Failure ({}, Exit code: {:?})]**:\n```\n{}\n```\n",
                         stype, exit_code, snippet
@@ -694,7 +726,9 @@ pub fn run_compaction_pipeline(
                     if content_str.starts_with("[PRUNED") {
                         pruned_tools_count += 1;
                         output_blocks.push(format!("> ℹ️ *{}*\n", content_str));
-                    } else if !is_error && content_str.trim().chars().count() < 250 {
+                    } else if !is_error
+                        && content_str.trim().chars().count() < SHORT_CMD_RETENTION_CHARS
+                    {
                         retained_short_cmds += 1;
                         let safe_cmd = sanitize_markdown_snippet(content_str.trim());
                         output_blocks.push(format!(
