@@ -40,7 +40,6 @@ VALID_EXTENSIONS = {
 
 SKIP_FILES = {
     "repo_bundle.txt",
-    "bundle_repo.rs",
     "Cargo.lock",
 }
 
