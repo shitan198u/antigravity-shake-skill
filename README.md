@@ -31,7 +31,7 @@ During long development sessions, AI coding agents accumulate tens of thousands 
 
 ---
 
-## 📊 Physical Token Reduction Metrics
+## 📊 Physical Token Reduction Metrics (example run, not a guarantee)
 
 | Metric | Original Master Stream (`transcript_full.jsonl`) | Standard Mode (`<= 30 turns`) | Deep Mode (`> 30 turns`) |
 | :--- | :---: | :---: | :---: |
@@ -42,6 +42,8 @@ During long development sessions, AI coding agents accumulate tens of thousands 
 | **Error Retention** | All | **Last 30 Calls Verbatim (Un-clamped)** | **Last 30 Calls Verbatim (Un-clamped)** |
 | **Scratchpad Thoughts** | All | **100% Preserved** | **Last 20 Assistant Turns Only** |
 | **Milestone Horizon** | None | Verbatim Dialogue | **Turn 1 Genesis + Last 25 Turns** |
+
+Figures above are from a single representative fixture; your savings vary by tool-output ratio.
 
 ---
 

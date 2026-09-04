@@ -89,13 +89,25 @@ token_threshold_bytes = 264000  # ~80k tokens
 tool_burst_threshold = 20       # Autonomous tool burst trigger
 cooldown_seconds = 180          # 3-minute cooldown between compactions
 growth_delta_bytes = 25600      # 25 KB transcript growth required
+
+[retention]
 artifact_retention_count = 20   # Maximum historical artifacts retained
+
+[diagnostics]
 log_level = "info"
 ```
 
+Legacy `[shake]` keys only fill modern counterparts left at defaults; explicit
+`[retention]` / `[diagnostics]` / top-level values always win. Sensitive artifacts
+are always created `0600` on Unix; Windows ACLs are out of scope. The `.bak`
+crash-recovery copy is verbatim (unredacted) by design.
+
 All settings can be overridden via environment variables:
 `SHAKE_KEEP_RECENT_TURNS`, `SHAKE_KEEP_RECENT_TOOLS`, `SHAKE_KEEP_RECENT_ERRORS`,
-`SHAKE_DEEP_AFTER_TURNS`, `SHAKE_SECRET_REDACTION=1`, `SHAKE_AUTO_DISABLE=1`.
+`SHAKE_DEEP_AFTER_TURNS`, `SHAKE_SECRET_REDACTION=1`, `SHAKE_AUTO_DISABLE=1`,
+`SHAKE_RECENT_WINDOW`, `SHAKE_TOKEN_THRESHOLD_BYTES`, `SHAKE_TOOL_BURST_THRESHOLD`,
+`SHAKE_COOLDOWN_SECONDS`, `SHAKE_GROWTH_DELTA_BYTES`, `SHAKE_ARTIFACT_RETENTION`,
+`SHAKE_LOG_LEVEL`.
 
 ---
 
