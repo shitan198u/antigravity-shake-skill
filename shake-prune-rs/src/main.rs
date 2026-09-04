@@ -8,9 +8,7 @@ use shake_prune::config::ShakeConfig;
 use shake_prune::hook::handle_hook;
 use shake_prune::metadata::{write_active_anchor, write_artifact_metadata};
 
-use shake_prune::pruner::{
-    estimate_tokens, run_compaction_pipeline, CompactionOptions,
-};
+use shake_prune::pruner::{estimate_tokens, run_compaction_pipeline, CompactionOptions};
 use shake_prune::{
     format_bytes, validate_output_path_allowlist, validate_transcript_path, VERSION,
 };
@@ -576,7 +574,10 @@ fn main() {
         .join(" ");
 
     println!("\n# ⚡ Context Compacted");
-    println!("> **Session**: `{}` • **Status**: Ready to continue\n", display_topic);
+    println!(
+        "> **Session**: `{}` • **Status**: Ready to continue\n",
+        display_topic
+    );
 
     if options.dry_run {
         println!(
@@ -606,11 +607,16 @@ fn main() {
     );
 
     println!("### [Open Summary Artifact](file://{})", abs_str);
-    println!("*Click above to open the executive summary in the artifact viewer or copy milestones.*\n");
+    println!(
+        "*Click above to open the executive summary in the artifact viewer or copy milestones.*\n"
+    );
 
     println!("<details>");
     println!("<summary>⚙️ Archive & Working Tools</summary>\n");
-    println!("- **Master Archive**: [transcript_full.jsonl](file://{})", master_archive_abs_str);
+    println!(
+        "- **Master Archive**: [transcript_full.jsonl](file://{})",
+        master_archive_abs_str
+    );
     println!(
         "- **Active Working Tools**: Kept last {} tool outputs and {} un-clamped error traces in active memory.",
         stats.retained_recent_steps,
