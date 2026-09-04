@@ -1,4 +1,4 @@
-# 🛠️ How `/shake` & `/full-shake` Work: Technical Reference Manual
+# 🛠️ How `/shake` Works: Technical Reference Manual
 
 `shake` is a deterministic, multi-platform context tree-shaker and compaction engine purpose-built for Google Antigravity. It physically prunes historical tool execution bloat and verbose terminal noise from active conversation logs on disk while preserving 100% of User prompts, Assistant reasoning, Thoughts, and Error stack traces.
 
@@ -20,7 +20,7 @@ graph TD
         F --> G3[Historical RUN_COMMAND/VIEW_FILE: Convert to line=N Receipts]
         F --> G4[Historical Heredocs: cat EOF > 250 chars -> Line Receipt]
         F --> G5[Secret Redaction Filter: API Keys, Bearer Tokens, RSA Keys]
-        F --> G6[/full-shake: Window Thoughts to 20 Turns + Milestone Horizon]
+        F --> G6[Adaptive Deep Mode: Window Thoughts to 20 Turns + Milestone Horizon]
     end
     
     G1 --> H[Stage Pruned Buffer & Validate JSON Integrity]
@@ -111,13 +111,13 @@ Instead of creating dozens of multi-megabyte `.bak_*` files on every run (which 
 
 ---
 
-### 7. Enhanced Marathon `/full-shake` (Milestone Horizon)
-* On sessions with $> 30$ user turns:
+### 7. Adaptive Deep Compaction (Milestone Horizon)
+* When a session exceeds 30 user turns, adaptive mode automatically selects deep compaction:
   * **Turn 1 (Genesis)** is preserved 100% verbatim (original guidelines and constraints).
   * **Middle Turns (Turns 2 to N-25)** are collapsed into a structured Milestone Checkpoint block with exact line-indexed backup links.
   * **Last 25 user turns**: Prompts and assistant dialogue are preserved 100% verbatim (with tool outputs subject to standard working window retention).
   * **Scratchpad thoughts** are windowed to the last 20 assistant turns.
-* Restores sub-second agility on threads that have been active for days.
+* Restores sub-second agility on marathon threads that have been active for days without manual intervention.
 
 ---
 

@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $Repo = "shitan198u/antigravity-shake-skill"
-$DefaultTag = "v0.1.10"
+$DefaultTag = "v0.2.0"
 $UserHome = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile)
 $GlobalSkillsDir = Join-Path $UserHome ".gemini\config\skills\shake"
 $FullShakeSkillsDir = Join-Path $UserHome ".gemini\config\skills\full-shake"
@@ -20,7 +20,7 @@ $TargetExe = Join-Path $GlobalBinDir "shake-prune.exe"
 # UNINSTALL MODE
 # ==============================================================================
 if ($Uninstall) {
-    Write-Host "[*] Uninstalling Antigravity /shake and /full-shake..." -ForegroundColor Cyan
+    Write-Host "[*] Uninstalling Antigravity /shake..." -ForegroundColor Cyan
 
     if (Test-Path $TargetExe) {
         Remove-Item -Force $TargetExe
@@ -82,7 +82,6 @@ Write-Host "====================================================================
 
 New-Item -ItemType Directory -Force -Path (Join-Path $GlobalSkillsDir "bin") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $GlobalSkillsDir "references") | Out-Null
-New-Item -ItemType Directory -Force -Path $FullShakeSkillsDir | Out-Null
 New-Item -ItemType Directory -Force -Path $GlobalBinDir | Out-Null
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -91,9 +90,6 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Write-Host "- Installing skill definitions to: $GlobalSkillsDir"
 if (Test-Path (Join-Path $ScriptDir "skills\shake\SKILL.md")) {
     Copy-Item (Join-Path $ScriptDir "skills\shake\SKILL.md") (Join-Path $GlobalSkillsDir "SKILL.md") -Force
-}
-if (Test-Path (Join-Path $ScriptDir "skills\full-shake\SKILL.md")) {
-    Copy-Item (Join-Path $ScriptDir "skills\full-shake\SKILL.md") (Join-Path $FullShakeSkillsDir "SKILL.md") -Force
 }
 if (Test-Path (Join-Path $ScriptDir "references")) {
     Copy-Item (Join-Path $ScriptDir "references\*") (Join-Path $GlobalSkillsDir "references") -Recurse -Force
@@ -233,5 +229,5 @@ Write-Host "--------------------------------------------------------------------
 Write-Host "[OK] Installation complete!" -ForegroundColor Green
 Write-Host "- Pure native Rust binary installed at: $TargetExe"
 Write-Host "- Skill and In-Window Anchor are globally active."
-Write-Host "- To use it: Type '/shake' or '/full-shake' in any Antigravity conversation and keep chatting in the same tab!"
+Write-Host "- To use it: Type '/shake' in any Antigravity conversation and keep chatting in the same tab!"
 Write-Host "================================================================================" -ForegroundColor Cyan

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-#  ⚡ Antigravity /shake & /full-shake Multi-Platform Installer & Uninstaller
+#  ⚡ Antigravity /shake Context Compactor & Utility Suite Installer
 # ==============================================================================
 set -euo pipefail
 
@@ -16,7 +16,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # UNINSTALL MODE
 # ==============================================================================
 if [ "${1:-}" = "--uninstall" ] || [ "${1:-}" = "-u" ]; then
-    echo "⚡ Uninstalling Antigravity /shake & /full-shake..."
+    echo "⚡ Uninstalling Antigravity /shake..."
 
     # 1. Remove binary
     if [ -f "${INSTALL_DIR}/${BIN_NAME}" ]; then
@@ -84,7 +84,7 @@ fi
 # ==============================================================================
 # INSTALL MODE
 # ==============================================================================
-echo "⚡ Installing Antigravity /shake & /full-shake Context Compactor..."
+echo "⚡ Installing Antigravity /shake Context Compactor..."
 
 # Ensure secure installation directory with 0700 permissions
 mkdir -p "${INSTALL_DIR}"
@@ -127,7 +127,7 @@ elif command -v cargo >/dev/null 2>&1 && [ -f "${SCRIPT_DIR}/shake-prune-rs/Carg
     chmod 755 "${INSTALL_DIR}/${BIN_NAME}"
 else
     # Determine release URL (pinned tag via SHAKE_VERSION; explicit "latest" opts into floating)
-    SHAKE_VERSION="${SHAKE_VERSION:-v0.1.10}"
+    SHAKE_VERSION="${SHAKE_VERSION:-v0.2.0}"
     if [ "${SHAKE_VERSION}" = "latest" ]; then
         BASE_RELEASE_URL="https://github.com/${REPO}/releases/latest/download"
     else
@@ -184,10 +184,9 @@ if [ ! -x "${INSTALL_DIR}/${BIN_NAME}" ]; then
     exit 1
 fi
 
-# Install Global Skills
+# Install Global Skill
 mkdir -p "${GLOBAL_SKILLS_DIR}/references"
 mkdir -p "${GLOBAL_SKILLS_DIR}/bin"
-mkdir -p "${FULL_SHAKE_SKILLS_DIR}"
 
 # Provide convenient skill-local symlink or copy to ensure legacy relative references resolve
 cp "${INSTALL_DIR}/${BIN_NAME}" "${GLOBAL_SKILLS_DIR}/bin/${BIN_NAME}"
@@ -200,9 +199,6 @@ elif [ -f "${SCRIPT_DIR}/SKILL.md" ]; then
 fi
 if [ -d "${SCRIPT_DIR}/references" ]; then
     cp -r "${SCRIPT_DIR}/references/"* "${GLOBAL_SKILLS_DIR}/references/" 2>/dev/null || true
-fi
-if [ -f "${SCRIPT_DIR}/skills/full-shake/SKILL.md" ]; then
-    cp "${SCRIPT_DIR}/skills/full-shake/SKILL.md" "${FULL_SHAKE_SKILLS_DIR}/SKILL.md"
 fi
 
 # Configure Background PreInvocation Hook in ~/.gemini/config/hooks.json
@@ -278,7 +274,6 @@ echo ""
 echo "🎉 Installation Complete!"
 echo "• Binary installed to: ${INSTALL_DIR}/${BIN_NAME}"
 echo "• /shake skill installed to: ${GLOBAL_SKILLS_DIR}"
-echo "• /full-shake skill installed to: ${FULL_SHAKE_SKILLS_DIR}"
-echo "• Proactive 80k token auto-compaction hook configured in: ${HOOKS_CONFIG}"
+echo "• Proactive auto-compaction hook configured in: ${HOOKS_CONFIG}"
 echo ""
-echo "👉 Type /shake or /full-shake in any Antigravity conversation to compact context!"
+echo "👉 Type /shake in any Antigravity conversation to compact context!"

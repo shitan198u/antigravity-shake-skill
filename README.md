@@ -1,22 +1,7 @@
-# ⚡ Antigravity `/shake` & `/full-shake`
+# ⚡ Antigravity `/shake`
 
-> **Deterministic, In-Place Context Tree-Shaking and Token Compaction for Google Antigravity (Gemini)**  
+> **Deterministic, In-Place Context Tree-Shaking, Token Compaction & Utility Suite for Google Antigravity (Gemini)**  
 > *Physically compact active conversation logs on disk, eliminate context degradation, and continue chatting seamlessly in the **exact same tab**.*
-
----
-
-## 📸 Visual Gallery
-
-<details open>
-<summary>🔍 <b>Side-by-Side Comparison: Standard <code>/shake</code> vs. Deep <code>/full-shake</code></b></summary>
-<br/>
-
-| 🟢 Standard `/shake` (100% Thoughts Retained) | ⚡ Marathon `/full-shake` (Milestone Horizon) |
-| :--- : | :---: |
-| <a href="assets/artifact_preview.png"><img src="assets/artifact_preview.png" width="380" alt="Standard /shake Report"></a> | <a href="assets/full_shake_preview.png"><img src="assets/full_shake_preview.png" width="380" alt="Deep /full-shake Report"></a> |
-| *Zero-loss baseline report* | *Includes 2-tier scopes & timeline dropdown* |
-
-</details>
 
 ---
 
@@ -31,25 +16,24 @@ During long development sessions, AI coding agents accumulate tens of thousands 
 
 ---
 
-## 🚀 Key Features
+## 🚀 Key Features in v0.2.0
 
 * 🟢 **Same-Tab In-Place Compaction**: Modifies active session logs directly on disk without breaking open file descriptors or requiring new chat tabs.
-* 🛡️ **Inode Preservation & File Locking**: Uses POSIX/Windows truncate-and-rewrite with `fs2` exclusive locking and `fsync` durability.
-* ⚡ **Dual-Trigger Proactive Auto-Hook**: Background `PreInvocation` hook automatically detects and compacts conversations whenever file size crosses **80,000 tokens** (`264 KB`) **OR** the transcript accumulates **$\ge 20$ unpruned tool runs**, completely preventing lossy server-side `{{ CHECKPOINT }}` truncation and autonomous burst bloat!
-* ⏱️ **25 KB Growth Delta Guard**: Prevents redundant CPU/disk cycles when conversations contain extensive clean dialogue.
-* 🏛️ **Single Master Archive Architecture**: Receipts point directly to `transcript_full.jsonl` with exact 1-indexed line numbers (`line=N`). No broken links, ever.
-* 🧹 **Zero Backup Bloat Guarantee**: Eliminates redundant multi-megabyte `.bak_*` duplicates, retaining only a single permanent master archive (`transcript_full.jsonl`) and one atomic crash fallback (`transcript.jsonl.bak`).
-* 🎯 **Dual-Boundary Working Memory Engine**: Working memory is bounded by both human conversational context (last **10 user turns**) and autonomous tool volume (capped at last **20 tool outputs**). Autonomous tasks executing 30+ tools in 1 turn keep the last 20 outputs raw while compacting earlier tools into indexed receipts.
-* ✂️ **Historical Heredoc Compaction**: Compacts older bash heredocs (`cat << 'EOF' ...` > 250 chars) from assistant tool calls into line-indexed receipts.
-* ⚠️ **Warning Awareness**: Tracks and tags compiler warnings (`warnings=N`) in receipts so the AI knows warnings were emitted without carrying terminal bloat.
-* 🛡️ **30-Call Un-Clamped Error Window**: Preserves all failures (`exit != 0` or status `failed`) occurring in the last **30 tool calls** 100% raw, full, and un-clamped (preventing loss of diagnostics in `journalctl`, panics, and compiler backtraces). Failures older than 30 calls are safely compacted to line-indexed receipts pointing to `transcript_full.jsonl`.
-* 🦀 **Pure Native Rust**: Precompiled multi-platform binaries for Linux (x86_64, aarch64), macOS (Universal Binary for Apple Silicon & Intel), and Windows (x86_64).
+* 🧠 **Adaptive Standard & Deep Compaction**: One safe command (`/shake`). Standard zero-loss compaction operates automatically for normal sessions; long marathon threads (>30 user turns) automatically switch to deep compaction with Milestone Horizon.
+* 📋 **Clean Default Artifact (`@shake_latest.md`)**: Compactions update a single stable artifact `@shake_latest.md` by default, eliminating multi-megabyte file accumulation across repetitive shakes.
+* 🛡️ **Inode Preservation & File Locking**: Uses POSIX/Windows truncate-and-rewrite with `fs2` exclusive locking, atomic crash fallback (`.bak`), and `fsync` durability.
+* ⚡ **Dual-Trigger Proactive Auto-Hook**: Background `PreInvocation` and `Stop` hooks automatically detect and compact conversations whenever file size crosses **80,000 tokens** (`264 KB`) **OR** accumulates **$\ge 20$ unpruned tool runs**, completely preventing lossy server-side `{{ CHECKPOINT }}` truncation and autonomous burst bloat!
+* 🏛️ **Permanent Master Archive (`transcript_full.jsonl`)**: Receipts point directly to `transcript_full.jsonl` with exact 1-indexed line numbers (`line=N`). No broken links, ever.
+* 🎯 **Dual-Boundary Working Memory Engine**: Working memory retains human conversational context (last **10 user turns**) and autonomous tool volume (capped at last **20 tool outputs**).
+* 🛡️ **30-Call Un-Clamped Error Window**: Preserves all failures (`exit != 0` or status `failed`) occurring in the last **30 tool calls** 100% raw, full, and un-clamped.
+* 🛠️ **Unified CLI Utility Suite**: Five high-utility subcommands (`run`, `preview`, `status`, `undo`, `show`) for daily workflow management.
+* 🦀 **Pure Native Rust**: High-performance, memory-safe, multi-platform binaries for Linux (x86_64, aarch64), macOS (Apple Silicon & Intel), and Windows (x86_64).
 
 ---
 
 ## 📊 Physical Token Reduction Metrics
 
-| Metric | Original Master Stream (`transcript_full.jsonl`) | Compacted via `/shake` | Compacted via `/full-shake` |
+| Metric | Original Master Stream (`transcript_full.jsonl`) | Standard Mode (`<= 30 turns`) | Deep Mode (`> 30 turns`) |
 | :--- | :---: | :---: | :---: |
 | **Payload Size on Disk** | `3.35 MB` | `750 KB` | **`455 KB`** |
 | **Estimated Token Load** | `~990,000 tokens` | `~220,000 tokens` | **`~138,000 tokens`** |
@@ -83,47 +67,67 @@ cp shake-prune-rs/target/release/shake-prune ~/.gemini/bin/shake-prune
 
 ## 💡 How to Use
 
-### 1. In Any Antigravity Chat (Interactive Slash Commands)
+### 1. In Any Antigravity Chat
+Simply type `/shake` in any chat session:
 
-#### 🟢 Standard Zero-Loss Compaction (`/shake`)
-* Prunes tool stdout dumps and historical bash heredocs older than the last 10 user conversational turns.
-* Retains **100% of User prompts, Assistant reasoning, Thoughts, and Errors verbatim**.
 ```text
 /shake
 ```
 
-#### ⚡ Marathon Reset (`/full-shake`)
-* Designed for long-running sessions (30+ turns).
-* Windows scratchpad thoughts to the **last 20 assistant turns**, dropping older internal monologues.
-* Automatically applies the **Milestone Horizon** on threads with $> 30$ user turns:
-  * **Turn 1 (Genesis)**: Preserved 100% verbatim (project origin and rules).
-  * **Middle Segment (Turns 2 to N-25)**: Collapsed into a structured Milestone Checkpoint block with exact line-indexed backup links.
-  * **Active Working Window (Last 25 user turns)**: Preserved 100% verbatim (last 10 turns of tool outputs unpruned).
-* Restores sub-second "Turn 1" responsiveness on mega-threads!
-```text
-/full-shake
-```
+The pruner runs in under 15ms, prints a streamlined scorecard, updates `@shake_latest.md`, and pins your active working state in the exact same conversation window.
 
-### 2. Standalone CLI Usage
+---
+
+### 2. Standalone CLI Utility Suite
+
 ```bash
-# Compact a specific transcript in-place (keeps last 10 user turns unpruned)
-shake-prune /path/to/transcript.jsonl
+# 1. Run adaptive compaction (updates shake_latest.md by default)
+shake-prune run /path/to/transcript.jsonl
 
-# Custom working window (e.g. keep last 15 user turns, last 30 tools, last 40 errors)
-shake-prune /path/to/transcript.jsonl --recent-user-turns 15 --tools-cap 30 --errors-cap 40
+# 2. Preview compaction impact safely without modifying disk
+shake-prune preview /path/to/transcript.jsonl
 
-# Run marathon full-shake with Milestone Horizon and thought windowing
-shake-prune /path/to/transcript.jsonl --full
+# 3. Inspect context health, token size, and recommendations
+shake-prune status /path/to/transcript.jsonl
 
-# Dry-run simulation (calculates metrics without touching disk)
-shake-prune /path/to/transcript.jsonl --dry-run
+# 4. Safely undo / rollback from atomic backup
+shake-prune undo /path/to/transcript.jsonl
 
-# Output metrics as machine-readable JSON
-shake-prune /path/to/transcript.jsonl --json
+# 5. Inspect archived tool execution from permanent master log
+shake-prune show /path/to/transcript.jsonl --step 42 --pretty
+shake-prune show /path/to/transcript.jsonl --line 128
 
-# Run as Antigravity lifecycle hook
-shake-prune --hook
+# 6. Verify environment, hooks, and permissions
+shake-prune doctor
 ```
+
+---
+
+## ⚙️ Configuration (`shake.toml`)
+
+Configure system-wide settings in `~/.gemini/config/shake.toml`:
+
+```toml
+[shake]
+keep_recent_turns = 10          # Keep last N human user turns verbatim
+keep_recent_tools = 20          # Keep last N tool runs raw
+keep_recent_errors = 30         # Keep un-clamped error traces for last N tools
+deep_after_user_turns = 30      # Automatically switch to deep compaction past 30 turns
+redact_secrets = false          # Redact API keys, tokens, and bearer secrets
+
+[advanced]
+auto_enabled = true             # Set to false to disable auto-shake hook completely
+token_threshold_bytes = 264000  # ~80k tokens
+tool_burst_threshold = 20       # Autonomous tool burst trigger
+cooldown_seconds = 180          # 3-minute cooldown between compactions
+growth_delta_bytes = 25600      # 25 KB transcript growth required
+artifact_retention_count = 20   # Maximum historical artifacts retained
+log_level = "info"
+```
+
+All settings can also be set via environment variables:
+`SHAKE_KEEP_RECENT_TURNS`, `SHAKE_KEEP_RECENT_TOOLS`, `SHAKE_KEEP_RECENT_ERRORS`,
+`SHAKE_DEEP_AFTER_TURNS`, `SHAKE_SECRET_REDACTION=1`, `SHAKE_AUTO_DISABLE=1`.
 
 ---
 
@@ -156,7 +160,8 @@ powershell -File .\install.ps1 -Uninstall
 * **Strict Input/Output Validation**: Rejects access to sensitive system paths (`/etc`, `/root`, `C:\Windows`).
 * **Context Poisoning Prevention**: Restricts anchor discovery strictly to canonical system directories (`~/.gemini`).
 * **Exclusive Concurrency (`fs2`)**: Holds exclusive file locks during in-place truncation and issues `fsync` (`sync_all()`) before unlocking.
-* **Fail-Open Hook Guarantee**: The `PreInvocation` hook runs with `panic::catch_unwind` protection—it will always emit `{}` and exit cleanly on any error or panic.
+* **Pre-Commit Fingerprint & Intent Journaling**: Ensures zero risk of data loss from concurrent writes or mid-rewrite interruptions.
+* **Fail-Open Hook Guarantee**: The `PreInvocation` and `Stop` hooks run with `panic::catch_unwind` protection—they will always emit `{}` and exit cleanly on any error or panic.
 
 ---
 
