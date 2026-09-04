@@ -9,7 +9,7 @@ use shake_prune::hook::handle_hook;
 use shake_prune::metadata::{write_active_anchor, write_artifact_metadata};
 
 use shake_prune::pruner::{
-    estimate_tokens, run_compaction_pipeline, shell_quote, CompactionOptions,
+    estimate_tokens, run_compaction_pipeline, CompactionOptions,
 };
 use shake_prune::{
     format_bytes, validate_output_path_allowlist, validate_transcript_path, VERSION,
@@ -547,67 +547,74 @@ fn main() {
     }
 
     let abs_str = abs_output_path.to_string_lossy().to_string();
-    let quoted_path = shell_quote(&abs_str);
 
     let est_prompt_tokens_before = estimate_tokens(stats.this_run_before_bytes);
     let est_prompt_tokens_after = estimate_tokens(stats.this_run_after_bytes);
 
-    println!("\n# ⚡ Context Compaction Completed");
-    println!("> - **Session Topic**: `{}`", stats.topic_slug);
-    println!("> - **Working Window**: Preserved last {} user turns verbatim (capped at {} tool outputs, {} error retention).", options.recent_user_turns, options.recent_tools_cap, options.recent_errors_cap);
-    println!("> - **Master Archive**: `{}`", master_archive_abs_str);
-    println!("> - **Executive Summary**: `{}`\n", abs_str);
+    let format_prompt_tokens = |tokens: usize| -> String {
+        if tokens >= 1_000_000 {
+            format!("~{:.1}M", tokens as f64 / 1_000_000.0)
+        } else if tokens >= 1_000 {
+            format!("~{}k", (tokens + 500) / 1000)
+        } else {
+            format!("~{}", tokens)
+        }
+    };
 
-    println!("| Metric | Pre-Shake | Shaken (Active Memory) | Savings |");
-    println!("| :--- | :--- | :--- | :--- |");
-    println!(
-        "| **Live Prompt Payload** | `{}` | **`{}`** | **`{:.1}%`** |",
-        format_bytes(stats.this_run_before_bytes),
-        format_bytes(stats.this_run_after_bytes),
-        stats.this_run_savings_pct
-    );
-    println!(
-        "| **Estimated Prompt Tokens** | `~{}` | **`~{}`** | **`{:.1}%`** |",
-        est_prompt_tokens_before, est_prompt_tokens_after, stats.this_run_savings_pct
-    );
-    println!(
-        "| **Tool Outputs Compacted** | `{}` | `0` (compacted to receipts) | `-` |",
-        stats.pruned_tools
-    );
-    println!(
-        "| **Retained Errors (Un-Clamped)** | - | `{}` (full traces kept verbatim) | `-` |",
-        stats.retained_errors
-    );
-    println!(
-        "| **Active Working Tools** | - | `{}` (unpruned output kept verbatim) | `-` |\n",
-        stats.retained_recent_steps
-    );
+    let display_topic: String = stats
+        .topic_slug
+        .split('_')
+        .filter(|s| !s.is_empty())
+        .map(|w| {
+            let mut chars = w.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    println!("\n# ⚡ Context Compacted");
+    println!("> **Session**: `{}` • **Status**: Ready to continue\n", display_topic);
 
     if options.dry_run {
         println!(
-            "> ⚠️ **[Dry Run Active]**: No changes were written to `{}`.",
+            "> ⚠️ **[Dry Run Active]**: No changes were written to `{}`.\n",
             transcript_path.display()
         );
-    } else {
-        println!("> 🔒 **Inode Preserved**: File rewritten in place. Open file descriptors remain valid.\n");
     }
 
+    println!("| Metric | Before | After | Reduction |");
+    println!("| :--- | :--- | :--- | :--- |");
+    println!(
+        "| **Context Payload** | `{}` ({} tokens) | **`{}`** ({} tokens) | **`{:.1}% saved`** |",
+        format_bytes(stats.this_run_before_bytes),
+        format_prompt_tokens(est_prompt_tokens_before),
+        format_bytes(stats.this_run_after_bytes),
+        format_prompt_tokens(est_prompt_tokens_after),
+        stats.this_run_savings_pct
+    );
+    println!(
+        "| **Pruned Tool Bloat** | {} tool executions | **Clean receipts** (`archive=...`) | **{} pruned** |",
+        stats.pruned_tools,
+        stats.pruned_tools
+    );
+    println!(
+        "| **Working Memory** | Last {} user turns | **100% dialogue preserved** | Active |\n",
+        options.recent_user_turns
+    );
+
+    println!("### [Open Summary Artifact](file://{})", abs_str);
+    println!("*Click above to open the executive summary in the artifact viewer or copy milestones.*\n");
+
     println!("<details>");
-    println!("<summary>📋 Need to export or copy this session elsewhere?</summary>\n");
-    println!("- **In-Chat Mention**: `@{}`", abs_str);
-    println!("- **Copy to Project**: `cp {} ./`", quoted_path);
-    if cfg!(target_os = "windows") {
-        println!(
-            "- **Copy to Clipboard**: `powershell -c \"Get-Content {} | Set-Clipboard\"`",
-            quoted_path
-        );
-    } else if cfg!(target_os = "macos") {
-        println!("- **Copy to Clipboard**: `pbcopy < {}`", quoted_path);
-    } else {
-        println!(
-            "- **Copy to Clipboard**: `xclip -sel clip < {} || wl-copy < {}`",
-            quoted_path, quoted_path
-        );
-    }
+    println!("<summary>⚙️ Archive & Working Tools</summary>\n");
+    println!("- **Master Archive**: [transcript_full.jsonl](file://{})", master_archive_abs_str);
+    println!(
+        "- **Active Working Tools**: Kept last {} tool outputs and {} un-clamped error traces in active memory.",
+        stats.retained_recent_steps,
+        stats.retained_errors
+    );
     println!("</details>\n");
 }
