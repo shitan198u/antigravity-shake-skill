@@ -144,14 +144,15 @@ Instead of creating dozens of multi-megabyte `.bak_*` files on every run (which 
 ---
 
 ### 10. Privacy, Redaction & Permission Hardening
-* **Secret Redaction**:
-  * When enabled via `--redact-secrets` or `[privacy] redact_secrets = true` in `shake.toml`, all prompts, tool outputs, and generated reports are sanitized against patterns including:
+* **Secret Redaction Scope & Boundaries**:
+  * When enabled via `--redact-secrets` or `[privacy] redact_secrets = true` in `shake.toml`, credentials are sanitized across the active compacted transcript (`transcript.jsonl`), generated markdown artifacts, topic slugs, and suggested filenames against patterns including:
     * GitHub tokens (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`)
     * AWS access keys (`AKIA[0-9A-Z]{16}`)
     * Bearer tokens (`Bearer [a-zA-Z0-9_\-\.]{16,}`)
     * RSA / OpenSSH private keys (`BEGIN ... PRIVATE KEY`)
     * Generic API keys (`api[_-]?key = ...`)
     * HTTP Authorization headers (`Authorization: ...`)
+  * *Audit Log Boundary*: The pre-compaction master audit archive (`transcript_full.jsonl`) and the pre-truncation recovery snapshot (`transcript.jsonl.bak`) intentionally retain verbatim historical data for forensic recovery and line-indexing integrity.
 * **POSIX 0600 User-Only Permissions**:
   * All sensitive runtime artifacts—`.shake_in_progress`, `transcript_full.jsonl`, `shake_hook.log`, `shake_metadata.json`, and backups—are created with `0600` mode (`-rw-------`) on Unix systems to prevent disclosure in multi-user environments.
 

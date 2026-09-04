@@ -844,11 +844,24 @@ pub fn run_compaction_pipeline(
             || status.contains("failed");
         let is_recent_error = is_error && options.recent_errors_cap > 0 && (i >= error_cutoff_idx);
 
+        let has_explicit_step_idx = step_val
+            .get("step_index")
+            .and_then(|v| v.as_u64())
+            .is_some();
+        let is_synthetic = step_val
+            .get("is_synthetic")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+            || step_val
+                .get("is_milestone")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
         // Exact line number in the master archive (transcript_full.jsonl)
         let resolved_line_no = if let Some(m) = &master_step_to_line {
             match m.get(&step_idx).copied() {
                 Some(l) => l,
-                None if options.dry_run => orig_line_no,
+                None if options.dry_run || !has_explicit_step_idx || is_synthetic => orig_line_no,
                 None => {
                     return Err(format!(
                         "Critical integrity failure: step {} cannot be resolved in master archive '{}'. Refusing to emit unresolvable receipt.",
@@ -870,7 +883,11 @@ pub fn run_compaction_pipeline(
                     .unwrap_or("");
                 let user_text = extract_user_request_text(raw_content);
                 if first_user_prompt.is_empty() {
-                    first_user_prompt = user_text.to_string();
+                    first_user_prompt = if options.redact_secrets {
+                        redact_secrets(user_text)
+                    } else {
+                        user_text.to_string()
+                    };
                 }
                 let user_display = if options.redact_secrets {
                     redact_secrets(user_text)
@@ -1078,7 +1095,12 @@ pub fn run_compaction_pipeline(
             _ => {}
         }
 
-        let compacted_line = serde_json::to_string(&step_val)?;
+        let compacted_line = if options.redact_secrets {
+            let line_str = serde_json::to_string(&step_val)?;
+            redact_secrets(&line_str)
+        } else {
+            serde_json::to_string(&step_val)?
+        };
         generated_json_lines.push(compacted_line.clone());
         compacted_output.push_str(&compacted_line);
         compacted_output.push('\n');
@@ -1162,7 +1184,12 @@ pub fn run_compaction_pipeline(
         timeline_section
     );
 
-    let full_document = format!("{}{}", header, output_blocks.join("\n\n"));
+    let raw_document = format!("{}{}", header, output_blocks.join("\n\n"));
+    let full_document = if options.redact_secrets {
+        redact_secrets(&raw_document)
+    } else {
+        raw_document
+    };
     let pruned_bytes = full_document.len();
     let raw_tokens = estimate_tokens(raw_bytes);
     let pruned_tokens = estimate_tokens(pruned_bytes);

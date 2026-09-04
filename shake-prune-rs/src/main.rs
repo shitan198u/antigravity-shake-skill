@@ -267,7 +267,7 @@ OPTIONS:
     --recent-window <N>      Fallback raw tool step window if user-turns=0 (default: 6)
     --full                   Full deep compaction (prunes thoughts older than window)
     --thought-window <N>     Number of recent turns to retain thoughts in full mode (default: 20)
-    --redact-secrets         Redact API keys, tokens, and Authorization headers
+    --redact-secrets         Redact credentials in active JSONL, reports, and filenames
     --dry-run                Simulate compaction without modifying transcript.jsonl
     --no-in-place            Generate markdown summary artifact without truncating JSONL
     --json                   Emit machine-readable JSON metrics on stdout

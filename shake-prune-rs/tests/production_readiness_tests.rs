@@ -293,9 +293,47 @@ fn test_pre_commit_concurrent_write_aborts_without_truncation() {
     );
 }
 
+struct EnvGuard {
+    saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+
+impl EnvGuard {
+    fn new(keys: &[&'static str]) -> Self {
+        let mut saved = Vec::new();
+        for &k in keys {
+            saved.push((k, std::env::var_os(k)));
+            std::env::remove_var(k);
+        }
+        Self { saved }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        for (k, val) in &self.saved {
+            match val {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
+    }
+}
+
 /// P0-4: Configuration file and environment variable overrides.
 #[test]
 fn test_config_file_and_env_overrides() {
+    let _guard = EnvGuard::new(&[
+        "SHAKE_AUTO_DISABLE",
+        "SHAKE_RECENT_USER_TURNS",
+        "SHAKE_TOOLS_CAP",
+        "SHAKE_ERRORS_CAP",
+        "SHAKE_TOKEN_THRESHOLD_BYTES",
+        "SHAKE_TOOL_BURST_THRESHOLD",
+        "SHAKE_COOLDOWN_SECONDS",
+        "SHAKE_GROWTH_DELTA_BYTES",
+        "SHAKE_SECRET_REDACTION",
+    ]);
+
     let tmp_dir = tempfile::tempdir().unwrap();
     let config_file = tmp_dir.path().join("shake.toml");
 
@@ -332,11 +370,6 @@ fn test_config_file_and_env_overrides() {
     );
     assert_eq!(config.retention.recent_user_turns, 99);
     assert!(config.privacy.redact_secrets);
-
-    // Clean up env vars
-    std::env::remove_var("SHAKE_AUTO_DISABLE");
-    std::env::remove_var("SHAKE_RECENT_USER_TURNS");
-    std::env::remove_var("SHAKE_SECRET_REDACTION");
 }
 
 /// P1-3: Secret redaction helper test.
@@ -474,4 +507,68 @@ fn test_hardened_restore_creates_pre_restore_backup() {
 
     // Verify transcript restored with backup content
     assert_eq!(fs::read_to_string(&transcript).unwrap(), backup_content);
+}
+
+/// CodeRabbit review fix: Records without explicit step_index or synthetic milestone markers
+/// must not trigger a critical integrity failure when master archive index resolves only explicit steps.
+#[test]
+fn test_unindexed_synthetic_record_does_not_abort_compaction() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let logs_dir = tmp_dir
+        .path()
+        .join(".gemini/brain/test-synthetic/.system_generated/logs");
+    fs::create_dir_all(&logs_dir).unwrap();
+    let transcript_path = logs_dir.join("transcript.jsonl");
+
+    {
+        let mut f = File::create(&transcript_path).unwrap();
+        writeln!(
+            f,
+            "{}",
+            json!({"step_index": 1, "type": "USER_INPUT", "content": "Question 1"})
+        )
+        .unwrap();
+        // Record with tool output but no explicit step_index
+        writeln!(
+            f,
+            "{}",
+            json!({"type": "RUN_COMMAND", "content": "x".repeat(300), "exit_code": 0})
+        )
+        .unwrap();
+        // Synthetic milestone record
+        writeln!(
+            f,
+            "{}",
+            json!({"is_milestone": true, "type": "PLANNER_RESPONSE", "content": "Milestone Checkpoint"})
+        )
+        .unwrap();
+        writeln!(
+            f,
+            "{}",
+            json!({"step_index": 4, "type": "USER_INPUT", "content": "Question 2"})
+        )
+        .unwrap();
+        writeln!(
+            f,
+            "{}",
+            json!({"step_index": 5, "type": "PLANNER_RESPONSE", "content": "Answer 2"})
+        )
+        .unwrap();
+    }
+
+    let bin = bin();
+    let output = std::process::Command::new(&bin)
+        .arg(&transcript_path)
+        .arg("--recent-user-turns")
+        .arg("1")
+        .arg("--recent-window")
+        .arg("0")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "Compaction must succeed without integrity panic: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
