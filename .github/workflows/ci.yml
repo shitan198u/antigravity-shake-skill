@@ -31,10 +31,11 @@ jobs:
               - 'bin/**'
               - 'install.sh'
               - 'install.ps1'
+              - 'scripts/**'
               - 'Cargo.lock'
               - 'Cargo.toml'
               - '.github/workflows/ci.yml'
-
+              - '.github/workflows/release.yml'
   # 2. Static Analysis & Lint Gates
   quality:
     name: 🦀 Quality & Security Gates
@@ -58,9 +59,8 @@ jobs:
       - name: Install cargo-audit (Precompiled via install-action)
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-audit
       - name: Dependency Security Audit
-        run: cargo audit --manifest-path shake-prune-rs/Cargo.toml || true
+        run: cargo audit --file shake-prune-rs/Cargo.lock
 
   # 3. Multi-OS Unit & Integration Tests (Ubuntu, macOS, Windows)
   multi-os-tests:
@@ -80,7 +80,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: shake-prune-rs
-      - name: Run 73-Test Automated Suite
+      - name: Run Automated Test Suite
         run: cargo test --manifest-path shake-prune-rs/Cargo.toml
       - name: Test Native Release Build & Local Installer (Unix)
         if: runner.os != 'Windows'

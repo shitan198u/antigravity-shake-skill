@@ -24,14 +24,15 @@ jobs:
           workspaces: shake-prune-rs
       - name: Build Release Binary
         run: cargo build --release --manifest-path shake-prune-rs/Cargo.toml
+      - name: Smoke-Test Release Binary
+        run: |
+          ./shake-prune-rs/target/release/shake-prune --version
+          ./shake-prune-rs/target/release/shake-prune --help
+          ./shake-prune-rs/target/release/shake-prune doctor --json
       - name: Package Asset
         run: |
           mkdir -p dist
           cp shake-prune-rs/target/release/shake-prune dist/shake-prune-linux-x86_64
-      - uses: actions/upload-artifact@v7
-        with:
-          name: shake-prune-linux-x86_64
-          path: dist/shake-prune-linux-x86_64
 
   # 2. Build Linux aarch64 (ARM64 musl) via cross
   build-linux-arm64:
@@ -56,10 +57,7 @@ jobs:
         run: |
           mkdir -p dist
           cp shake-prune-rs/target/aarch64-unknown-linux-musl/release/shake-prune dist/shake-prune-linux-aarch64
-      - uses: actions/upload-artifact@v7
-        with:
-          name: shake-prune-linux-aarch64
-          path: dist/shake-prune-linux-aarch64
+          file dist/shake-prune-linux-aarch64
 
   # 3. Build macOS Universal (Apple Silicon + Intel via lipo)
   build-macos:
@@ -86,6 +84,11 @@ jobs:
             shake-prune-rs/target/aarch64-apple-darwin/release/shake-prune \
             shake-prune-rs/target/x86_64-apple-darwin/release/shake-prune
           file dist/shake-prune-macos-universal
+      - name: Smoke-Test Universal Binary
+        run: |
+          ./dist/shake-prune-macos-universal --version
+          ./dist/shake-prune-macos-universal --help
+          ./dist/shake-prune-macos-universal doctor --json
       - uses: actions/upload-artifact@v7
         with:
           name: shake-prune-macos-universal
@@ -105,6 +108,10 @@ jobs:
           workspaces: shake-prune-rs
       - name: Build Windows Release Binary
         run: cargo build --release --manifest-path shake-prune-rs/Cargo.toml
+      - name: Smoke-Test Windows Binary
+        run: |
+          shake-prune-rs\target\release\shake-prune.exe --version
+          shake-prune-rs\target\release\shake-prune.exe doctor --json
       - name: Package Asset
         shell: bash
         run: |
@@ -134,14 +141,24 @@ jobs:
           cd final_assets
           sha256sum * > SHA256SUMS.txt
           cat SHA256SUMS.txt
+      - name: Verify Shipped Artifacts Against Checksums
+        run: |
+          cd final_assets
+          sha256sum -c SHA256SUMS.txt
+          test -f shake-prune-linux-x86_64
+          test -f shake-prune-linux-aarch64
+          test -f shake-prune-macos-universal
+          test -f shake-prune-windows-x86_64.exe
+          ./shake-prune-linux-x86_64 --version
       - name: Generate CycloneDX SBOM (Precompiled via install-action)
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-cyclonedx
       - name: Build SBOM Asset
         run: |
-          cargo cyclonedx --manifest-path shake-prune-rs/Cargo.toml --format json --override-filename sbom.cdx.json || true
-          cp shake-prune-rs/sbom.cdx.json final_assets/sbom.cdx.json 2>/dev/null || true
+          cargo cyclonedx --manifest-path shake-prune-rs/Cargo.toml --format json --override-filename sbom.cdx.json
+          test -f shake-prune-rs/sbom.cdx.json
+          cp shake-prune-rs/sbom.cdx.json final_assets/sbom.cdx.json
       - name: Keyless Cryptographic Signing via Sigstore/Cosign (Free OIDC)
         uses: sigstore/cosign-installer@v3
       - name: Sign Checksums
