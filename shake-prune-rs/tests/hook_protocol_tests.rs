@@ -453,3 +453,77 @@ fn test_hook_stop_event_compacts_in_background_silently() {
         "Anchor file must be created by Stop hook"
     );
 }
+
+/// P0: Lock contention must fail open with exit 0 + {} and leave transcript intact.
+#[test]
+fn test_hook_lock_contention_fails_open() {
+    use fs2::FileExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let home = fake_home(&tmp);
+    let transcript = trusted_transcript_path(&home, "conv_lock_contention");
+    TranscriptBuilder::new()
+        .user("Contended task")
+        .tool_output("RUN_COMMAND", &"x".repeat(300_000), 0)
+        .assistant("done")
+        .write(&transcript);
+    let before = std::fs::read(&transcript).unwrap();
+    // Hold the exclusive lock for the duration of the hook run.
+    let _guard = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&transcript)
+        .unwrap();
+    _guard.lock_exclusive().unwrap();
+    let payload = serde_json::json!({ "transcriptPath": transcript.to_string_lossy() });
+    let mut child = Command::new(bin())
+        .arg("--hook")
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "contended hook must exit 0");
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "{}");
+    let after = std::fs::read(&transcript).unwrap();
+    assert_eq!(before, after, "contended hook must not modify transcript");
+}
+
+/// P0: Expired watchdog budget must fail open with exit 0 + {}.
+#[test]
+fn test_hook_watchdog_expiry_fails_open() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = fake_home(&tmp);
+    let transcript = trusted_transcript_path(&home, "conv_watchdog");
+    TranscriptBuilder::new()
+        .user("Watchdog task")
+        .tool_output("RUN_COMMAND", &"x".repeat(300_000), 0)
+        .assistant("done")
+        .write(&transcript);
+    let payload = serde_json::json!({ "transcriptPath": transcript.to_string_lossy() });
+    let mut child = Command::new(bin())
+        .arg("--hook")
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("SHAKE_HOOK_DEADLINE_MS", "0")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "watchdog-expired hook must exit 0");
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "{}");
+}

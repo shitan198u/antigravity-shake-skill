@@ -886,3 +886,137 @@ fn test_anchor_circuit_breaker_suppresses_injection() {
         "Circuit breaker open must suppress anchor injection"
     );
 }
+
+/// P0: Automatic deep-switch without --full.
+/// 35 user turns in auto mode must activate Milestone Horizon + thought windowing.
+#[test]
+fn test_auto_mode_switches_to_deep_past_30_turns() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let logs_dir = tmp_dir
+        .path()
+        .join(".gemini/brain/session-auto-deep/.system_generated/logs");
+    fs::create_dir_all(&logs_dir).unwrap();
+    let transcript_path = logs_dir.join("transcript.jsonl");
+    {
+        let mut f = File::create(&transcript_path).unwrap();
+        for i in 1..=35u64 {
+            writeln!(f, "{}", json!({"step_index": i * 2 - 1, "type": "USER_INPUT", "content": format!("Auto deep turn {} unique prompt", i)})).unwrap();
+            writeln!(f, "{}", json!({"step_index": i * 2, "type": "PLANNER_RESPONSE", "thinking": format!("Auto deep thought {}", i), "content": format!("Auto deep reply {}", i)})).unwrap();
+        }
+    }
+    // No --full flag: auto mode must resolve to deep past 30 turns.
+    let out = run_shake(&[transcript_path.to_str().unwrap()]);
+    assert!(out.status.success());
+    let compacted = fs::read_to_string(&transcript_path).unwrap();
+    assert!(
+        compacted.contains("Auto deep turn 1 unique prompt"),
+        "Genesis turn 1 lost in auto-deep"
+    );
+    assert!(
+        compacted.contains("Historical Milestone Horizon"),
+        "Milestone block missing in auto-deep"
+    );
+    assert!(
+        !compacted.contains("Auto deep turn 5 unique prompt"),
+        "Turn 5 should collapse in auto-deep"
+    );
+    for i in 11..=35 {
+        assert!(
+            compacted.contains(&format!("Auto deep turn {} unique prompt", i)),
+            "Turn {} must survive auto-deep",
+            i
+        );
+    }
+}
+
+/// P0: Sensitive artifacts must be 0600 on Unix.
+#[cfg(unix)]
+#[test]
+fn test_sensitive_artifacts_created_user_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let logs_dir = tmp_dir
+        .path()
+        .join(".gemini/brain/session-perms/.system_generated/logs");
+    fs::create_dir_all(&logs_dir).unwrap();
+    let transcript_path = logs_dir.join("transcript.jsonl");
+    {
+        let mut f = File::create(&transcript_path).unwrap();
+        writeln!(
+            f,
+            "{}",
+            json!({"step_index": 1, "type": "USER_INPUT", "content": "perm check"})
+        )
+        .unwrap();
+        for i in 1..=25u64 {
+            writeln!(f, "{}", json!({"step_index": i + 1, "type": "RUN_COMMAND", "status": "DONE", "exit_code": 0, "content": format!("output {} {}", i, "x".repeat(500))})).unwrap();
+        }
+    }
+    let out = run_shake(&[transcript_path.to_str().unwrap()]);
+    assert!(out.status.success());
+    for p in [
+        transcript_path.clone(),
+        logs_dir.join("transcript_full.jsonl"),
+        logs_dir.join("transcript.jsonl.bak"),
+    ] {
+        assert!(p.exists(), "expected artifact {}", p.display());
+        let mode = fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{} has mode {:o}, want 600", p.display(), mode);
+    }
+}
+
+/// P0: Master archive must grow append-only across compactions.
+#[test]
+fn test_master_archive_grows_append_only() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let logs_dir = tmp_dir
+        .path()
+        .join(".gemini/brain/session-append-only/.system_generated/logs");
+    fs::create_dir_all(&logs_dir).unwrap();
+    let transcript_path = logs_dir.join("transcript.jsonl");
+    let full_path = logs_dir.join("transcript_full.jsonl");
+    {
+        let mut f = File::create(&transcript_path).unwrap();
+        writeln!(
+            f,
+            "{}",
+            json!({"step_index": 1, "type": "USER_INPUT", "content": "append-only wave 1"})
+        )
+        .unwrap();
+        for i in 1..=25u64 {
+            writeln!(f, "{}", json!({"step_index": i + 1, "type": "RUN_COMMAND", "status": "DONE", "exit_code": 0, "content": format!("wave1 {} {}", i, "x".repeat(500))})).unwrap();
+        }
+    }
+    let out1 = run_shake(&[transcript_path.to_str().unwrap()]);
+    assert!(out1.status.success());
+    let before_bytes = fs::read(&full_path).unwrap();
+    let before_lines = before_bytes.iter().filter(|b| **b == b'\n').count();
+    assert!(before_lines > 0);
+    {
+        let mut f = OpenOptions::new()
+            .append(true)
+            .open(&transcript_path)
+            .unwrap();
+        writeln!(f, "{}", json!({"step_index": 100, "type": "RUN_COMMAND", "status": "DONE", "exit_code": 0, "content": format!("wave2 {}", "y".repeat(500))})).unwrap();
+        writeln!(
+            f,
+            "{}",
+            json!({"step_index": 101, "type": "USER_INPUT", "content": "append-only wave 2"})
+        )
+        .unwrap();
+    }
+    let out2 = run_shake(&[transcript_path.to_str().unwrap()]);
+    assert!(out2.status.success());
+    let after_bytes = fs::read(&full_path).unwrap();
+    let after_lines = after_bytes.iter().filter(|b| **b == b'\n').count();
+    assert!(
+        after_lines > before_lines,
+        "archive must grow monotonically ({} -> {})",
+        before_lines,
+        after_lines
+    );
+    assert!(
+        after_bytes.starts_with(&before_bytes),
+        "second compaction must preserve prior archive bytes verbatim"
+    );
+}
