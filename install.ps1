@@ -69,9 +69,9 @@ if ($Uninstall) {
         }
     }
 
-    Write-Host "[DONE] Antigravity /shake has been completely uninstalled." -ForegroundColor Green
+    Write-Host "[DONE] Antigravity /shake binaries, skills, and hooks removed." -ForegroundColor Green
+    Write-Host "Retained (delete manually if desired): shake.toml, logs, transcript_full.jsonl archives, and .bak files."
     exit 0
-}
 
 # ==============================================================================
 # INSTALL MODE
@@ -90,9 +90,13 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Write-Host "- Installing skill definitions to: $GlobalSkillsDir"
 if (Test-Path (Join-Path $ScriptDir "skills\shake\SKILL.md")) {
     Copy-Item (Join-Path $ScriptDir "skills\shake\SKILL.md") (Join-Path $GlobalSkillsDir "SKILL.md") -Force
+} else {
+    Write-Warning "No SKILL.md found in $ScriptDir\skills\shake; skill text skipped."
 }
 if (Test-Path (Join-Path $ScriptDir "references")) {
     Copy-Item (Join-Path $ScriptDir "references\*") (Join-Path $GlobalSkillsDir "references") -Recurse -Force
+} else {
+    Write-Warning "No references directory in $ScriptDir; references skipped."
 }
 
 # 2. Install Native Precompiled Binary
@@ -102,6 +106,13 @@ if (Test-Path (Join-Path $ScriptDir "bin\shake-prune.exe")) {
     Write-Host "- Installing local compiled native binary from bin/..."
     Copy-Item (Join-Path $ScriptDir "bin\shake-prune.exe") $TargetExe -Force
     Copy-Item (Join-Path $ScriptDir "bin\shake-prune.exe") (Join-Path $GlobalSkillsDir "bin\shake-prune.exe") -Force
+    $InstalledBinary = $true
+}
+
+if ((-not $InstalledBinary) -and (Test-Path (Join-Path $ScriptDir "shake-prune-rs\target\release\shake-prune.exe"))) {
+    Write-Host "- Installing local cargo release binary from shake-prune-rs\target\release\..."
+    Copy-Item (Join-Path $ScriptDir "shake-prune-rs\target\release\shake-prune.exe") $TargetExe -Force
+    Copy-Item (Join-Path $ScriptDir "shake-prune-rs\target\release\shake-prune.exe") (Join-Path $GlobalSkillsDir "bin\shake-prune.exe") -Force
     $InstalledBinary = $true
 }
 
@@ -183,11 +194,13 @@ if (-not $InstalledBinary) {
 
 # 3. Safely merge PreInvocation and Stop hooks into hooks.json
 Write-Host "- Merging PreInvocation and Stop hooks into ~/.gemini/config/hooks.json (preserving existing hooks)..."
-$EscapedHookExe = $TargetExe.Replace("\", "\\")
-$HookCommand = "$EscapedHookExe --hook"
+# NOTE: Do not pre-escape backslashes; ConvertTo-Json handles JSON escaping.
+$HookCommand = "$TargetExe --hook"
 
 if (Test-Path $HooksConfig) {
-    Copy-Item $HooksConfig "$HooksConfig.bak" -Force -ErrorAction SilentlyContinue
+    $HookBackup = "$HooksConfig.bak"
+    if (Test-Path $HookBackup) { $HookBackup = "$HooksConfig.bak.$([int][double]::Parse((Get-Date -UFormat %s)))" }
+    Copy-Item $HooksConfig $HookBackup -Force -ErrorAction SilentlyContinue
 }
 
 $HooksObj = @{ "hooks" = @{ "PreInvocation" = @(); "Stop" = @() } }
@@ -200,13 +213,17 @@ if (Test-Path $HooksConfig) {
         if (-not $HooksObj.hooks) { $HooksObj | Add-Member -MemberType NoteProperty -Name "hooks" -Value @{} }
         if (-not $HooksObj.hooks.PreInvocation) { $HooksObj.hooks | Add-Member -MemberType NoteProperty -Name "PreInvocation" -Value @() }
         if (-not $HooksObj.hooks.Stop) { $HooksObj.hooks | Add-Member -MemberType NoteProperty -Name "Stop" -Value @() }
+        # Coerce non-array values (single object, string) to arrays before filtering.
+        if ($HooksObj.hooks.PreInvocation -isnot [array]) { $HooksObj.hooks.PreInvocation = @($HooksObj.hooks.PreInvocation) }
+        if ($HooksObj.hooks.Stop -isnot [array]) { $HooksObj.hooks.Stop = @($HooksObj.hooks.Stop) }
     } catch {
         Write-Warning "Could not parse existing hooks.json, creating a new one."
     }
 }
 
 $NewPreInvocation = @()
-foreach ($h in $HooksObj.hooks.PreInvocation) {
+foreach ($h in @($HooksObj.hooks.PreInvocation)) {
+    if ($h -is [string]) { continue }
     if ($h.command -notmatch "shake-prune") {
         $NewPreInvocation += $h
     }
@@ -215,7 +232,8 @@ $NewPreInvocation += @{ "command" = $HookCommand }
 $HooksObj.hooks.PreInvocation = $NewPreInvocation
 
 $NewStop = @()
-foreach ($h in $HooksObj.hooks.Stop) {
+foreach ($h in @($HooksObj.hooks.Stop)) {
+    if ($h -is [string]) { continue }
     if ($h.command -notmatch "shake-prune") {
         $NewStop += $h
     }
@@ -225,9 +243,8 @@ $HooksObj.hooks.Stop = $NewStop
 
 $HooksObj | ConvertTo-Json -Depth 5 | Set-Content $HooksConfig -Encoding UTF8
 
-Write-Host "--------------------------------------------------------------------------------" -ForegroundColor Green
-Write-Host "[OK] Installation complete!" -ForegroundColor Green
-Write-Host "- Pure native Rust binary installed at: $TargetExe"
-Write-Host "- Skill and In-Window Anchor are globally active."
-Write-Host "- To use it: Type '/shake' in any Antigravity conversation and keep chatting in the same tab!"
-Write-Host "================================================================================" -ForegroundColor Cyan
+Write-Host "- Verifying installation..."
+& $TargetExe --version
+if ($LASTEXITCODE -ne 0) { Write-Error "Installed binary failed --version check."; exit 1 }
+& $TargetExe doctor --json | Out-Null
+if ($LASTEXITCODE -ne 0) { Write-Error "Installed binary failed 'doctor --json' check."; exit 1 }

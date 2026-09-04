@@ -77,7 +77,8 @@ if os.path.exists(config_path):
     fi
 
     echo ""
-    echo "🎉 Antigravity /shake has been completely uninstalled."
+    echo "🎉 Antigravity /shake binaries, skills, and hooks removed."
+    echo "   Retained (delete manually if desired): ~/.gemini/config/shake.toml, logs, transcript_full.jsonl archives, and .bak files."
     exit 0
 fi
 
@@ -196,18 +197,26 @@ if [ -f "${SCRIPT_DIR}/skills/shake/SKILL.md" ]; then
     cp "${SCRIPT_DIR}/skills/shake/SKILL.md" "${GLOBAL_SKILLS_DIR}/SKILL.md"
 elif [ -f "${SCRIPT_DIR}/SKILL.md" ]; then
     cp "${SCRIPT_DIR}/SKILL.md" "${GLOBAL_SKILLS_DIR}/SKILL.md"
+else
+    echo "⚠️ Warning: No SKILL.md found in ${SCRIPT_DIR}/skills/shake or ${SCRIPT_DIR}; skill text skipped." >&2
 fi
 if [ -d "${SCRIPT_DIR}/references" ]; then
     cp -r "${SCRIPT_DIR}/references/"* "${GLOBAL_SKILLS_DIR}/references/" 2>/dev/null || true
+else
+    echo "⚠️ Warning: No references/ directory in ${SCRIPT_DIR}; references skipped." >&2
 fi
 
-# Configure Background PreInvocation Hook in ~/.gemini/config/hooks.json
+# Configure Background PreInvocation + Stop hooks in ~/.gemini/config/hooks.json
 HOOK_BIN="${INSTALL_DIR}/${BIN_NAME}"
 mkdir -p "$(dirname "${HOOKS_CONFIG}")"
 
 echo "⚙️ Configuring background PreInvocation hook (preserving existing user hooks)..."
 if [ -f "${HOOKS_CONFIG}" ]; then
-    cp "${HOOKS_CONFIG}" "${HOOKS_CONFIG}.bak" 2>/dev/null || true
+    HOOK_BACKUP="${HOOKS_CONFIG}.bak"
+    if [ -f "${HOOK_BACKUP}" ]; then
+        HOOK_BACKUP="${HOOKS_CONFIG}.bak.$(date +%s)"
+    fi
+    cp "${HOOKS_CONFIG}" "${HOOK_BACKUP}" 2>/dev/null || true
     EXISTING_CONTENT="$(cat "${HOOKS_CONFIG}")"
     if [ -z "${EXISTING_CONTENT// }" ]; then
         EXISTING_CONTENT="{}"
@@ -216,16 +225,18 @@ else
     EXISTING_CONTENT="{}"
 fi
 
+HOOK_MERGED=1
+
 if command -v jq >/dev/null 2>&1; then
     echo "${EXISTING_CONTENT}" | jq --arg bin "${HOOK_BIN} --hook" '
         del(."shake-anchor") |
         .hooks = (.hooks // {}) |
         .hooks.PreInvocation = (
-            ((.hooks.PreInvocation // []) | map(select((.command != $bin) and (.command | contains("shake-prune") | not)))) +
+            (((.hooks.PreInvocation // []) | if type == "array" then . else [] end) | map(select((.command != $bin) and (.command | contains("shake-prune") | not)))) +
             [{"command": $bin}]
         ) |
         .hooks.Stop = (
-            ((.hooks.Stop // []) | map(select((.command != $bin) and (.command | contains("shake-prune") | not)))) +
+            (((.hooks.Stop // []) | if type == "array" then . else [] end) | map(select((.command != $bin) and (.command | contains("shake-prune") | not)))) +
             [{"command": $bin}]
         )
     ' > "${HOOKS_CONFIG}.tmp"
@@ -267,13 +278,28 @@ with open(config_path, "w", encoding="utf-8") as f:
     json.dump(data, f, indent=2)
 '
 else
-    echo "⚠️ Warning: Neither jq nor python3 was found. Please ensure ${HOOKS_CONFIG} contains PreInvocation hook."
+    echo "❌ Error: Neither jq nor python3 was found; cannot merge hooks into ${HOOKS_CONFIG}." >&2
+    echo "   Install jq or python3, then re-run ./install.sh (your existing hooks were backed up, nothing was removed)." >&2
+    HOOK_MERGED=0
 fi
 
 echo ""
-echo "🎉 Installation Complete!"
-echo "• Binary installed to: ${INSTALL_DIR}/${BIN_NAME}"
-echo "• /shake skill installed to: ${GLOBAL_SKILLS_DIR}"
-echo "• Proactive auto-compaction hook configured in: ${HOOKS_CONFIG}"
-echo ""
-echo "👉 Type /shake in any Antigravity conversation to compact context!"
+echo "🔍 Verifying installation..."
+"${INSTALL_DIR}/${BIN_NAME}" --version || { echo "❌ Error: installed binary failed --version check." >&2; exit 1; }
+"${INSTALL_DIR}/${BIN_NAME}" doctor --json >/dev/null || { echo "❌ Error: installed binary failed 'doctor --json' check." >&2; exit 1; }
+
+if [ "${HOOK_MERGED}" = "1" ]; then
+    echo ""
+    echo "🎉 Installation Complete!"
+    echo "• Binary installed to: ${INSTALL_DIR}/${BIN_NAME}"
+    echo "• /shake skill installed to: ${GLOBAL_SKILLS_DIR}"
+    echo "• Proactive auto-compaction hook configured in: ${HOOKS_CONFIG}"
+    echo ""
+    echo "👉 Type /shake in any Antigravity conversation to compact context!"
+else
+    echo ""
+    echo "⚠️ Binary verified, but hook merge was SKIPPED (see error above)." >&2
+    echo "• Binary installed to: ${INSTALL_DIR}/${BIN_NAME}"
+    echo "• /shake skill installed to: ${GLOBAL_SKILLS_DIR}"
+    exit 1
+fi
