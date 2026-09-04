@@ -58,6 +58,160 @@ impl Default for CompactionOptions {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct PendingToolCall {
+    pub name: String,
+    pub short_target: String,
+    pub arg_summary: String,
+}
+
+pub fn extract_short_target(name: &str, args_map: &serde_json::Map<String, Value>) -> String {
+    match name {
+        "view_file" | "replace_file_content" | "write_to_file" => {
+            let path_val = args_map
+                .get("AbsolutePath")
+                .or_else(|| args_map.get("TargetFile"))
+                .and_then(|v| match v {
+                    Value::String(s) => Some(s.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("");
+            let clean_path = path_val.trim_matches('"');
+            let file_name = Path::new(clean_path)
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_else(|| clean_path.to_string());
+
+            let start = args_map.get("StartLine").and_then(|v| match v {
+                Value::Number(n) => Some(n.to_string()),
+                Value::String(s) => Some(s.trim_matches('"').to_string()),
+                _ => None,
+            });
+            let end = args_map.get("EndLine").and_then(|v| match v {
+                Value::Number(n) => Some(n.to_string()),
+                Value::String(s) => Some(s.trim_matches('"').to_string()),
+                _ => None,
+            });
+            match (start, end) {
+                (Some(s), Some(e)) if !s.is_empty() && !e.is_empty() => {
+                    format!("{}:{}-{}", file_name, s, e)
+                }
+                (Some(s), None) if !s.is_empty() => format!("{}:{}", file_name, s),
+                _ => file_name,
+            }
+        }
+        "run_command" => {
+            let cmd = args_map
+                .get("CommandLine")
+                .and_then(|v| match v {
+                    Value::String(s) => Some(s.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("");
+            let clean_cmd = cmd.trim_matches('"').trim();
+            let first_line = clean_cmd.lines().next().unwrap_or("");
+            if first_line.chars().count() > 40 {
+                format!("{}...", safe_truncate(first_line, 40))
+            } else if !first_line.is_empty() {
+                first_line.to_string()
+            } else {
+                "command".to_string()
+            }
+        }
+        "grep_search" => {
+            let query = args_map
+                .get("Query")
+                .and_then(|v| match v {
+                    Value::String(s) => Some(s.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("");
+            let clean_q = query.trim_matches('"');
+            if clean_q.chars().count() > 30 {
+                format!("\"{}...\"", safe_truncate(clean_q, 30))
+            } else if !clean_q.is_empty() {
+                format!("\"{}\"", clean_q)
+            } else {
+                "search".to_string()
+            }
+        }
+        "search_web" => {
+            let query = args_map
+                .get("query")
+                .or_else(|| args_map.get("Query"))
+                .and_then(|v| match v {
+                    Value::String(s) => Some(s.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("");
+            let clean_q = query.trim_matches('"');
+            if clean_q.chars().count() > 30 {
+                format!("\"{}...\"", safe_truncate(clean_q, 30))
+            } else if !clean_q.is_empty() {
+                format!("\"{}\"", clean_q)
+            } else {
+                "web".to_string()
+            }
+        }
+        _ => {
+            let first_arg = args_map
+                .iter()
+                .find(|(k, _)| *k != "toolAction" && *k != "toolSummary")
+                .map(|(_, v)| match v {
+                    Value::String(s) => s.trim_matches('"').to_string(),
+                    other => other.to_string(),
+                })
+                .unwrap_or_default();
+            if first_arg.chars().count() > 30 {
+                format!("{}...", safe_truncate(&first_arg, 30))
+            } else {
+                first_arg
+            }
+        }
+    }
+}
+
+pub fn parse_receipt_info(receipt: &str) -> (Option<usize>, Option<usize>, Option<String>) {
+    let mut lines_count = None;
+    let mut line_no = None;
+    let mut archive_path = None;
+    for token in receipt
+        .trim_matches(|c| c == '[' || c == ']')
+        .split_whitespace()
+    {
+        if let Some(val) = token.strip_prefix("lines=") {
+            lines_count = val.parse::<usize>().ok();
+        } else if let Some(val) = token.strip_prefix("line=") {
+            line_no = val.parse::<usize>().ok();
+        } else if let Some(val) = token.strip_prefix("archive=") {
+            archive_path = Some(val.to_string());
+        }
+    }
+    (lines_count, line_no, archive_path)
+}
+
+pub fn flush_pending_tools(pending: &mut Vec<PendingToolCall>, blocks: &mut Vec<String>) {
+    for tc in pending.drain(..) {
+        let summary_hdr = if tc.short_target.is_empty() {
+            format!("<summary>⚙️ <b>{}</b></summary>", tc.name)
+        } else {
+            format!(
+                "<summary>⚙️ <b>{}</b> <code>{}</code></summary>",
+                tc.name, tc.short_target
+            )
+        };
+        let param_line = if tc.arg_summary.is_empty() {
+            String::new()
+        } else {
+            format!("- **Parameters**: `{}`\n", tc.arg_summary)
+        };
+        blocks.push(format!(
+            "<details>\n{}\n\n{}- *(No output recorded)*\n\n</details>\n\n",
+            summary_hdr, param_line
+        ));
+    }
+}
+
 /// Accurate token estimation calibrated for Code, JSON, and Markdown transcripts (~3.3 chars/token).
 pub fn estimate_tokens(byte_count: usize) -> usize {
     std::cmp::max(1, (byte_count as f64 / 3.3).round() as usize)
@@ -864,6 +1018,7 @@ pub fn run_compaction_pipeline(
     let mut retained_short_cmds = 0usize;
     let mut retained_recent_steps = 0usize;
     let mut first_user_prompt = String::new();
+    let mut pending_tool_calls: Vec<PendingToolCall> = Vec::new();
 
     for (i, (orig_line_no, line_str)) in effective_lines.into_iter().enumerate() {
         let mut step_val: Value = match serde_json::from_str(&line_str) {
@@ -955,6 +1110,7 @@ pub fn run_compaction_pipeline(
 
         match stype.as_str() {
             "USER_INPUT" => {
+                flush_pending_tools(&mut pending_tool_calls, &mut output_blocks);
                 user_count += 1;
                 let raw_content = step_val
                     .get("content")
@@ -979,6 +1135,7 @@ pub fn run_compaction_pipeline(
                 ));
             }
             "PLANNER_RESPONSE" => {
+                flush_pending_tools(&mut pending_tool_calls, &mut output_blocks);
                 assistant_count += 1;
                 let assistant_text = step_val
                     .get("content")
@@ -1073,15 +1230,46 @@ pub fn run_compaction_pipeline(
                                 arg_items.push(format!("{}={}", k, v_formatted));
                             }
                             let arg_summary = arg_items.join(", ");
-                            output_blocks.push(format!(
-                                "- ⚙️ **Action Executed**: `{}({})`",
-                                name, arg_summary
-                            ));
+                            let short_target = extract_short_target(&name, args_map);
+                            pending_tool_calls.push(PendingToolCall {
+                                name,
+                                short_target,
+                                arg_summary,
+                            });
                         }
                     }
                 }
             }
             "RUN_COMMAND" | "VIEW_FILE" | "SEARCH_WEB" | "GREP_SEARCH" | "CODE_ACTION" => {
+                let pending_opt = if !pending_tool_calls.is_empty() {
+                    Some(pending_tool_calls.remove(0))
+                } else {
+                    None
+                };
+                let tool_name = pending_opt
+                    .as_ref()
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| stype.to_lowercase());
+                let short_target = pending_opt
+                    .as_ref()
+                    .map(|p| p.short_target.clone())
+                    .unwrap_or_default();
+                let arg_summary = pending_opt
+                    .as_ref()
+                    .map(|p| p.arg_summary.clone())
+                    .unwrap_or_default();
+
+                let summary_code = if short_target.is_empty() {
+                    String::new()
+                } else {
+                    format!(" <code>{}</code>", short_target)
+                };
+                let param_line = if arg_summary.is_empty() {
+                    String::new()
+                } else {
+                    format!("- **Parameters**: `{}`\n", arg_summary)
+                };
+
                 let content_str = step_val
                     .get("content")
                     .and_then(|v| v.as_str())
@@ -1094,8 +1282,8 @@ pub fn run_compaction_pipeline(
                         ACTIVE_TOOL_SNIPPET_CHARS,
                     ));
                     output_blocks.push(format!(
-                        "> 🕒 **[Active Window Tool Output ({})]**:\n```\n{}\n```\n",
-                        stype, snippet
+                        "<details>\n<summary>⚙️ <b>{}</b>{} — <b>Active Memory (exit 0)</b></summary>\n\n{}- **Output**:\n```\n{}\n```\n\n</details>\n\n",
+                        tool_name, summary_code, param_line, snippet
                     ));
                 } else if is_recent_error {
                     retained_errors_count += 1;
@@ -1103,22 +1291,42 @@ pub fn run_compaction_pipeline(
                         content_str,
                         ERROR_TOOL_SNIPPET_CHARS,
                     ));
+                    let exit_label = if let Some(code) = exit_code {
+                        format!("Exit code {}", code)
+                    } else {
+                        "Failed".to_string()
+                    };
                     output_blocks.push(format!(
-                        "> ⚠️ **[Tool Execution Error / Failure ({}, Exit code: {:?})]**:\n```\n{}\n```\n",
-                        stype, exit_code, snippet
+                        "<details open>\n<summary>⚠️ <b>{} Failed</b>{} — <b>{}</b></summary>\n\n{}- **Error Trace**:\n```\n{}\n```\n\n</details>\n\n",
+                        tool_name, summary_code, exit_label, param_line, snippet
                     ));
                 } else if stype == "RUN_COMMAND" {
                     if content_str.starts_with("[PRUNED") {
                         pruned_tools_count += 1;
-                        output_blocks.push(format!("> ℹ️ *{}*\n", content_str));
+                        let (lc, ln, ap) = parse_receipt_info(content_str);
+                        let lines_label = match lc {
+                            Some(c) => format!("{} lines archived", c),
+                            None => "Archived receipt".to_string(),
+                        };
+                        let archive_link = match (ap.as_deref(), ln) {
+                            (Some(arch), Some(l)) => format!(
+                                "- **Master Archive**: [View line {} in transcript_full.jsonl](file://{}#L{})\n",
+                                l, arch, l
+                            ),
+                            _ => String::new(),
+                        };
+                        output_blocks.push(format!(
+                            "<details>\n<summary>⚙️ <b>{}</b>{} — <i>{}</i></summary>\n\n{}- **Archive Receipt**: `{}`\n{}\n</details>\n\n",
+                            tool_name, summary_code, lines_label, param_line, content_str, archive_link
+                        ));
                     } else if !is_error
                         && content_str.trim().chars().count() < SHORT_CMD_RETENTION_CHARS
                     {
                         retained_short_cmds += 1;
                         let safe_cmd = sanitize_markdown_snippet(content_str.trim());
                         output_blocks.push(format!(
-                            "> 📋 **[Command Output (exit 0)]**:\n```\n{}\n```\n",
-                            safe_cmd
+                            "<details>\n<summary>⚙️ <b>{}</b>{} — <i>exit 0</i></summary>\n\n{}- **Command Output**:\n```\n{}\n```\n\n</details>\n\n",
+                            tool_name, summary_code, param_line, safe_cmd
                         ));
                     } else {
                         let line_count = content_str.lines().count();
@@ -1145,12 +1353,34 @@ pub fn run_compaction_pipeline(
                             step_idx, exit_str, warn_tag, line_count, master_archive_abs_str, resolved_line_no
                         );
                         step_val["content"] = serde_json::json!(receipt);
-                        output_blocks.push(format!("> ℹ️ *{}*\n", receipt));
+                        let archive_link = format!(
+                            "- **Master Archive**: [View line {} in transcript_full.jsonl](file://{}#L{})\n",
+                            resolved_line_no, master_archive_abs_str, resolved_line_no
+                        );
+                        output_blocks.push(format!(
+                            "<details>\n<summary>⚙️ <b>{}</b>{} — <i>{} lines archived</i></summary>\n\n{}- **Archive Receipt**: `{}`\n{}\n</details>\n\n",
+                            tool_name, summary_code, line_count, param_line, receipt, archive_link
+                        ));
                     }
                 } else if stype == "VIEW_FILE" {
                     if content_str.starts_with("[PRUNED") {
                         pruned_tools_count += 1;
-                        output_blocks.push(format!("> ℹ️ *{}*\n", content_str));
+                        let (lc, ln, ap) = parse_receipt_info(content_str);
+                        let lines_label = match lc {
+                            Some(c) => format!("{} lines archived", c),
+                            None => "Archived receipt".to_string(),
+                        };
+                        let archive_link = match (ap.as_deref(), ln) {
+                            (Some(arch), Some(l)) => format!(
+                                "- **Master Archive**: [View line {} in transcript_full.jsonl](file://{}#L{})\n",
+                                l, arch, l
+                            ),
+                            _ => String::new(),
+                        };
+                        output_blocks.push(format!(
+                            "<details>\n<summary>⚙️ <b>{}</b>{} — <i>{}</i></summary>\n\n{}- **Archive Receipt**: `{}`\n{}\n</details>\n\n",
+                            tool_name, summary_code, lines_label, param_line, content_str, archive_link
+                        ));
                     } else {
                         let line_count = content_str.lines().count();
                         pruned_tools_count += 1;
@@ -1159,7 +1389,14 @@ pub fn run_compaction_pipeline(
                             step_idx, line_count, master_archive_abs_str, resolved_line_no
                         );
                         step_val["content"] = serde_json::json!(receipt);
-                        output_blocks.push(format!("> ℹ️ *{}*\n", receipt));
+                        let archive_link = format!(
+                            "- **Master Archive**: [View line {} in transcript_full.jsonl](file://{}#L{})\n",
+                            resolved_line_no, master_archive_abs_str, resolved_line_no
+                        );
+                        output_blocks.push(format!(
+                            "<details>\n<summary>⚙️ <b>{}</b>{} — <i>{} lines archived</i></summary>\n\n{}- **Archive Receipt**: `{}`\n{}\n</details>\n\n",
+                            tool_name, summary_code, line_count, param_line, receipt, archive_link
+                        ));
                     }
                 } else {
                     pruned_tools_count += 1;
@@ -1168,7 +1405,14 @@ pub fn run_compaction_pipeline(
                         stype, step_idx, master_archive_abs_str, resolved_line_no
                     );
                     step_val["content"] = serde_json::json!(receipt);
-                    output_blocks.push(format!("> ℹ️ *{}*\n", receipt));
+                    let archive_link = format!(
+                        "- **Master Archive**: [View line {} in transcript_full.jsonl](file://{}#L{})\n",
+                        resolved_line_no, master_archive_abs_str, resolved_line_no
+                    );
+                    output_blocks.push(format!(
+                        "<details>\n<summary>⚙️ <b>{}</b>{} — <i>Archived receipt</i></summary>\n\n{}- **Archive Receipt**: `{}`\n{}\n</details>\n\n",
+                        tool_name, summary_code, param_line, receipt, archive_link
+                    ));
                 }
             }
             _ => {}
@@ -1184,6 +1428,8 @@ pub fn run_compaction_pipeline(
         compacted_output.push_str(&compacted_line);
         compacted_output.push('\n');
     }
+
+    flush_pending_tools(&mut pending_tool_calls, &mut output_blocks);
 
     if let Some(mut file) = file_opt {
         // P0-3 near-atomic path: stage + verify BEFORE touching the original
