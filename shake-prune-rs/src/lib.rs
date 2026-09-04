@@ -1,4 +1,5 @@
 pub mod atomic;
+pub mod config;
 pub mod hook;
 pub mod metadata;
 pub mod models;

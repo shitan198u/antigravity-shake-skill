@@ -1,4 +1,7 @@
-use crate::atomic::{commit_staged_in_place, stage_compacted_output};
+use crate::atomic::{
+    commit_staged_in_place_with_snapshot, recover_if_interrupted, set_user_only_permissions,
+    stage_compacted_output, SnapshotFingerprint,
+};
 use crate::metadata::load_or_discover_history;
 use crate::models::{CompactionEvent, PruningStats};
 use crate::receipts::count_warnings;
@@ -33,6 +36,8 @@ pub struct CompactionOptions {
     pub marathon_horizon: bool,   // Enable Milestone Horizon on marathon threads (>30 user turns)
     pub in_place: bool,
     pub dry_run: bool,
+    pub redact_secrets: bool, // Redact API keys, tokens, and Authorization headers (P1-3)
+    pub non_blocking_lock: bool, // Fail open immediately on lock contention (P1-2)
 }
 
 impl Default for CompactionOptions {
@@ -46,6 +51,8 @@ impl Default for CompactionOptions {
             marathon_horizon: false,
             in_place: true,
             dry_run: false,
+            redact_secrets: false,
+            non_blocking_lock: false,
         }
     }
 }
@@ -99,11 +106,32 @@ pub fn purge_legacy_timestamped_backups(logs_dir: &Path) {
     if let Ok(entries) = fs::read_dir(logs_dir) {
         for entry in entries.flatten() {
             let file_name = entry.file_name().to_string_lossy().to_string();
-            if file_name.contains(".bak_") {
+            if file_name.starts_with("transcript.jsonl.bak_") {
                 let _ = fs::remove_file(entry.path());
             }
         }
     }
+}
+
+/// Redacts sensitive credentials (GitHub tokens, AWS keys, Bearer tokens, private keys) from text (P1-3).
+pub fn redact_secrets(text: &str) -> String {
+    let pat_gh = regex::Regex::new(r"(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36}").unwrap();
+    let pat_gh_pat = regex::Regex::new(r"github_pat_[A-Za-z0-9_]{82}").unwrap();
+    let pat_aws = regex::Regex::new(r"\b(AKIA|ABIA|ACCA|ASIA)[0-9A-Z]{16}\b").unwrap();
+    let pat_bearer = regex::Regex::new(r"(?i)\bBearer\s+[A-Za-z0-9_\-\.]{20,}").unwrap();
+    let pat_auth = regex::Regex::new(r"(?i)Authorization:\s*[^\r\n]+").unwrap();
+    let pat_key = regex::Regex::new(
+        r"-----BEGIN (?:[A-Z ]+) PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z ]+) PRIVATE KEY-----",
+    )
+    .unwrap();
+
+    let s1 = pat_gh.replace_all(text, "[REDACTED_GH_TOKEN]");
+    let s2 = pat_gh_pat.replace_all(&s1, "[REDACTED_GH_PAT]");
+    let s3 = pat_aws.replace_all(&s2, "[REDACTED_AWS_KEY]");
+    let s4 = pat_bearer.replace_all(&s3, "Bearer [REDACTED]");
+    let s5 = pat_auth.replace_all(&s4, "Authorization: [REDACTED]");
+    let s6 = pat_key.replace_all(&s5, "[REDACTED_PRIVATE_KEY]");
+    s6.to_string()
 }
 
 /// Builds an O(1) step_index -> 1-indexed line number lookup map for `transcript_full.jsonl`.
@@ -405,11 +433,100 @@ fn copy_from_locked_file(file: &mut File, dest_path: &Path) -> std::io::Result<u
     Ok(bytes)
 }
 
+/// Synchronizes the permanent master archive (`transcript_full.jsonl`) under exclusive lock
+/// before in-place pruning. Any steps present in the live transcript that are not yet recorded
+/// in the master archive are appended atomically, guaranteed with 0600 permissions and synced (P0-1).
+fn sync_master_full_transcript(
+    file: &mut File,
+    full_transcript_path: &Path,
+) -> Result<HashMap<u64, usize>, Box<dyn std::error::Error>> {
+    if !full_transcript_path.exists() {
+        copy_from_locked_file(file, full_transcript_path).map_err(|e| {
+            format!(
+                "Critical: Failed to initialize permanent master archive at {}: {}. Compaction aborted to protect data integrity.",
+                full_transcript_path.display(), e
+            )
+        })?;
+        set_user_only_permissions(full_transcript_path);
+        let step_map = scan_master_full_transcript(full_transcript_path);
+        store_cached_master_index(full_transcript_path, &step_map);
+        return Ok(step_map);
+    }
+
+    let mut step_map = scan_master_full_transcript(full_transcript_path);
+    let mut current_line_count = 0;
+    if let Ok(f) = File::open(full_transcript_path) {
+        let reader = BufReader::new(f);
+        current_line_count = reader.lines().count();
+    }
+
+    file.seek(SeekFrom::Start(0))?;
+    let reader = BufReader::new(&mut *file);
+    let mut missing_lines: Vec<(u64, String)> = Vec::new();
+
+    for line_res in reader.lines() {
+        let line_str = line_res?;
+        if line_str.trim().is_empty() {
+            continue;
+        }
+        if let Ok(val) = serde_json::from_str::<Value>(&line_str) {
+            if val
+                .get("synthetic")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+                || val
+                    .get("is_milestone")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+            {
+                continue;
+            }
+            if let Some(step_idx) = val.get("step_index").and_then(|v| v.as_u64()) {
+                if !step_map.contains_key(&step_idx) {
+                    missing_lines.push((step_idx, line_str));
+                }
+            }
+        }
+    }
+
+    file.seek(SeekFrom::Start(0))?;
+
+    if !missing_lines.is_empty() {
+        let mut full_file = File::options()
+            .append(true)
+            .open(full_transcript_path)
+            .map_err(|e| {
+                format!(
+                    "Critical: Failed to open permanent master archive at {} for append: {}. Compaction aborted.",
+                    full_transcript_path.display(), e
+                )
+            })?;
+
+        for (step_idx, line_str) in missing_lines {
+            current_line_count += 1;
+            writeln!(full_file, "{}", line_str)?;
+            step_map.insert(step_idx, current_line_count);
+        }
+        full_file.flush()?;
+        full_file.sync_all()?;
+        set_user_only_permissions(full_transcript_path);
+        store_cached_master_index(full_transcript_path, &step_map);
+    }
+
+    Ok(step_map)
+}
+
 pub fn run_compaction_pipeline(
     transcript_path: &Path,
     options: &CompactionOptions,
 ) -> Result<(String, String, PruningStats, String), Box<dyn std::error::Error>> {
     let pipeline_start = Instant::now();
+
+    // P0-2: Auto-recover from any previous interrupted compaction before checking existence
+    if let Ok(Some(recovery_msg)) = recover_if_interrupted(transcript_path) {
+        eprintln!("{}", recovery_msg);
+    }
+
     if !transcript_path.exists() {
         return Err(format!(
             "Transcript file does not exist: {}",
@@ -425,57 +542,68 @@ pub fn run_compaction_pipeline(
     let full_transcript_path = logs_dir.join("transcript_full.jsonl");
     let backup_latest = abs_target.with_extension("jsonl.bak");
 
-    let mut file_opt = if !options.dry_run && options.in_place {
-        let mut file = File::options().read(true).write(true).open(&abs_target)?;
-        file.lock_exclusive()?;
+    let (mut file_opt, snapshot_fingerprint, master_archive_abs_str, master_step_to_line) =
+        if !options.dry_run && options.in_place {
+            let mut file = File::options().read(true).write(true).open(&abs_target)?;
+            if options.non_blocking_lock {
+                file.try_lock_exclusive().map_err(|e| {
+                    format!(
+                        "Lock contention: could not acquire exclusive lock immediately on '{}': {}",
+                        abs_target.display(),
+                        e
+                    )
+                })?;
+            } else {
+                file.lock_exclusive()?;
+            }
 
-        // Guarantee permanent master archive under exclusive lock before destructive in-place pruning.
-        // Copy directly from `file` handle to avoid Windows ERROR_LOCK_VIOLATION (os error 33).
-        if !full_transcript_path.exists() {
-            copy_from_locked_file(&mut file, &full_transcript_path).map_err(|e| {
+            // P0-3: Record snapshot fingerprint while holding exclusive lock before reading
+            let snap = SnapshotFingerprint::from_file(&file)?;
+
+            // P0-1: Guarantee permanent master archive synchronization under exclusive lock
+            let step_map = sync_master_full_transcript(&mut file, &full_transcript_path)?;
+
+            // Mandatory fail-closed crash fallback while holding the exclusive lock
+            copy_from_locked_file(&mut file, &backup_latest).map_err(|e| {
                 format!(
-                    "Critical: Failed to initialize permanent master archive at {}: {}. Compaction aborted to protect data integrity.",
-                    full_transcript_path.display(), e
+                    "Critical: Failed to create atomic backup at {}: {}. Compaction aborted to prevent data loss.",
+                    backup_latest.display(), e
                 )
             })?;
-        }
+            set_user_only_permissions(&backup_latest);
 
-        // Mandatory fail-closed crash fallback while holding the exclusive lock.
-        copy_from_locked_file(&mut file, &backup_latest).map_err(|e| {
-            format!(
-                "Critical: Failed to create atomic backup at {}: {}. Compaction aborted to prevent data loss.",
-                backup_latest.display(), e
-            )
-        })?;
+            // Verify backup byte size exactly matches before allowing any truncation
+            let orig_len = file.metadata()?.len();
+            let backup_len = fs::metadata(&backup_latest)?.len();
+            if orig_len != backup_len {
+                return Err(format!(
+                    "Critical: Backup size mismatch (original {} bytes, backup {} bytes). Compaction aborted.",
+                    orig_len, backup_len
+                ).into());
+            }
 
-        // Verify backup byte size exactly matches before allowing any truncation
-        let orig_len = file.metadata()?.len();
-        let backup_len = fs::metadata(&backup_latest)?.len();
-        if orig_len != backup_len {
-            return Err(format!(
-                "Critical: Backup size mismatch (original {} bytes, backup {} bytes). Compaction aborted.",
-                orig_len, backup_len
-            ).into());
-        }
+            // Purge legacy timestamped backups to reclaim disk space
+            purge_legacy_timestamped_backups(logs_dir);
 
-        // Purge legacy timestamped backups to reclaim disk space
-        purge_legacy_timestamped_backups(logs_dir);
+            let abs_str = fs::canonicalize(&full_transcript_path)
+                .unwrap_or_else(|_| full_transcript_path.clone())
+                .to_string_lossy()
+                .to_string();
 
-        Some(file)
-    } else {
-        None
-    };
-
-    let (master_archive_abs_str, master_step_to_line) = if full_transcript_path.exists() {
-        let step_map = index_master_full_transcript(&full_transcript_path);
-        let abs_str = fs::canonicalize(&full_transcript_path)
-            .unwrap_or(full_transcript_path.clone())
-            .to_string_lossy()
-            .to_string();
-        (abs_str, Some(step_map))
-    } else {
-        (full_transcript_path.to_string_lossy().to_string(), None)
-    };
+            (Some(file), Some(snap), abs_str, Some(step_map))
+        } else {
+            let (abs_str, step_map) = if full_transcript_path.exists() {
+                let sm = index_master_full_transcript(&full_transcript_path);
+                let s = fs::canonicalize(&full_transcript_path)
+                    .unwrap_or_else(|_| full_transcript_path.clone())
+                    .to_string_lossy()
+                    .to_string();
+                (s, Some(sm))
+            } else {
+                (backup_latest.to_string_lossy().to_string(), None)
+            };
+            (None, None, abs_str, step_map)
+        };
 
     // Read and buffer lines for the single pass. Clone existing locked handle
     // to avoid secondary handle open on Windows while locked.
@@ -561,9 +689,21 @@ pub fn run_compaction_pipeline(
 
     // Re-index effective user turns, assistant turns, ephemeral positions, and tool step positions after milestone horizon
     let mut effective_user_turn_indices: Vec<usize> = Vec::new();
-    let mut effective_ephemeral_indices: Vec<usize> = Vec::new();
+    let mut effective_shake_ephemeral_indices: Vec<usize> = Vec::new();
     let mut effective_tool_indices: Vec<usize> = Vec::new();
     let mut effective_assistant_turns = 0usize;
+
+    let is_shake_ephemeral = |val: &Value| -> bool {
+        if let Some(content) = val.get("content").and_then(|v| v.as_str()) {
+            content.contains("Context compacted via /shake")
+                || content.contains("Context auto-compacted via /shake")
+                || content.contains("active_shake_anchor.json")
+                || content.contains("HOOK_NOTICE")
+                || content.contains("ANCHOR_NOTICE")
+        } else {
+            false
+        }
+    };
 
     for (buf_idx, (_, line_str)) in effective_lines.iter().enumerate() {
         if let Ok(val) = serde_json::from_str::<Value>(line_str) {
@@ -573,7 +713,9 @@ pub fn run_compaction_pipeline(
             } else if t == "PLANNER_RESPONSE" {
                 effective_assistant_turns += 1;
             } else if t == "EPHEMERAL_MESSAGE" {
-                effective_ephemeral_indices.push(buf_idx);
+                if is_shake_ephemeral(&val) {
+                    effective_shake_ephemeral_indices.push(buf_idx);
+                }
             } else if matches!(
                 t,
                 "RUN_COMMAND" | "VIEW_FILE" | "SEARCH_WEB" | "GREP_SEARCH" | "CODE_ACTION"
@@ -583,7 +725,7 @@ pub fn run_compaction_pipeline(
         }
     }
 
-    let latest_ephemeral_idx = effective_ephemeral_indices.last().copied();
+    let latest_shake_ephemeral_idx = effective_shake_ephemeral_indices.last().copied();
 
     let effective_total_user_turns = effective_user_turn_indices.len();
     let effective_total_steps = effective_lines.len();
@@ -678,9 +820,15 @@ pub fn run_compaction_pipeline(
             .and_then(|v| v.as_u64())
             .unwrap_or(i as u64 + 1);
 
-        // Deduplicate EPHEMERAL_MESSAGE: only retain the latest one!
+        // Deduplicate EPHEMERAL_MESSAGE: only deduplicate shake-related notices (P2-5)
         if stype == "EPHEMERAL_MESSAGE" {
-            if Some(i) == latest_ephemeral_idx {
+            if is_shake_ephemeral(&step_val) {
+                if Some(i) == latest_shake_ephemeral_idx {
+                    compacted_output.push_str(&line_str);
+                    compacted_output.push('\n');
+                }
+            } else {
+                // Non-shake ephemeral messages are preserved verbatim
                 compacted_output.push_str(&line_str);
                 compacted_output.push('\n');
             }
@@ -696,11 +844,22 @@ pub fn run_compaction_pipeline(
             || status.contains("failed");
         let is_recent_error = is_error && options.recent_errors_cap > 0 && (i >= error_cutoff_idx);
 
-        // Exact line number in the master archive (transcript_full.jsonl or fallback backup)
-        let resolved_line_no = master_step_to_line
-            .as_ref()
-            .and_then(|m| m.get(&step_idx).copied())
-            .unwrap_or(orig_line_no);
+        // Exact line number in the master archive (transcript_full.jsonl)
+        let resolved_line_no = if let Some(m) = &master_step_to_line {
+            match m.get(&step_idx).copied() {
+                Some(l) => l,
+                None if options.dry_run => orig_line_no,
+                None => {
+                    return Err(format!(
+                        "Critical integrity failure: step {} cannot be resolved in master archive '{}'. Refusing to emit unresolvable receipt.",
+                        step_idx,
+                        master_archive_abs_str
+                    ).into());
+                }
+            }
+        } else {
+            orig_line_no
+        };
 
         match stype.as_str() {
             "USER_INPUT" => {
@@ -713,9 +872,14 @@ pub fn run_compaction_pipeline(
                 if first_user_prompt.is_empty() {
                     first_user_prompt = user_text.to_string();
                 }
+                let user_display = if options.redact_secrets {
+                    redact_secrets(user_text)
+                } else {
+                    user_text.to_string()
+                };
                 output_blocks.push(format!(
                     "### 👤 User (Turn {})\n\n{}\n",
-                    user_count, user_text
+                    user_count, user_display
                 ));
             }
             "PLANNER_RESPONSE" => {
@@ -746,14 +910,24 @@ pub fn run_compaction_pipeline(
 
                 if !assistant_text.is_empty() || !thinking_text.is_empty() {
                     let mut assistant_block = String::from("### 🤖 Assistant\n\n");
-                    if is_thought_retained && !thinking_text.is_empty() {
+                    let clean_thinking = if options.redact_secrets {
+                        redact_secrets(&thinking_text)
+                    } else {
+                        thinking_text
+                    };
+                    let clean_assistant = if options.redact_secrets {
+                        redact_secrets(&assistant_text)
+                    } else {
+                        assistant_text
+                    };
+                    if is_thought_retained && !clean_thinking.is_empty() {
                         assistant_block.push_str(&format!(
                             "<details>\n<summary>💭 Thought Process</summary>\n\n{}\n\n</details>\n\n",
-                            thinking_text
+                            clean_thinking
                         ));
                     }
-                    if !assistant_text.is_empty() {
-                        assistant_block.push_str(&assistant_text);
+                    if !clean_assistant.is_empty() {
+                        assistant_block.push_str(&clean_assistant);
                         assistant_block.push('\n');
                     }
                     output_blocks.push(assistant_block);
@@ -915,18 +1089,19 @@ pub fn run_compaction_pipeline(
         // inode, then commit in place with verified rollback (P0-1 / P0-2).
         // Any error below leaves `transcript.jsonl.bak` intact for restore.
         let staged = stage_compacted_output(&abs_target, &compacted_output)?;
-        match commit_staged_in_place(
+        match commit_staged_in_place_with_snapshot(
             &mut file,
             &abs_target,
             &backup_latest,
             &staged,
             &generated_json_lines,
+            snapshot_fingerprint.as_ref(),
         ) {
             Ok(()) => {
-                let _ = file.unlock();
+                let _ = fs2::FileExt::unlock(&file);
             }
             Err(e) => {
-                let _ = file.unlock();
+                let _ = fs2::FileExt::unlock(&file);
                 return Err(e);
             }
         }

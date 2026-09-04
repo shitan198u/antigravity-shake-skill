@@ -31,6 +31,7 @@ fn log_with_level(level: &str, msg: &str) {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let _ = writeln!(f, "[{}] [{}] {}", ts, level, msg);
+        crate::atomic::set_user_only_permissions(&log_file);
     }
 }
 
@@ -51,16 +52,6 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::panic;
 use std::path::{Path, PathBuf};
-
-// 80k tokens * ~3.3 bytes/token = 264,000 bytes
-// Proactive 80k tokens threshold (~264,000 bytes)
-const AUTO_SHAKE_TOKEN_THRESHOLD_BYTES: u64 = 264_000;
-// Tool execution burst threshold (triggers after 20 unpruned tool executions)
-const AUTO_SHAKE_TOOL_RUN_THRESHOLD: usize = 20;
-// Minimum new unpruned growth (25 KB) required before triggering another auto-compaction
-const AUTO_SHAKE_GROWTH_DELTA_BYTES: u64 = 25_000;
-// Minimum seconds between auto-compaction attempts (3 minutes) to prevent thrashing
-const AUTO_SHAKE_COOLDOWN_SECONDS: i64 = 180;
 
 #[derive(Deserialize, Debug, Default)]
 struct HookPayload {
@@ -150,6 +141,9 @@ pub fn handle_hook() {
 }
 
 fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
+    let hook_start = std::time::Instant::now();
+    let hook_deadline = std::time::Duration::from_millis(2500); // 2.5s watchdog budget (P1-2)
+
     let mut stdin_buffer = String::new();
     let _ = io::stdin().take(65_536).read_to_string(&mut stdin_buffer);
 
@@ -160,6 +154,7 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
     log_diagnostic("Hook triggered with PreInvocation payload");
 
     let payload: HookPayload = serde_json::from_str(&stdin_buffer).unwrap_or_default();
+    let config = crate::config::ShakeConfig::load();
 
     let mut resolved_transcript: Option<PathBuf> = None;
     let mut resolved_art_dir: Option<PathBuf> = None;
@@ -222,6 +217,13 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // P0-2: Auto-recover if a previous compaction crashed or was interrupted
+    if let Some(t_path) = &resolved_transcript {
+        if let Ok(Some(recovery_msg)) = crate::atomic::recover_if_interrupted(t_path) {
+            log_with_level("INFO", &recovery_msg);
+        }
+    }
+
     // Candidate anchor paths (strictly restricted to trusted system directories)
     let mut candidate_paths: Vec<PathBuf> = Vec::new();
     if let Some(art_dir) = &resolved_art_dir {
@@ -235,13 +237,17 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
         if path.exists() {
             if let Ok(file) = File::open(&path) {
                 if let Ok(data) = serde_json::from_reader::<_, AnchorFilePayload>(file) {
-                    // Load anchor state regardless of active status so circuit breaker
-                    // and cooldown guards function on fresh sessions with failures (§4.1).
                     found_anchor = Some(data);
                     break;
                 }
             }
         }
+    }
+
+    // P0-4: Check if auto-shake is disabled via config or environment
+    if !config.auto.enabled {
+        log_diagnostic("Auto-shake disabled via config/environment (auto.enabled = false)");
+        return emit_anchor_or_empty(&found_anchor);
     }
 
     let is_stop_event = payload.termination_reason.is_some()
@@ -277,7 +283,6 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
                             anchor.consecutive_failures.unwrap_or(0)
                         ),
                     );
-                    // Fall through to normal anchor injection below.
                     return emit_anchor_or_empty(&found_anchor);
                 }
             }
@@ -287,18 +292,17 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
                 Some(anchor) => {
                     let last_bytes = anchor.last_compacted_bytes.unwrap_or(0);
                     let last_attempt = anchor.last_attempt_timestamp.unwrap_or(0);
-                    let cd_ok = (now_ts - last_attempt).abs() >= AUTO_SHAKE_COOLDOWN_SECONDS;
-                    let gr_ok = file_size > last_bytes + AUTO_SHAKE_GROWTH_DELTA_BYTES;
+                    let cd_ok = (now_ts - last_attempt).abs() >= config.auto.cooldown_seconds;
+                    let gr_ok = file_size > last_bytes + config.auto.growth_delta_bytes;
                     (cd_ok, gr_ok)
                 }
                 None => (true, true),
             };
 
             let guards_pass = cooldown_ok && growth_ok;
-            let size_threshold_hit = file_size >= AUTO_SHAKE_TOKEN_THRESHOLD_BYTES;
+            let size_threshold_hit = file_size >= config.auto.size_threshold_bytes;
 
             // 2. Short-circuit: only count tools if guards pass and size threshold has not already triggered
-            // P2-3: track WHICH threshold fired so messages/metrics are accurate.
             let trigger_detail: Option<&str> = if !guards_pass {
                 if !cooldown_ok {
                     log_diagnostic("Auto-shake bypassed: cooldown active");
@@ -307,14 +311,19 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 None
             } else if size_threshold_hit {
-                log_diagnostic("Auto-shake triggered: size threshold (>= 264 KB) hit");
+                log_diagnostic("Auto-shake triggered: size threshold hit");
                 Some("size")
             } else {
-                let unpruned_tools = count_unpruned_tools(t_path);
-                if unpruned_tools >= AUTO_SHAKE_TOOL_RUN_THRESHOLD {
-                    log_diagnostic(
-                        "Auto-shake triggered: unpruned tools burst threshold (>= 20 tools) hit",
+                if hook_start.elapsed() > hook_deadline {
+                    log_with_level(
+                        "WARN",
+                        "Hook watchdog budget exceeded before counting tools",
                     );
+                    return emit_anchor_or_empty(&found_anchor);
+                }
+                let unpruned_tools = count_unpruned_tools(t_path);
+                if unpruned_tools >= config.auto.tool_burst_threshold {
+                    log_diagnostic("Auto-shake triggered: unpruned tools burst threshold hit");
                     Some("tools")
                 } else {
                     None
@@ -322,21 +331,30 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             if let Some(trigger) = trigger_detail {
+                if hook_start.elapsed() > hook_deadline {
+                    log_with_level(
+                        "WARN",
+                        "Hook watchdog budget exceeded before running compaction",
+                    );
+                    return emit_anchor_or_empty(&found_anchor);
+                }
+
                 let options = CompactionOptions {
-                    recent_user_turns: 10,
-                    recent_tools_cap: 20,
-                    recent_errors_cap: 30,
-                    recent_window_steps: 6,
+                    recent_user_turns: config.retention.recent_user_turns,
+                    recent_tools_cap: config.retention.recent_tools_cap,
+                    recent_errors_cap: config.retention.recent_errors_cap,
+                    recent_window_steps: config.retention.recent_window_steps,
                     thought_window_turns: None,
                     marathon_horizon: false,
                     in_place: true,
                     dry_run: false,
+                    redact_secrets: config.privacy.redact_secrets,
+                    non_blocking_lock: true, // Non-blocking lock: fail open on contention (P1-2)
                 };
 
                 let auto_start = std::time::Instant::now();
                 match run_compaction_pipeline(t_path, &options) {
                     Ok((_compacted_jsonl, pruned_md, mut stats, master_archive_str)) => {
-                        // Tag hook trigger detail for anchor metrics (P1-6).
                         stats.trigger_detail = format!("auto-{}", trigger);
                         let elapsed_ms = auto_start.elapsed().as_millis() as u64;
                         log_with_level(
@@ -354,6 +372,7 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
                         let output_path = art_dir.join(&stats.suggested_filename);
                         if let Ok(mut f) = File::create(&output_path) {
                             let _ = f.write_all(pruned_md.as_bytes());
+                            crate::atomic::set_user_only_permissions(&output_path);
                         }
 
                         let trigger_label = if trigger == "size" {

@@ -102,7 +102,7 @@ pub fn load_or_discover_history(logs_dir: &Path, current_anchor: &Path) -> Vec<C
         }
     }
 
-    history.sort_by(|a, b| a.timestamp_display.cmp(&b.timestamp_display));
+    history.sort_by(|a, b| a.timestamp_iso.cmp(&b.timestamp_iso));
     history
 }
 
@@ -131,6 +131,7 @@ pub fn write_artifact_metadata(markdown_path: &Path, summary: &str) -> std::io::
     tmp_file.flush()?;
 
     tmp_file.persist(&meta_path).map_err(|e| e.error)?;
+    crate::atomic::set_user_only_permissions(&meta_path);
     Ok(())
 }
 
@@ -167,6 +168,10 @@ pub fn write_active_anchor(
         };
 
         history.push(new_event);
+        if history.len() > 30 {
+            let drop_count = history.len() - 30;
+            history.drain(0..drop_count);
+        }
 
         let t_size = logs_dir
             .join("transcript.jsonl")
@@ -199,6 +204,7 @@ pub fn write_active_anchor(
         tmp_file.flush()?;
 
         tmp_file.persist(&anchor_path).map_err(|e| e.error)?;
+        crate::atomic::set_user_only_permissions(&anchor_path);
     }
     Ok(())
 }

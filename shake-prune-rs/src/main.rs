@@ -4,6 +4,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process;
 
+use shake_prune::config::ShakeConfig;
 use shake_prune::hook::handle_hook;
 use shake_prune::metadata::{write_active_anchor, write_artifact_metadata};
 
@@ -27,16 +28,109 @@ fn handle_restore(target: &Path) {
         );
         process::exit(1);
     }
-    match fs::copy(&bak_path, &abs_target) {
+
+    // 1. Validate backup is non-empty and readable before touching transcript (P2-9)
+    let bak_len = match fs::metadata(&bak_path) {
+        Ok(m) => m.len(),
+        Err(e) => {
+            eprintln!("Error stating backup file '{}': {}", bak_path.display(), e);
+            process::exit(1);
+        }
+    };
+    if bak_len == 0 {
+        eprintln!(
+            "Error: Backup file at '{}' is empty (0 bytes). Refusing to restore empty backup.",
+            bak_path.display()
+        );
+        process::exit(1);
+    }
+
+    let bak_file = match File::open(&bak_path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!(
+                "Error: Cannot read backup file '{}': {}",
+                bak_path.display(),
+                e
+            );
+            process::exit(1);
+        }
+    };
+    let reader = std::io::BufReader::new(bak_file);
+    use std::io::BufRead;
+    let mut line_count = 0;
+    for line_res in reader.lines() {
+        match line_res {
+            Ok(line_str) => {
+                if !line_str.trim().is_empty() {
+                    line_count += 1;
+                }
+            }
+            Err(e) => {
+                eprintln!("Error reading backup file '{}': {}", bak_path.display(), e);
+                process::exit(1);
+            }
+        }
+    }
+    if line_count == 0 {
+        eprintln!(
+            "Error: Backup file at '{}' contains no content lines. Refusing to restore.",
+            bak_path.display()
+        );
+        process::exit(1);
+    }
+
+    // 2. Lock target transcript exclusively (P2-9)
+    let mut target_file = match File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&abs_target)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("Error opening transcript '{}': {}", abs_target.display(), e);
+            process::exit(1);
+        }
+    };
+    use fs2::FileExt;
+    if let Err(e) = target_file.lock_exclusive() {
+        eprintln!("Error locking transcript '{}': {}", abs_target.display(), e);
+        process::exit(1);
+    }
+
+    // 3. Create .pre_restore snapshot of current transcript if it has data (P2-9)
+    if let Ok(meta) = target_file.metadata() {
+        if meta.len() > 0 {
+            use std::io::{Seek, SeekFrom};
+            let pre_restore_path = abs_target.with_extension("jsonl.pre_restore");
+            if let Ok(mut pre_file) = File::create(&pre_restore_path) {
+                let _ = target_file.seek(SeekFrom::Start(0));
+                let _ = std::io::copy(&mut target_file, &mut pre_file);
+                let _ = pre_file.flush();
+                let _ = target_file.seek(SeekFrom::Start(0));
+                shake_prune::atomic::set_user_only_permissions(&pre_restore_path);
+            }
+        }
+    }
+
+    // 4. Restore from backup
+    match shake_prune::atomic::restore_from_backup(&mut target_file, &bak_path) {
         Ok(bytes) => {
+            shake_prune::atomic::set_user_only_permissions(&abs_target);
+            shake_prune::atomic::remove_intent_marker(&abs_target);
+            let _ = fs2::FileExt::unlock(&target_file);
             println!(
-                "✅ Successfully restored '{}' from atomic backup '{}' ({} bytes restored).",
+                "✅ Successfully restored '{}' from atomic backup '{}' ({} bytes, {} lines restored).",
                 abs_target.display(),
                 bak_path.display(),
-                bytes
+                bytes,
+                line_count
             );
         }
         Err(e) => {
+            let _ = fs2::FileExt::unlock(&target_file);
             eprintln!("Error: Failed to restore backup: {}", e);
             process::exit(1);
         }
@@ -50,21 +144,29 @@ fn handle_doctor(json_output: bool) {
     let exe_path = env::current_exe()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
-    let (gemini_exists, hook_active, hooks_path) = if home.is_empty() {
-        (false, false, String::new())
+
+    let config_path = ShakeConfig::global_config_path();
+    let config_exists = config_path.as_ref().map(|p| p.exists()).unwrap_or(false);
+    let loaded_config = ShakeConfig::load();
+
+    let (gemini_exists, hook_active, hooks_path, logs_writable) = if home.is_empty() {
+        (false, false, String::new(), false)
     } else {
         let gemini_dir = Path::new(&home).join(".gemini");
         let hooks_file = gemini_dir.join("config/hooks.json");
+        let logs_dir = gemini_dir.join("logs");
         let mut active = false;
         if hooks_file.exists() {
             if let Ok(content) = fs::read_to_string(&hooks_file) {
                 active = content.contains("shake-prune");
             }
         }
+        let writable = fs::create_dir_all(&logs_dir).is_ok();
         (
             gemini_dir.exists(),
             active,
             hooks_file.display().to_string(),
+            writable,
         )
     };
 
@@ -76,6 +178,10 @@ fn handle_doctor(json_output: bool) {
             "storage_root_exists": gemini_exists,
             "hook_registered": hook_active,
             "hooks_config": hooks_path,
+            "config_path": config_path.map(|p| p.display().to_string()),
+            "config_found": config_exists,
+            "auto_shake_enabled": loaded_config.auto.enabled,
+            "logs_writable": logs_writable,
         });
         println!("{}", val);
         return;
@@ -106,6 +212,28 @@ fn handle_doctor(json_output: bool) {
                     "⚠️ Auto-Hook Registration: hooks.json not found at {}",
                     hooks_file.display()
                 );
+            }
+
+            if let Some(cp) = &config_path {
+                if cp.exists() {
+                    println!(
+                        "✅ Config File: {} (auto.enabled = {})",
+                        cp.display(),
+                        loaded_config.auto.enabled
+                    );
+                } else {
+                    println!(
+                        "ℹ️ Config File: Not found at {} (using defaults; auto.enabled = {})",
+                        cp.display(),
+                        loaded_config.auto.enabled
+                    );
+                }
+            }
+
+            if logs_writable {
+                println!("✅ Diagnostic Logs: ~/.gemini/logs directory is writable");
+            } else {
+                println!("⚠️ Diagnostic Logs: ~/.gemini/logs directory is NOT writable");
             }
         } else {
             println!(
@@ -139,6 +267,7 @@ OPTIONS:
     --recent-window <N>      Fallback raw tool step window if user-turns=0 (default: 6)
     --full                   Full deep compaction (prunes thoughts older than window)
     --thought-window <N>     Number of recent turns to retain thoughts in full mode (default: 20)
+    --redact-secrets         Redact API keys, tokens, and Authorization headers
     --dry-run                Simulate compaction without modifying transcript.jsonl
     --no-in-place            Generate markdown summary artifact without truncating JSONL
     --json                   Emit machine-readable JSON metrics on stdout
@@ -187,8 +316,20 @@ fn main() {
         process::exit(1);
     }
 
+    let config = ShakeConfig::load();
     let mut raw_target = String::new();
-    let mut options = CompactionOptions::default();
+    let mut options = CompactionOptions {
+        recent_user_turns: config.retention.recent_user_turns,
+        recent_tools_cap: config.retention.recent_tools_cap,
+        recent_errors_cap: config.retention.recent_errors_cap,
+        recent_window_steps: config.retention.recent_window_steps,
+        thought_window_turns: None,
+        marathon_horizon: false,
+        in_place: true,
+        dry_run: false,
+        redact_secrets: config.privacy.redact_secrets,
+        non_blocking_lock: false,
+    };
     let mut json_output = false;
 
     let mut i = 2;
@@ -223,6 +364,9 @@ fn main() {
             if options.thought_window_turns.is_none() {
                 options.thought_window_turns = Some(20);
             }
+            i += 1;
+        } else if args[i] == "--redact-secrets" {
+            options.redact_secrets = true;
             i += 1;
         } else if args[i] == "--dry-run" {
             options.dry_run = true;
@@ -295,6 +439,7 @@ fn main() {
             );
             process::exit(1);
         }
+        shake_prune::atomic::set_user_only_permissions(&abs_output_path);
 
         let trigger_label = if options.thought_window_turns.is_some() {
             "Manual (/full-shake)"
