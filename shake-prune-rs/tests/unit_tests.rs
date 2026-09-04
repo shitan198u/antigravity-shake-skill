@@ -198,3 +198,116 @@ fn test_extract_user_request_text() {
     let no_tag = "Just a raw user string";
     assert_eq!(extract_user_request_text(no_tag), "Just a raw user string");
 }
+
+#[test]
+fn test_extract_short_target_variants() {
+    use shake_prune::pruner::extract_short_target;
+
+    // view_file with line numbers
+    let mut args = serde_json::Map::new();
+    args.insert("AbsolutePath".into(), json!("/workspace/src/lib.rs"));
+    args.insert("StartLine".into(), json!(10));
+    args.insert("EndLine".into(), json!(50));
+    assert_eq!(extract_short_target("view_file", &args), "lib.rs:10-50");
+
+    // run_command
+    let mut cmd_args = serde_json::Map::new();
+    cmd_args.insert("CommandLine".into(), json!("cargo test --all-targets"));
+    assert_eq!(
+        extract_short_target("run_command", &cmd_args),
+        "cargo test --all-targets"
+    );
+
+    // grep_search
+    let mut grep_args = serde_json::Map::new();
+    grep_args.insert("Query".into(), json!("fn extract"));
+    assert_eq!(
+        extract_short_target("grep_search", &grep_args),
+        "\"fn extract\""
+    );
+}
+
+#[test]
+fn test_parse_receipt_info() {
+    use shake_prune::pruner::parse_receipt_info;
+
+    let receipt =
+        "[PRUNED tool=RUN_COMMAND step=42 exit=0 lines=120 archive=/path/to/archive.jsonl line=45]";
+    let (lc, ln, ap) = parse_receipt_info(receipt);
+    assert_eq!(lc, Some(120));
+    assert_eq!(ln, Some(45));
+    assert_eq!(ap, Some("/path/to/archive.jsonl".to_string()));
+}
+
+#[test]
+fn test_collapsible_action_card_in_markdown() {
+    use shake_prune::pruner::{run_compaction_pipeline, CompactionOptions};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let transcript = tmp.path().join("transcript.jsonl");
+
+    {
+        let mut f = File::create(&transcript).unwrap();
+        // Step 1: user
+        writeln!(
+            f,
+            "{}",
+            json!({"step_index": 1, "type": "USER_INPUT", "content": "<USER_REQUEST>check code</USER_REQUEST>"})
+        )
+        .unwrap();
+        // Step 2: planner response
+        writeln!(
+            f,
+            "{}",
+            json!({
+                "step_index": 2,
+                "type": "PLANNER_RESPONSE",
+                "content": "Checking file",
+                "tool_calls": [{
+                    "name": "view_file",
+                    "args": {"AbsolutePath": "/project/src/main.rs", "StartLine": 1, "EndLine": 20}
+                }]
+            })
+        )
+        .unwrap();
+        // Step 3: tool output (historical, pruned)
+        let long_output = "line\n".repeat(50);
+        writeln!(
+            f,
+            "{}",
+            json!({"step_index": 3, "type": "VIEW_FILE", "content": long_output})
+        )
+        .unwrap();
+        // Step 4: user turn 2 (pushes step 3 into historical)
+        writeln!(
+            f,
+            "{}",
+            json!({"step_index": 4, "type": "USER_INPUT", "content": "<USER_REQUEST>now done</USER_REQUEST>"})
+        )
+        .unwrap();
+    }
+
+    let opts = CompactionOptions {
+        recent_user_turns: 1,
+        recent_tools_cap: 0,
+        recent_window_steps: 0,
+        ..Default::default()
+    };
+
+    let (_jsonl, markdown, _stats, _arch) = run_compaction_pipeline(&transcript, &opts).unwrap();
+
+    // Verify collapsible details card structure
+    assert!(markdown.contains("<details>"));
+    assert!(markdown.contains(
+        "<summary>⚙️ <b>view_file</b> <code>main.rs:1-20</code> — <i>50 lines archived</i></summary>"
+    ));
+    assert!(markdown.contains("- **Parameters**: `"));
+    assert!(markdown.contains("AbsolutePath=/project/src/main.rs"));
+    assert!(markdown.contains("- **Archive Receipt**: `[PRUNED tool=VIEW_FILE step=3 lines=50"));
+    assert!(markdown.contains("- **Master Archive**: [View line"));
+    assert!(markdown.contains("</details>"));
+
+    // Verify old uncollapsed bullet format is NOT present
+    assert!(!markdown.contains("- ⚙️ **Action Executed**:"));
+    assert!(!markdown.contains("> ℹ️ *[PRUNED"));
+}

@@ -1,14 +1,18 @@
-use crate::atomic::{commit_staged_in_place, stage_compacted_output};
+use crate::atomic::{
+    commit_staged_in_place_with_snapshot, recover_if_interrupted, set_user_only_permissions,
+    stage_compacted_output, SnapshotFingerprint,
+};
 use crate::metadata::load_or_discover_history;
 use crate::models::{CompactionEvent, PruningStats};
 use crate::receipts::count_warnings;
 use crate::slug::{extract_conversation_id, generate_suggested_filename, generate_topic_slug};
 use fs2::FileExt;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 // Explicit pruning, truncation, and retention thresholds
@@ -33,6 +37,8 @@ pub struct CompactionOptions {
     pub marathon_horizon: bool,   // Enable Milestone Horizon on marathon threads (>30 user turns)
     pub in_place: bool,
     pub dry_run: bool,
+    pub redact_secrets: bool, // Redact API keys, tokens, and Authorization headers (P1-3)
+    pub non_blocking_lock: bool, // Fail open immediately on lock contention (P1-2)
 }
 
 impl Default for CompactionOptions {
@@ -46,7 +52,163 @@ impl Default for CompactionOptions {
             marathon_horizon: false,
             in_place: true,
             dry_run: false,
+            redact_secrets: false,
+            non_blocking_lock: false,
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingToolCall {
+    pub name: String,
+    pub short_target: String,
+    pub arg_summary: String,
+}
+
+pub fn extract_short_target(name: &str, args_map: &serde_json::Map<String, Value>) -> String {
+    match name {
+        "view_file" | "replace_file_content" | "write_to_file" => {
+            let path_val = args_map
+                .get("AbsolutePath")
+                .or_else(|| args_map.get("TargetFile"))
+                .and_then(|v| match v {
+                    Value::String(s) => Some(s.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("");
+            let clean_path = path_val.trim_matches('"');
+            let file_name = Path::new(clean_path)
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_else(|| clean_path.to_string());
+
+            let start = args_map.get("StartLine").and_then(|v| match v {
+                Value::Number(n) => Some(n.to_string()),
+                Value::String(s) => Some(s.trim_matches('"').to_string()),
+                _ => None,
+            });
+            let end = args_map.get("EndLine").and_then(|v| match v {
+                Value::Number(n) => Some(n.to_string()),
+                Value::String(s) => Some(s.trim_matches('"').to_string()),
+                _ => None,
+            });
+            match (start, end) {
+                (Some(s), Some(e)) if !s.is_empty() && !e.is_empty() => {
+                    format!("{}:{}-{}", file_name, s, e)
+                }
+                (Some(s), None) if !s.is_empty() => format!("{}:{}", file_name, s),
+                _ => file_name,
+            }
+        }
+        "run_command" => {
+            let cmd = args_map
+                .get("CommandLine")
+                .and_then(|v| match v {
+                    Value::String(s) => Some(s.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("");
+            let clean_cmd = cmd.trim_matches('"').trim();
+            let first_line = clean_cmd.lines().next().unwrap_or("");
+            if first_line.chars().count() > 40 {
+                format!("{}...", safe_truncate(first_line, 40))
+            } else if !first_line.is_empty() {
+                first_line.to_string()
+            } else {
+                "command".to_string()
+            }
+        }
+        "grep_search" => {
+            let query = args_map
+                .get("Query")
+                .and_then(|v| match v {
+                    Value::String(s) => Some(s.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("");
+            let clean_q = query.trim_matches('"');
+            if clean_q.chars().count() > 30 {
+                format!("\"{}...\"", safe_truncate(clean_q, 30))
+            } else if !clean_q.is_empty() {
+                format!("\"{}\"", clean_q)
+            } else {
+                "search".to_string()
+            }
+        }
+        "search_web" => {
+            let query = args_map
+                .get("query")
+                .or_else(|| args_map.get("Query"))
+                .and_then(|v| match v {
+                    Value::String(s) => Some(s.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("");
+            let clean_q = query.trim_matches('"');
+            if clean_q.chars().count() > 30 {
+                format!("\"{}...\"", safe_truncate(clean_q, 30))
+            } else if !clean_q.is_empty() {
+                format!("\"{}\"", clean_q)
+            } else {
+                "web".to_string()
+            }
+        }
+        _ => {
+            let first_arg = args_map
+                .iter()
+                .find(|(k, _)| *k != "toolAction" && *k != "toolSummary")
+                .map(|(_, v)| match v {
+                    Value::String(s) => s.trim_matches('"').to_string(),
+                    other => other.to_string(),
+                })
+                .unwrap_or_default();
+            if first_arg.chars().count() > 30 {
+                format!("{}...", safe_truncate(&first_arg, 30))
+            } else {
+                first_arg
+            }
+        }
+    }
+}
+
+pub fn parse_receipt_info(receipt: &str) -> (Option<usize>, Option<usize>, Option<String>) {
+    let mut lines_count = None;
+    let mut line_no = None;
+    let mut archive_path = None;
+    for token in receipt
+        .trim_matches(|c| c == '[' || c == ']')
+        .split_whitespace()
+    {
+        if let Some(val) = token.strip_prefix("lines=") {
+            lines_count = val.parse::<usize>().ok();
+        } else if let Some(val) = token.strip_prefix("line=") {
+            line_no = val.parse::<usize>().ok();
+        } else if let Some(val) = token.strip_prefix("archive=") {
+            archive_path = Some(val.to_string());
+        }
+    }
+    (lines_count, line_no, archive_path)
+}
+
+pub fn flush_pending_tools(pending: &mut Vec<PendingToolCall>, blocks: &mut Vec<String>) {
+    for tc in pending.drain(..) {
+        let summary_hdr = if tc.short_target.is_empty() {
+            format!("<summary>⚙️ <b>{}</b></summary>", tc.name)
+        } else {
+            format!(
+                "<summary>⚙️ <b>{}</b> <code>{}</code></summary>",
+                tc.name, tc.short_target
+            )
+        };
+        let param_line = if tc.arg_summary.is_empty() {
+            String::new()
+        } else {
+            format!("- **Parameters**: `{}`\n", tc.arg_summary)
+        };
+        blocks.push(format!(
+            "<details>\n{}\n\n{}- *(No output recorded)*\n\n</details>\n\n",
+            summary_hdr, param_line
+        ));
     }
 }
 
@@ -99,11 +261,46 @@ pub fn purge_legacy_timestamped_backups(logs_dir: &Path) {
     if let Ok(entries) = fs::read_dir(logs_dir) {
         for entry in entries.flatten() {
             let file_name = entry.file_name().to_string_lossy().to_string();
-            if file_name.contains(".bak_") {
+            if file_name.starts_with("transcript.jsonl.bak_") {
                 let _ = fs::remove_file(entry.path());
             }
         }
     }
+}
+
+static RE_GH: OnceLock<regex::Regex> = OnceLock::new();
+static RE_GH_PAT: OnceLock<regex::Regex> = OnceLock::new();
+static RE_AWS: OnceLock<regex::Regex> = OnceLock::new();
+static RE_BEARER: OnceLock<regex::Regex> = OnceLock::new();
+static RE_AUTH: OnceLock<regex::Regex> = OnceLock::new();
+static RE_KEY: OnceLock<regex::Regex> = OnceLock::new();
+
+/// Redacts sensitive credentials (GitHub tokens, AWS keys, Bearer tokens, private keys) from text (P1-3).
+pub fn redact_secrets(text: &str) -> String {
+    let pat_gh = RE_GH
+        .get_or_init(|| regex::Regex::new(r"(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36}").unwrap());
+    let pat_gh_pat =
+        RE_GH_PAT.get_or_init(|| regex::Regex::new(r"github_pat_[A-Za-z0-9_]{82}").unwrap());
+    let pat_aws =
+        RE_AWS.get_or_init(|| regex::Regex::new(r"\b(AKIA|ABIA|ACCA|ASIA)[0-9A-Z]{16}\b").unwrap());
+    let pat_bearer = RE_BEARER
+        .get_or_init(|| regex::Regex::new(r"(?i)\bBearer\s+[A-Za-z0-9_\-\.]{20,}").unwrap());
+    let pat_auth =
+        RE_AUTH.get_or_init(|| regex::Regex::new(r"(?i)Authorization:\s*[^\r\n]+").unwrap());
+    let pat_key = RE_KEY.get_or_init(|| {
+        regex::Regex::new(
+            r"-----BEGIN (?:[A-Z ]+) PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z ]+) PRIVATE KEY-----",
+        )
+        .unwrap()
+    });
+
+    let s1 = pat_gh.replace_all(text, "[REDACTED_GH_TOKEN]");
+    let s2 = pat_gh_pat.replace_all(&s1, "[REDACTED_GH_PAT]");
+    let s3 = pat_aws.replace_all(&s2, "[REDACTED_AWS_KEY]");
+    let s4 = pat_bearer.replace_all(&s3, "Bearer [REDACTED]");
+    let s5 = pat_auth.replace_all(&s4, "Authorization: [REDACTED]");
+    let s6 = pat_key.replace_all(&s5, "[REDACTED_PRIVATE_KEY]");
+    s6.to_string()
 }
 
 /// Builds an O(1) step_index -> 1-indexed line number lookup map for `transcript_full.jsonl`.
@@ -405,11 +602,150 @@ fn copy_from_locked_file(file: &mut File, dest_path: &Path) -> std::io::Result<u
     Ok(bytes)
 }
 
+/// Synchronizes the permanent master archive (`transcript_full.jsonl`) under exclusive lock
+/// before in-place pruning. Any steps present in the live transcript that are not yet recorded
+/// in the master archive are appended atomically, guaranteed with 0600 permissions and synced (P0-1).
+fn sync_master_full_transcript(
+    file: &mut File,
+    full_transcript_path: &Path,
+    redact_secrets_active: bool,
+) -> Result<HashMap<u64, usize>, Box<dyn std::error::Error>> {
+    if !full_transcript_path.exists() {
+        file.seek(SeekFrom::Start(0))?;
+        let reader = BufReader::new(&mut *file);
+        let mut full_file = File::create(full_transcript_path)?;
+        let mut seen_init: HashSet<u64> = HashSet::new();
+        for line_res in reader.lines() {
+            let line_str = line_res?;
+            if line_str.trim().is_empty() {
+                continue;
+            }
+            if let Ok(val) = serde_json::from_str::<Value>(&line_str) {
+                if let Some(step_idx) = val.get("step_index").and_then(|v| v.as_u64()) {
+                    if !seen_init.insert(step_idx) {
+                        continue; // Deduplicate: only record first occurrence of step_index in master archive
+                    }
+                }
+            }
+            let line_to_write = if redact_secrets_active {
+                redact_secrets(&line_str)
+            } else {
+                line_str
+            };
+            writeln!(full_file, "{}", line_to_write)?;
+        }
+        full_file.flush()?;
+        full_file.sync_all()?;
+        file.seek(SeekFrom::Start(0))?;
+        set_user_only_permissions(full_transcript_path);
+        let step_map = scan_master_full_transcript(full_transcript_path);
+        store_cached_master_index(full_transcript_path, &step_map);
+        return Ok(step_map);
+    }
+
+    let mut step_map = scan_master_full_transcript(full_transcript_path);
+    let mut current_line_count = 0;
+    if let Ok(f) = File::open(full_transcript_path) {
+        let reader = BufReader::new(f);
+        current_line_count = reader.lines().count();
+    }
+
+    file.seek(SeekFrom::Start(0))?;
+    let reader = BufReader::new(&mut *file);
+    let mut missing_lines: Vec<(u64, String)> = Vec::new();
+    let mut seen_in_active: HashSet<u64> = HashSet::new();
+
+    for line_res in reader.lines() {
+        let line_str = line_res?;
+        if line_str.trim().is_empty() {
+            continue;
+        }
+        if let Ok(val) = serde_json::from_str::<Value>(&line_str) {
+            if val
+                .get("synthetic")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+                || val
+                    .get("is_milestone")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+            {
+                continue;
+            }
+            if let Some(step_idx) = val.get("step_index").and_then(|v| v.as_u64()) {
+                if !step_map.contains_key(&step_idx) && seen_in_active.insert(step_idx) {
+                    let line_to_record = if redact_secrets_active {
+                        redact_secrets(&line_str)
+                    } else {
+                        line_str
+                    };
+                    missing_lines.push((step_idx, line_to_record));
+                }
+            }
+        }
+    }
+
+    file.seek(SeekFrom::Start(0))?;
+
+    if !missing_lines.is_empty() {
+        let mut full_file = File::options()
+            .read(true)
+            .append(true)
+            .open(full_transcript_path)
+            .map_err(|e| {
+                format!(
+                    "Critical: Failed to open permanent master archive at {} for append: {}. Compaction aborted.",
+                    full_transcript_path.display(), e
+                )
+            })?;
+
+        // Guard: check if existing file ends with a newline before appending (P0-6)
+        let meta = full_file.metadata()?;
+        let flen = meta.len();
+        if flen > 0 {
+            full_file.seek(SeekFrom::Start(flen - 1))?;
+            let mut last_byte = [0u8; 1];
+            if full_file.read_exact(&mut last_byte).is_ok() && last_byte[0] != b'\n' {
+                writeln!(full_file)?;
+            }
+        }
+
+        for (step_idx, line_str) in missing_lines {
+            current_line_count += 1;
+            writeln!(full_file, "{}", line_str)?;
+            step_map.insert(step_idx, current_line_count);
+        }
+        full_file.flush()?;
+        full_file.sync_all()?;
+        set_user_only_permissions(full_transcript_path);
+        store_cached_master_index(full_transcript_path, &step_map);
+    }
+
+    Ok(step_map)
+}
+
 pub fn run_compaction_pipeline(
     transcript_path: &Path,
     options: &CompactionOptions,
 ) -> Result<(String, String, PruningStats, String), Box<dyn std::error::Error>> {
     let pipeline_start = Instant::now();
+
+    // P0-2: Auto-recover from any previous interrupted compaction before checking existence
+    match recover_if_interrupted(transcript_path) {
+        Ok(Some(recovery_msg)) => {
+            eprintln!("{}", recovery_msg);
+        }
+        Err(e) => {
+            return Err(format!(
+                "Critical: Auto-recovery from interrupted compaction failed for '{}': {}. Compaction aborted.",
+                transcript_path.display(),
+                e
+            )
+            .into());
+        }
+        _ => {}
+    }
+
     if !transcript_path.exists() {
         return Err(format!(
             "Transcript file does not exist: {}",
@@ -425,57 +761,72 @@ pub fn run_compaction_pipeline(
     let full_transcript_path = logs_dir.join("transcript_full.jsonl");
     let backup_latest = abs_target.with_extension("jsonl.bak");
 
-    let mut file_opt = if !options.dry_run && options.in_place {
-        let mut file = File::options().read(true).write(true).open(&abs_target)?;
-        file.lock_exclusive()?;
+    let (mut file_opt, snapshot_fingerprint, master_archive_abs_str, master_step_to_line) =
+        if !options.dry_run && options.in_place {
+            let mut file = File::options().read(true).write(true).open(&abs_target)?;
+            if options.non_blocking_lock {
+                file.try_lock_exclusive().map_err(|e| {
+                    format!(
+                        "Lock contention: could not acquire exclusive lock immediately on '{}': {}",
+                        abs_target.display(),
+                        e
+                    )
+                })?;
+            } else {
+                file.lock_exclusive()?;
+            }
 
-        // Guarantee permanent master archive under exclusive lock before destructive in-place pruning.
-        // Copy directly from `file` handle to avoid Windows ERROR_LOCK_VIOLATION (os error 33).
-        if !full_transcript_path.exists() {
-            copy_from_locked_file(&mut file, &full_transcript_path).map_err(|e| {
+            // P0-3: Record snapshot fingerprint while holding exclusive lock before reading
+            let snap = SnapshotFingerprint::from_file(&file)?;
+
+            // P0-1: Guarantee permanent master archive synchronization under exclusive lock
+            let step_map = sync_master_full_transcript(
+                &mut file,
+                &full_transcript_path,
+                options.redact_secrets,
+            )?;
+
+            // Mandatory fail-closed crash fallback while holding the exclusive lock
+            copy_from_locked_file(&mut file, &backup_latest).map_err(|e| {
                 format!(
-                    "Critical: Failed to initialize permanent master archive at {}: {}. Compaction aborted to protect data integrity.",
-                    full_transcript_path.display(), e
+                    "Critical: Failed to create atomic backup at {}: {}. Compaction aborted to prevent data loss.",
+                    backup_latest.display(), e
                 )
             })?;
-        }
+            set_user_only_permissions(&backup_latest);
 
-        // Mandatory fail-closed crash fallback while holding the exclusive lock.
-        copy_from_locked_file(&mut file, &backup_latest).map_err(|e| {
-            format!(
-                "Critical: Failed to create atomic backup at {}: {}. Compaction aborted to prevent data loss.",
-                backup_latest.display(), e
-            )
-        })?;
+            // Verify backup byte size exactly matches before allowing any truncation
+            let orig_len = file.metadata()?.len();
+            let backup_len = fs::metadata(&backup_latest)?.len();
+            if orig_len != backup_len {
+                return Err(format!(
+                    "Critical: Backup size mismatch (original {} bytes, backup {} bytes). Compaction aborted.",
+                    orig_len, backup_len
+                ).into());
+            }
 
-        // Verify backup byte size exactly matches before allowing any truncation
-        let orig_len = file.metadata()?.len();
-        let backup_len = fs::metadata(&backup_latest)?.len();
-        if orig_len != backup_len {
-            return Err(format!(
-                "Critical: Backup size mismatch (original {} bytes, backup {} bytes). Compaction aborted.",
-                orig_len, backup_len
-            ).into());
-        }
+            // Purge legacy timestamped backups to reclaim disk space
+            purge_legacy_timestamped_backups(logs_dir);
 
-        // Purge legacy timestamped backups to reclaim disk space
-        purge_legacy_timestamped_backups(logs_dir);
+            let abs_str = fs::canonicalize(&full_transcript_path)
+                .unwrap_or_else(|_| full_transcript_path.clone())
+                .to_string_lossy()
+                .to_string();
 
-        Some(file)
-    } else {
-        None
-    };
-
-    let (master_archive_abs_str, master_step_to_line) = if full_transcript_path.exists() {
-        let step_map = index_master_full_transcript(&full_transcript_path);
-        let abs_str = fs::canonicalize(&full_transcript_path)
-            .unwrap_or(full_transcript_path.clone())
-            .to_string_lossy()
-            .to_string();
-        (abs_str, Some(step_map))
-    } else {
-        (full_transcript_path.to_string_lossy().to_string(), None)
-    };
+            (Some(file), Some(snap), abs_str, Some(step_map))
+        } else {
+            let (abs_str, step_map) = if full_transcript_path.exists() {
+                let sm = index_master_full_transcript(&full_transcript_path);
+                let s = fs::canonicalize(&full_transcript_path)
+                    .unwrap_or_else(|_| full_transcript_path.clone())
+                    .to_string_lossy()
+                    .to_string();
+                (s, Some(sm))
+            } else {
+                (backup_latest.to_string_lossy().to_string(), None)
+            };
+            (None, None, abs_str, step_map)
+        };
 
     // Read and buffer lines for the single pass. Clone existing locked handle
     // to avoid secondary handle open on Windows while locked.
@@ -491,6 +842,7 @@ pub fn run_compaction_pipeline(
     let mut lines_buffer: Vec<(usize, String)> = Vec::new();
     let mut raw_bytes = 0usize;
     let mut user_turn_positions: Vec<(usize, usize)> = Vec::new();
+    let mut max_step_index = 0u64;
 
     for (line_idx, line) in reader.lines().enumerate() {
         let line_str = line?;
@@ -502,12 +854,21 @@ pub fn run_compaction_pipeline(
         let buf_idx = lines_buffer.len();
 
         if let Ok(val) = serde_json::from_str::<Value>(&line_str) {
+            if let Some(step_idx) = val.get("step_index").and_then(|v| v.as_u64()) {
+                if step_idx > max_step_index {
+                    max_step_index = step_idx;
+                }
+            }
             let t = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
             if t == "USER_INPUT" {
                 user_turn_positions.push((user_turn_positions.len() + 1, buf_idx));
             }
         }
         lines_buffer.push((original_line_no, line_str));
+    }
+
+    if max_step_index == 0 {
+        max_step_index = lines_buffer.len() as u64;
     }
 
     let total_user_turns = user_turn_positions.len();
@@ -561,9 +922,21 @@ pub fn run_compaction_pipeline(
 
     // Re-index effective user turns, assistant turns, ephemeral positions, and tool step positions after milestone horizon
     let mut effective_user_turn_indices: Vec<usize> = Vec::new();
-    let mut effective_ephemeral_indices: Vec<usize> = Vec::new();
+    let mut effective_shake_ephemeral_indices: Vec<usize> = Vec::new();
     let mut effective_tool_indices: Vec<usize> = Vec::new();
     let mut effective_assistant_turns = 0usize;
+
+    let is_shake_ephemeral = |val: &Value| -> bool {
+        if let Some(content) = val.get("content").and_then(|v| v.as_str()) {
+            content.contains("Context compacted via /shake")
+                || content.contains("Context auto-compacted via /shake")
+                || content.contains("active_shake_anchor.json")
+                || content.contains("HOOK_NOTICE")
+                || content.contains("ANCHOR_NOTICE")
+        } else {
+            false
+        }
+    };
 
     for (buf_idx, (_, line_str)) in effective_lines.iter().enumerate() {
         if let Ok(val) = serde_json::from_str::<Value>(line_str) {
@@ -573,7 +946,9 @@ pub fn run_compaction_pipeline(
             } else if t == "PLANNER_RESPONSE" {
                 effective_assistant_turns += 1;
             } else if t == "EPHEMERAL_MESSAGE" {
-                effective_ephemeral_indices.push(buf_idx);
+                if is_shake_ephemeral(&val) {
+                    effective_shake_ephemeral_indices.push(buf_idx);
+                }
             } else if matches!(
                 t,
                 "RUN_COMMAND" | "VIEW_FILE" | "SEARCH_WEB" | "GREP_SEARCH" | "CODE_ACTION"
@@ -583,7 +958,7 @@ pub fn run_compaction_pipeline(
         }
     }
 
-    let latest_ephemeral_idx = effective_ephemeral_indices.last().copied();
+    let latest_shake_ephemeral_idx = effective_shake_ephemeral_indices.last().copied();
 
     let effective_total_user_turns = effective_user_turn_indices.len();
     let effective_total_steps = effective_lines.len();
@@ -643,6 +1018,7 @@ pub fn run_compaction_pipeline(
     let mut retained_short_cmds = 0usize;
     let mut retained_recent_steps = 0usize;
     let mut first_user_prompt = String::new();
+    let mut pending_tool_calls: Vec<PendingToolCall> = Vec::new();
 
     for (i, (orig_line_no, line_str)) in effective_lines.into_iter().enumerate() {
         let mut step_val: Value = match serde_json::from_str(&line_str) {
@@ -678,9 +1054,15 @@ pub fn run_compaction_pipeline(
             .and_then(|v| v.as_u64())
             .unwrap_or(i as u64 + 1);
 
-        // Deduplicate EPHEMERAL_MESSAGE: only retain the latest one!
+        // Deduplicate EPHEMERAL_MESSAGE: only deduplicate shake-related notices (P2-5)
         if stype == "EPHEMERAL_MESSAGE" {
-            if Some(i) == latest_ephemeral_idx {
+            if is_shake_ephemeral(&step_val) {
+                if Some(i) == latest_shake_ephemeral_idx {
+                    compacted_output.push_str(&line_str);
+                    compacted_output.push('\n');
+                }
+            } else {
+                // Non-shake ephemeral messages are preserved verbatim
                 compacted_output.push_str(&line_str);
                 compacted_output.push('\n');
             }
@@ -696,14 +1078,39 @@ pub fn run_compaction_pipeline(
             || status.contains("failed");
         let is_recent_error = is_error && options.recent_errors_cap > 0 && (i >= error_cutoff_idx);
 
-        // Exact line number in the master archive (transcript_full.jsonl or fallback backup)
-        let resolved_line_no = master_step_to_line
-            .as_ref()
-            .and_then(|m| m.get(&step_idx).copied())
-            .unwrap_or(orig_line_no);
+        let has_explicit_step_idx = step_val
+            .get("step_index")
+            .and_then(|v| v.as_u64())
+            .is_some();
+        let is_synthetic = step_val
+            .get("is_synthetic")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+            || step_val
+                .get("is_milestone")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+        // Exact line number in the master archive (transcript_full.jsonl)
+        let resolved_line_no = if let Some(m) = &master_step_to_line {
+            match m.get(&step_idx).copied() {
+                Some(l) => l,
+                None if options.dry_run || !has_explicit_step_idx || is_synthetic => orig_line_no,
+                None => {
+                    return Err(format!(
+                        "Critical integrity failure: step {} cannot be resolved in master archive '{}'. Refusing to emit unresolvable receipt.",
+                        step_idx,
+                        master_archive_abs_str
+                    ).into());
+                }
+            }
+        } else {
+            orig_line_no
+        };
 
         match stype.as_str() {
             "USER_INPUT" => {
+                flush_pending_tools(&mut pending_tool_calls, &mut output_blocks);
                 user_count += 1;
                 let raw_content = step_val
                     .get("content")
@@ -711,14 +1118,24 @@ pub fn run_compaction_pipeline(
                     .unwrap_or("");
                 let user_text = extract_user_request_text(raw_content);
                 if first_user_prompt.is_empty() {
-                    first_user_prompt = user_text.to_string();
+                    first_user_prompt = if options.redact_secrets {
+                        redact_secrets(user_text)
+                    } else {
+                        user_text.to_string()
+                    };
                 }
+                let user_display = if options.redact_secrets {
+                    redact_secrets(user_text)
+                } else {
+                    user_text.to_string()
+                };
                 output_blocks.push(format!(
                     "### 👤 User (Turn {})\n\n{}\n",
-                    user_count, user_text
+                    user_count, user_display
                 ));
             }
             "PLANNER_RESPONSE" => {
+                flush_pending_tools(&mut pending_tool_calls, &mut output_blocks);
                 assistant_count += 1;
                 let assistant_text = step_val
                     .get("content")
@@ -746,14 +1163,24 @@ pub fn run_compaction_pipeline(
 
                 if !assistant_text.is_empty() || !thinking_text.is_empty() {
                     let mut assistant_block = String::from("### 🤖 Assistant\n\n");
-                    if is_thought_retained && !thinking_text.is_empty() {
+                    let clean_thinking = if options.redact_secrets {
+                        redact_secrets(&thinking_text)
+                    } else {
+                        thinking_text
+                    };
+                    let clean_assistant = if options.redact_secrets {
+                        redact_secrets(&assistant_text)
+                    } else {
+                        assistant_text
+                    };
+                    if is_thought_retained && !clean_thinking.is_empty() {
                         assistant_block.push_str(&format!(
                             "<details>\n<summary>💭 Thought Process</summary>\n\n{}\n\n</details>\n\n",
-                            thinking_text
+                            clean_thinking
                         ));
                     }
-                    if !assistant_text.is_empty() {
-                        assistant_block.push_str(&assistant_text);
+                    if !clean_assistant.is_empty() {
+                        assistant_block.push_str(&clean_assistant);
                         assistant_block.push('\n');
                     }
                     output_blocks.push(assistant_block);
@@ -803,15 +1230,46 @@ pub fn run_compaction_pipeline(
                                 arg_items.push(format!("{}={}", k, v_formatted));
                             }
                             let arg_summary = arg_items.join(", ");
-                            output_blocks.push(format!(
-                                "- ⚙️ **Action Executed**: `{}({})`",
-                                name, arg_summary
-                            ));
+                            let short_target = extract_short_target(&name, args_map);
+                            pending_tool_calls.push(PendingToolCall {
+                                name,
+                                short_target,
+                                arg_summary,
+                            });
                         }
                     }
                 }
             }
             "RUN_COMMAND" | "VIEW_FILE" | "SEARCH_WEB" | "GREP_SEARCH" | "CODE_ACTION" => {
+                let pending_opt = if !pending_tool_calls.is_empty() {
+                    Some(pending_tool_calls.remove(0))
+                } else {
+                    None
+                };
+                let tool_name = pending_opt
+                    .as_ref()
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| stype.to_lowercase());
+                let short_target = pending_opt
+                    .as_ref()
+                    .map(|p| p.short_target.clone())
+                    .unwrap_or_default();
+                let arg_summary = pending_opt
+                    .as_ref()
+                    .map(|p| p.arg_summary.clone())
+                    .unwrap_or_default();
+
+                let summary_code = if short_target.is_empty() {
+                    String::new()
+                } else {
+                    format!(" <code>{}</code>", short_target)
+                };
+                let param_line = if arg_summary.is_empty() {
+                    String::new()
+                } else {
+                    format!("- **Parameters**: `{}`\n", arg_summary)
+                };
+
                 let content_str = step_val
                     .get("content")
                     .and_then(|v| v.as_str())
@@ -824,8 +1282,8 @@ pub fn run_compaction_pipeline(
                         ACTIVE_TOOL_SNIPPET_CHARS,
                     ));
                     output_blocks.push(format!(
-                        "> 🕒 **[Active Window Tool Output ({})]**:\n```\n{}\n```\n",
-                        stype, snippet
+                        "<details>\n<summary>⚙️ <b>{}</b>{} — <b>Active Memory (exit 0)</b></summary>\n\n{}- **Output**:\n```\n{}\n```\n\n</details>\n\n",
+                        tool_name, summary_code, param_line, snippet
                     ));
                 } else if is_recent_error {
                     retained_errors_count += 1;
@@ -833,22 +1291,42 @@ pub fn run_compaction_pipeline(
                         content_str,
                         ERROR_TOOL_SNIPPET_CHARS,
                     ));
+                    let exit_label = if let Some(code) = exit_code {
+                        format!("Exit code {}", code)
+                    } else {
+                        "Failed".to_string()
+                    };
                     output_blocks.push(format!(
-                        "> ⚠️ **[Tool Execution Error / Failure ({}, Exit code: {:?})]**:\n```\n{}\n```\n",
-                        stype, exit_code, snippet
+                        "<details open>\n<summary>⚠️ <b>{} Failed</b>{} — <b>{}</b></summary>\n\n{}- **Error Trace**:\n```\n{}\n```\n\n</details>\n\n",
+                        tool_name, summary_code, exit_label, param_line, snippet
                     ));
                 } else if stype == "RUN_COMMAND" {
                     if content_str.starts_with("[PRUNED") {
                         pruned_tools_count += 1;
-                        output_blocks.push(format!("> ℹ️ *{}*\n", content_str));
+                        let (lc, ln, ap) = parse_receipt_info(content_str);
+                        let lines_label = match lc {
+                            Some(c) => format!("{} lines archived", c),
+                            None => "Archived receipt".to_string(),
+                        };
+                        let archive_link = match (ap.as_deref(), ln) {
+                            (Some(arch), Some(l)) => format!(
+                                "- **Master Archive**: [View line {} in transcript_full.jsonl](file://{}#L{})\n",
+                                l, arch, l
+                            ),
+                            _ => String::new(),
+                        };
+                        output_blocks.push(format!(
+                            "<details>\n<summary>⚙️ <b>{}</b>{} — <i>{}</i></summary>\n\n{}- **Archive Receipt**: `{}`\n{}\n</details>\n\n",
+                            tool_name, summary_code, lines_label, param_line, content_str, archive_link
+                        ));
                     } else if !is_error
                         && content_str.trim().chars().count() < SHORT_CMD_RETENTION_CHARS
                     {
                         retained_short_cmds += 1;
                         let safe_cmd = sanitize_markdown_snippet(content_str.trim());
                         output_blocks.push(format!(
-                            "> 📋 **[Command Output (exit 0)]**:\n```\n{}\n```\n",
-                            safe_cmd
+                            "<details>\n<summary>⚙️ <b>{}</b>{} — <i>exit 0</i></summary>\n\n{}- **Command Output**:\n```\n{}\n```\n\n</details>\n\n",
+                            tool_name, summary_code, param_line, safe_cmd
                         ));
                     } else {
                         let line_count = content_str.lines().count();
@@ -875,12 +1353,34 @@ pub fn run_compaction_pipeline(
                             step_idx, exit_str, warn_tag, line_count, master_archive_abs_str, resolved_line_no
                         );
                         step_val["content"] = serde_json::json!(receipt);
-                        output_blocks.push(format!("> ℹ️ *{}*\n", receipt));
+                        let archive_link = format!(
+                            "- **Master Archive**: [View line {} in transcript_full.jsonl](file://{}#L{})\n",
+                            resolved_line_no, master_archive_abs_str, resolved_line_no
+                        );
+                        output_blocks.push(format!(
+                            "<details>\n<summary>⚙️ <b>{}</b>{} — <i>{} lines archived</i></summary>\n\n{}- **Archive Receipt**: `{}`\n{}\n</details>\n\n",
+                            tool_name, summary_code, line_count, param_line, receipt, archive_link
+                        ));
                     }
                 } else if stype == "VIEW_FILE" {
                     if content_str.starts_with("[PRUNED") {
                         pruned_tools_count += 1;
-                        output_blocks.push(format!("> ℹ️ *{}*\n", content_str));
+                        let (lc, ln, ap) = parse_receipt_info(content_str);
+                        let lines_label = match lc {
+                            Some(c) => format!("{} lines archived", c),
+                            None => "Archived receipt".to_string(),
+                        };
+                        let archive_link = match (ap.as_deref(), ln) {
+                            (Some(arch), Some(l)) => format!(
+                                "- **Master Archive**: [View line {} in transcript_full.jsonl](file://{}#L{})\n",
+                                l, arch, l
+                            ),
+                            _ => String::new(),
+                        };
+                        output_blocks.push(format!(
+                            "<details>\n<summary>⚙️ <b>{}</b>{} — <i>{}</i></summary>\n\n{}- **Archive Receipt**: `{}`\n{}\n</details>\n\n",
+                            tool_name, summary_code, lines_label, param_line, content_str, archive_link
+                        ));
                     } else {
                         let line_count = content_str.lines().count();
                         pruned_tools_count += 1;
@@ -889,7 +1389,14 @@ pub fn run_compaction_pipeline(
                             step_idx, line_count, master_archive_abs_str, resolved_line_no
                         );
                         step_val["content"] = serde_json::json!(receipt);
-                        output_blocks.push(format!("> ℹ️ *{}*\n", receipt));
+                        let archive_link = format!(
+                            "- **Master Archive**: [View line {} in transcript_full.jsonl](file://{}#L{})\n",
+                            resolved_line_no, master_archive_abs_str, resolved_line_no
+                        );
+                        output_blocks.push(format!(
+                            "<details>\n<summary>⚙️ <b>{}</b>{} — <i>{} lines archived</i></summary>\n\n{}- **Archive Receipt**: `{}`\n{}\n</details>\n\n",
+                            tool_name, summary_code, line_count, param_line, receipt, archive_link
+                        ));
                     }
                 } else {
                     pruned_tools_count += 1;
@@ -898,35 +1405,50 @@ pub fn run_compaction_pipeline(
                         stype, step_idx, master_archive_abs_str, resolved_line_no
                     );
                     step_val["content"] = serde_json::json!(receipt);
-                    output_blocks.push(format!("> ℹ️ *{}*\n", receipt));
+                    let archive_link = format!(
+                        "- **Master Archive**: [View line {} in transcript_full.jsonl](file://{}#L{})\n",
+                        resolved_line_no, master_archive_abs_str, resolved_line_no
+                    );
+                    output_blocks.push(format!(
+                        "<details>\n<summary>⚙️ <b>{}</b>{} — <i>Archived receipt</i></summary>\n\n{}- **Archive Receipt**: `{}`\n{}\n</details>\n\n",
+                        tool_name, summary_code, param_line, receipt, archive_link
+                    ));
                 }
             }
             _ => {}
         }
 
-        let compacted_line = serde_json::to_string(&step_val)?;
+        let compacted_line = if options.redact_secrets {
+            let line_str = serde_json::to_string(&step_val)?;
+            redact_secrets(&line_str)
+        } else {
+            serde_json::to_string(&step_val)?
+        };
         generated_json_lines.push(compacted_line.clone());
         compacted_output.push_str(&compacted_line);
         compacted_output.push('\n');
     }
+
+    flush_pending_tools(&mut pending_tool_calls, &mut output_blocks);
 
     if let Some(mut file) = file_opt {
         // P0-3 near-atomic path: stage + verify BEFORE touching the original
         // inode, then commit in place with verified rollback (P0-1 / P0-2).
         // Any error below leaves `transcript.jsonl.bak` intact for restore.
         let staged = stage_compacted_output(&abs_target, &compacted_output)?;
-        match commit_staged_in_place(
+        match commit_staged_in_place_with_snapshot(
             &mut file,
             &abs_target,
             &backup_latest,
             &staged,
             &generated_json_lines,
+            snapshot_fingerprint.as_ref(),
         ) {
             Ok(()) => {
-                let _ = file.unlock();
+                let _ = fs2::FileExt::unlock(&file);
             }
             Err(e) => {
-                let _ = file.unlock();
+                let _ = fs2::FileExt::unlock(&file);
                 return Err(e);
             }
         }
@@ -987,7 +1509,12 @@ pub fn run_compaction_pipeline(
         timeline_section
     );
 
-    let full_document = format!("{}{}", header, output_blocks.join("\n\n"));
+    let raw_document = format!("{}{}", header, output_blocks.join("\n\n"));
+    let full_document = if options.redact_secrets {
+        redact_secrets(&raw_document)
+    } else {
+        raw_document
+    };
     let pruned_bytes = full_document.len();
     let raw_tokens = estimate_tokens(raw_bytes);
     let pruned_tokens = estimate_tokens(pruned_bytes);
@@ -1045,6 +1572,7 @@ pub fn run_compaction_pipeline(
         history_events,
         duration_ms,
         trigger_detail,
+        max_step_index,
     };
 
     Ok((

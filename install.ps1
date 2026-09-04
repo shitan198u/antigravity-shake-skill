@@ -38,6 +38,7 @@ if ($Uninstall) {
     if (Test-Path $HooksConfig) {
         try {
             $HooksObj = Get-Content $HooksConfig -Raw | ConvertFrom-Json
+            $Modified = $false
             if ($HooksObj.hooks -and $HooksObj.hooks.PreInvocation) {
                 $Filtered = @()
                 foreach ($h in $HooksObj.hooks.PreInvocation) {
@@ -46,8 +47,22 @@ if ($Uninstall) {
                     }
                 }
                 $HooksObj.hooks.PreInvocation = $Filtered
-                $HooksObj | ConvertTo-Json -Depth 5 | Set-Content $HooksConfig -Encoding UTF8
+                $Modified = $true
                 Write-Host "  [OK] Cleaned PreInvocation hook from $HooksConfig"
+            }
+            if ($HooksObj.hooks -and $HooksObj.hooks.Stop) {
+                $FilteredStop = @()
+                foreach ($h in $HooksObj.hooks.Stop) {
+                    if ($h.command -notmatch "shake-prune") {
+                        $FilteredStop += $h
+                    }
+                }
+                $HooksObj.hooks.Stop = $FilteredStop
+                $Modified = $true
+                Write-Host "  [OK] Cleaned Stop hook from $HooksConfig"
+            }
+            if ($Modified) {
+                $HooksObj | ConvertTo-Json -Depth 5 | Set-Content $HooksConfig -Encoding UTF8
             }
         } catch {
             Write-Warning "Could not update hooks.json: $_"
@@ -170,8 +185,8 @@ if (-not $InstalledBinary) {
     exit 1
 }
 
-# 3. Safely merge PreInvocation hook into hooks.json
-Write-Host "- Merging PreInvocation hook into ~/.gemini/config/hooks.json (preserving existing hooks)..."
+# 3. Safely merge PreInvocation and Stop hooks into hooks.json
+Write-Host "- Merging PreInvocation and Stop hooks into ~/.gemini/config/hooks.json (preserving existing hooks)..."
 $EscapedHookExe = $TargetExe.Replace("\", "\\")
 $HookCommand = "$EscapedHookExe --hook"
 
@@ -179,7 +194,7 @@ if (Test-Path $HooksConfig) {
     Copy-Item $HooksConfig "$HooksConfig.bak" -Force -ErrorAction SilentlyContinue
 }
 
-$HooksObj = @{ "hooks" = @{ "PreInvocation" = @() } }
+$HooksObj = @{ "hooks" = @{ "PreInvocation" = @(); "Stop" = @() } }
 if (Test-Path $HooksConfig) {
     try {
         $HooksObj = Get-Content $HooksConfig -Raw | ConvertFrom-Json
@@ -188,6 +203,7 @@ if (Test-Path $HooksConfig) {
         }
         if (-not $HooksObj.hooks) { $HooksObj | Add-Member -MemberType NoteProperty -Name "hooks" -Value @{} }
         if (-not $HooksObj.hooks.PreInvocation) { $HooksObj.hooks | Add-Member -MemberType NoteProperty -Name "PreInvocation" -Value @() }
+        if (-not $HooksObj.hooks.Stop) { $HooksObj.hooks | Add-Member -MemberType NoteProperty -Name "Stop" -Value @() }
     } catch {
         Write-Warning "Could not parse existing hooks.json, creating a new one."
     }
@@ -201,6 +217,15 @@ foreach ($h in $HooksObj.hooks.PreInvocation) {
 }
 $NewPreInvocation += @{ "command" = $HookCommand }
 $HooksObj.hooks.PreInvocation = $NewPreInvocation
+
+$NewStop = @()
+foreach ($h in $HooksObj.hooks.Stop) {
+    if ($h.command -notmatch "shake-prune") {
+        $NewStop += $h
+    }
+}
+$NewStop += @{ "command" = $HookCommand }
+$HooksObj.hooks.Stop = $NewStop
 
 $HooksObj | ConvertTo-Json -Depth 5 | Set-Content $HooksConfig -Encoding UTF8
 

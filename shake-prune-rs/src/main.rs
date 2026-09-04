@@ -4,17 +4,16 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process;
 
+use shake_prune::config::ShakeConfig;
 use shake_prune::hook::handle_hook;
 use shake_prune::metadata::{write_active_anchor, write_artifact_metadata};
 
-use shake_prune::pruner::{
-    estimate_tokens, run_compaction_pipeline, shell_quote, CompactionOptions,
-};
+use shake_prune::pruner::{estimate_tokens, run_compaction_pipeline, CompactionOptions};
 use shake_prune::{
     format_bytes, validate_output_path_allowlist, validate_transcript_path, VERSION,
 };
 
-fn handle_restore(target: &Path) {
+fn handle_restore(target: &Path, force: bool) {
     let abs_target = match target.canonicalize() {
         Ok(p) => p,
         Err(_) => target.to_path_buf(),
@@ -27,16 +26,117 @@ fn handle_restore(target: &Path) {
         );
         process::exit(1);
     }
-    match fs::copy(&bak_path, &abs_target) {
+
+    // 1. Validate backup is non-empty, readable, and contains valid JSON lines before touching transcript (P2-9, 5.2)
+    let bak_len = match fs::metadata(&bak_path) {
+        Ok(m) => m.len(),
+        Err(e) => {
+            eprintln!("Error stating backup file '{}': {}", bak_path.display(), e);
+            process::exit(1);
+        }
+    };
+    if bak_len == 0 {
+        eprintln!(
+            "Error: Backup file at '{}' is empty (0 bytes). Refusing to restore empty backup.",
+            bak_path.display()
+        );
+        process::exit(1);
+    }
+
+    let bak_file = match File::open(&bak_path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!(
+                "Error: Cannot read backup file '{}': {}",
+                bak_path.display(),
+                e
+            );
+            process::exit(1);
+        }
+    };
+    let reader = std::io::BufReader::new(bak_file);
+    use std::io::BufRead;
+    let mut line_count = 0;
+    for (idx, line_res) in reader.lines().enumerate() {
+        match line_res {
+            Ok(line_str) => {
+                if !line_str.trim().is_empty() {
+                    if !force && serde_json::from_str::<serde_json::Value>(&line_str).is_err() {
+                        eprintln!(
+                            "Error: Backup file at '{}' contains invalid JSON on line {}. Refusing to restore corrupt backup (use --force to override).",
+                            bak_path.display(),
+                            idx + 1
+                        );
+                        process::exit(1);
+                    }
+                    line_count += 1;
+                }
+            }
+            Err(e) => {
+                eprintln!("Error reading backup file '{}': {}", bak_path.display(), e);
+                process::exit(1);
+            }
+        }
+    }
+    if line_count == 0 {
+        eprintln!(
+            "Error: Backup file at '{}' contains no content lines. Refusing to restore.",
+            bak_path.display()
+        );
+        process::exit(1);
+    }
+
+    // 2. Lock target transcript exclusively (P2-9)
+    let mut target_file = match File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&abs_target)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("Error opening transcript '{}': {}", abs_target.display(), e);
+            process::exit(1);
+        }
+    };
+    use fs2::FileExt;
+    if let Err(e) = target_file.lock_exclusive() {
+        eprintln!("Error locking transcript '{}': {}", abs_target.display(), e);
+        process::exit(1);
+    }
+
+    // 3. Create .pre_restore snapshot of current transcript if it has data (P2-9)
+    if let Ok(meta) = target_file.metadata() {
+        if meta.len() > 0 {
+            use std::io::{Seek, SeekFrom};
+            let pre_restore_path = abs_target.with_extension("jsonl.pre_restore");
+            if let Ok(mut pre_file) = File::create(&pre_restore_path) {
+                let _ = target_file.seek(SeekFrom::Start(0));
+                let _ = std::io::copy(&mut target_file, &mut pre_file);
+                let _ = pre_file.flush();
+                let _ = target_file.seek(SeekFrom::Start(0));
+                shake_prune::atomic::set_user_only_permissions(&pre_restore_path);
+            }
+        }
+    }
+
+    // 4. Restore from backup
+    match shake_prune::atomic::restore_from_backup(&mut target_file, &bak_path) {
         Ok(bytes) => {
+            shake_prune::atomic::set_user_only_permissions(&abs_target);
+            shake_prune::atomic::remove_intent_marker(&abs_target);
+            let _ = fs2::FileExt::unlock(&target_file);
             println!(
-                "✅ Successfully restored '{}' from atomic backup '{}' ({} bytes restored).",
+                "✅ Successfully restored '{}' from atomic backup '{}' ({} bytes, {} lines restored).",
                 abs_target.display(),
                 bak_path.display(),
-                bytes
+                bytes,
+                line_count
             );
         }
         Err(e) => {
+            let _ = fs2::FileExt::unlock(&target_file);
             eprintln!("Error: Failed to restore backup: {}", e);
             process::exit(1);
         }
@@ -50,22 +150,62 @@ fn handle_doctor(json_output: bool) {
     let exe_path = env::current_exe()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
-    let (gemini_exists, hook_active, hooks_path) = if home.is_empty() {
-        (false, false, String::new())
+
+    let config_path = ShakeConfig::global_config_path();
+    let config_exists = config_path.as_ref().map(|p| p.exists()).unwrap_or(false);
+    let loaded_config = ShakeConfig::load();
+    let (config_valid, config_err) = if let Some(cp) = &config_path {
+        if cp.exists() {
+            match ShakeConfig::load_from_file(cp) {
+                Ok(_) => (true, None),
+                Err(e) => (false, Some(e)),
+            }
+        } else {
+            (true, None)
+        }
+    } else {
+        (true, None)
+    };
+
+    let (gemini_exists, hook_active, hooks_path, logs_writable) = if home.is_empty() {
+        (false, false, String::new(), false)
     } else {
         let gemini_dir = Path::new(&home).join(".gemini");
         let hooks_file = gemini_dir.join("config/hooks.json");
+        let logs_dir = gemini_dir.join("logs");
         let mut active = false;
         if hooks_file.exists() {
             if let Ok(content) = fs::read_to_string(&hooks_file) {
                 active = content.contains("shake-prune");
             }
         }
+        let writable = fs::create_dir_all(&logs_dir).is_ok();
         (
             gemini_dir.exists(),
             active,
             hooks_file.display().to_string(),
+            writable,
         )
+    };
+
+    let stale_markers = if gemini_exists {
+        let brain_dir = Path::new(&home).join(".gemini/antigravity-ide/brain");
+        let mut markers = Vec::new();
+        if brain_dir.exists() {
+            if let Ok(entries) = fs::read_dir(&brain_dir) {
+                for entry in entries.flatten() {
+                    let marker = entry
+                        .path()
+                        .join(".system_generated/logs/.shake_in_progress");
+                    if marker.exists() {
+                        markers.push(marker);
+                    }
+                }
+            }
+        }
+        markers
+    } else {
+        Vec::new()
     };
 
     if json_output {
@@ -76,6 +216,13 @@ fn handle_doctor(json_output: bool) {
             "storage_root_exists": gemini_exists,
             "hook_registered": hook_active,
             "hooks_config": hooks_path,
+            "config_path": config_path.map(|p| p.display().to_string()),
+            "config_found": config_exists,
+            "config_valid": config_valid,
+            "config_error": config_err,
+            "auto_shake_enabled": loaded_config.auto.enabled,
+            "logs_writable": logs_writable,
+            "stale_intent_markers": stale_markers.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
         });
         println!("{}", val);
         return;
@@ -107,6 +254,39 @@ fn handle_doctor(json_output: bool) {
                     hooks_file.display()
                 );
             }
+
+            if let Some(cp) = &config_path {
+                if cp.exists() {
+                    if let Some(err) = &config_err {
+                        println!("❌ Config File: {} (SYNTAX ERROR: {})", cp.display(), err);
+                    } else {
+                        println!(
+                            "✅ Config File: {} (auto.enabled = {})",
+                            cp.display(),
+                            loaded_config.auto.enabled
+                        );
+                    }
+                } else {
+                    println!(
+                        "ℹ️ Config File: Not found at {} (using defaults; auto.enabled = {})",
+                        cp.display(),
+                        loaded_config.auto.enabled
+                    );
+                }
+            }
+
+            if !stale_markers.is_empty() {
+                println!(
+                    "⚠️ Stale Intent Markers: Found {} unrecovered marker(s) from interrupted compactions.",
+                    stale_markers.len()
+                );
+            }
+
+            if logs_writable {
+                println!("✅ Diagnostic Logs: ~/.gemini/logs directory is writable");
+            } else {
+                println!("⚠️ Diagnostic Logs: ~/.gemini/logs directory is NOT writable");
+            }
         } else {
             println!(
                 "⚠️ Storage Root: {} does not exist yet.",
@@ -126,7 +306,7 @@ USAGE:
     shake-prune <transcript_path.jsonl> [output_path.md] [OPTIONS]
     shake-prune --hook
     shake-prune doctor
-    shake-prune restore <transcript_path.jsonl>
+    shake-prune restore <transcript_path.jsonl> [--force]
 
 ARGUMENTS:
     <transcript_path.jsonl>  Path to active transcript.jsonl
@@ -139,6 +319,8 @@ OPTIONS:
     --recent-window <N>      Fallback raw tool step window if user-turns=0 (default: 6)
     --full                   Full deep compaction (prunes thoughts older than window)
     --thought-window <N>     Number of recent turns to retain thoughts in full mode (default: 20)
+    --redact-secrets         Redact credentials in active JSONL, reports, and filenames
+    --force                  Allow overwriting existing output files or restoring invalid JSON
     --dry-run                Simulate compaction without modifying transcript.jsonl
     --no-in-place            Generate markdown summary artifact without truncating JSONL
     --json                   Emit machine-readable JSON metrics on stdout
@@ -174,10 +356,17 @@ fn main() {
 
     if args[1] == "restore" {
         if args.len() < 3 {
-            eprintln!("Usage: shake-prune restore <path/to/transcript.jsonl>");
+            eprintln!("Usage: shake-prune restore <path/to/transcript.jsonl> [--force]");
             process::exit(1);
         }
-        handle_restore(&PathBuf::from(&args[2]));
+        let force = args.iter().any(|a| a == "--force");
+        let target = args.iter().skip(2).find(|a| *a != "--force");
+        if let Some(target_str) = target {
+            handle_restore(&PathBuf::from(target_str), force);
+        } else {
+            eprintln!("Usage: shake-prune restore <path/to/transcript.jsonl> [--force]");
+            process::exit(1);
+        }
         process::exit(0);
     }
 
@@ -187,9 +376,22 @@ fn main() {
         process::exit(1);
     }
 
+    let config = ShakeConfig::load();
     let mut raw_target = String::new();
-    let mut options = CompactionOptions::default();
+    let mut options = CompactionOptions {
+        recent_user_turns: config.retention.recent_user_turns,
+        recent_tools_cap: config.retention.recent_tools_cap,
+        recent_errors_cap: config.retention.recent_errors_cap,
+        recent_window_steps: config.retention.recent_window_steps,
+        thought_window_turns: None,
+        marathon_horizon: false,
+        in_place: true,
+        dry_run: false,
+        redact_secrets: config.privacy.redact_secrets,
+        non_blocking_lock: false,
+    };
     let mut json_output = false;
+    let mut force = false;
 
     let mut i = 2;
     while i < args.len() {
@@ -223,6 +425,12 @@ fn main() {
             if options.thought_window_turns.is_none() {
                 options.thought_window_turns = Some(20);
             }
+            i += 1;
+        } else if args[i] == "--redact-secrets" {
+            options.redact_secrets = true;
+            i += 1;
+        } else if args[i] == "--force" {
+            force = true;
             i += 1;
         } else if args[i] == "--dry-run" {
             options.dry_run = true;
@@ -276,7 +484,7 @@ fn main() {
     };
 
     let abs_output_path =
-        match validate_output_path_allowlist(&initial_output_path, &transcript_path) {
+        match validate_output_path_allowlist(&initial_output_path, &transcript_path, force) {
             Ok(p) => p,
             Err(err_msg) => {
                 eprintln!("{}", err_msg);
@@ -295,6 +503,7 @@ fn main() {
             );
             process::exit(1);
         }
+        shake_prune::atomic::set_user_only_permissions(&abs_output_path);
 
         let trigger_label = if options.thought_window_turns.is_some() {
             "Manual (/full-shake)"
@@ -336,67 +545,82 @@ fn main() {
     }
 
     let abs_str = abs_output_path.to_string_lossy().to_string();
-    let quoted_path = shell_quote(&abs_str);
 
     let est_prompt_tokens_before = estimate_tokens(stats.this_run_before_bytes);
     let est_prompt_tokens_after = estimate_tokens(stats.this_run_after_bytes);
 
-    println!("\n# ⚡ Context Compaction Completed");
-    println!("> - **Session Topic**: `{}`", stats.topic_slug);
-    println!("> - **Working Window**: Preserved last {} user turns verbatim (capped at {} tool outputs, {} error retention).", options.recent_user_turns, options.recent_tools_cap, options.recent_errors_cap);
-    println!("> - **Master Archive**: `{}`", master_archive_abs_str);
-    println!("> - **Executive Summary**: `{}`\n", abs_str);
+    let format_prompt_tokens = |tokens: usize| -> String {
+        if tokens >= 1_000_000 {
+            format!("~{:.1}M", tokens as f64 / 1_000_000.0)
+        } else if tokens >= 1_000 {
+            format!("~{}k", (tokens + 500) / 1000)
+        } else {
+            format!("~{}", tokens)
+        }
+    };
 
-    println!("| Metric | Pre-Shake | Shaken (Active Memory) | Savings |");
-    println!("| :--- | :--- | :--- | :--- |");
+    let display_topic: String = stats
+        .topic_slug
+        .split('_')
+        .filter(|s| !s.is_empty())
+        .map(|w| {
+            let mut chars = w.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    println!("\n# ⚡ Context Compacted");
     println!(
-        "| **Live Prompt Payload** | `{}` | **`{}`** | **`{:.1}%`** |",
-        format_bytes(stats.this_run_before_bytes),
-        format_bytes(stats.this_run_after_bytes),
-        stats.this_run_savings_pct
-    );
-    println!(
-        "| **Estimated Prompt Tokens** | `~{}` | **`~{}`** | **`{:.1}%`** |",
-        est_prompt_tokens_before, est_prompt_tokens_after, stats.this_run_savings_pct
-    );
-    println!(
-        "| **Tool Outputs Compacted** | `{}` | `0` (compacted to receipts) | `-` |",
-        stats.pruned_tools
-    );
-    println!(
-        "| **Retained Errors (Un-Clamped)** | - | `{}` (full traces kept verbatim) | `-` |",
-        stats.retained_errors
-    );
-    println!(
-        "| **Active Working Tools** | - | `{}` (unpruned output kept verbatim) | `-` |\n",
-        stats.retained_recent_steps
+        "> **Session**: `{}` • **Status**: Ready to continue\n",
+        display_topic
     );
 
     if options.dry_run {
         println!(
-            "> ⚠️ **[Dry Run Active]**: No changes were written to `{}`.",
+            "> ⚠️ **[Dry Run Active]**: No changes were written to `{}`.\n",
             transcript_path.display()
         );
-    } else {
-        println!("> 🔒 **Inode Preserved**: File rewritten in place. Open file descriptors remain valid.\n");
     }
 
+    println!("| Metric | Before | After | Reduction |");
+    println!("| :--- | :--- | :--- | :--- |");
+    println!(
+        "| **Context Payload** | `{}` ({} tokens) | **`{}`** ({} tokens) | **`{:.1}% saved`** |",
+        format_bytes(stats.this_run_before_bytes),
+        format_prompt_tokens(est_prompt_tokens_before),
+        format_bytes(stats.this_run_after_bytes),
+        format_prompt_tokens(est_prompt_tokens_after),
+        stats.this_run_savings_pct
+    );
+    println!(
+        "| **Pruned Tool Bloat** | {} tool executions | **Clean receipts** (`archive=...`) | **{} pruned** |",
+        stats.pruned_tools,
+        stats.pruned_tools
+    );
+    println!(
+        "| **Working Memory** | Last {} user turns | **100% dialogue preserved** | Active |\n",
+        options.recent_user_turns
+    );
+
+    println!("### [Open Summary Artifact](file://{})", abs_str);
+    println!(
+        "*Click above to open the executive summary in the artifact viewer or copy milestones.*\n"
+    );
+
     println!("<details>");
-    println!("<summary>📋 Need to export or copy this session elsewhere?</summary>\n");
-    println!("- **In-Chat Mention**: `@{}`", abs_str);
-    println!("- **Copy to Project**: `cp {} ./`", quoted_path);
-    if cfg!(target_os = "windows") {
-        println!(
-            "- **Copy to Clipboard**: `powershell -c \"Get-Content {} | Set-Clipboard\"`",
-            quoted_path
-        );
-    } else if cfg!(target_os = "macos") {
-        println!("- **Copy to Clipboard**: `pbcopy < {}`", quoted_path);
-    } else {
-        println!(
-            "- **Copy to Clipboard**: `xclip -sel clip < {} || wl-copy < {}`",
-            quoted_path, quoted_path
-        );
-    }
+    println!("<summary>⚙️ Archive & Working Tools</summary>\n");
+    println!(
+        "- **Master Archive**: [transcript_full.jsonl](file://{})",
+        master_archive_abs_str
+    );
+    println!(
+        "- **Active Working Tools**: Kept last {} tool outputs and {} un-clamped error traces in active memory.",
+        stats.retained_recent_steps,
+        stats.retained_errors
+    );
     println!("</details>\n");
 }

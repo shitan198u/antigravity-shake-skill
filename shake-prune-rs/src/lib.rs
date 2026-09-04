@@ -1,4 +1,5 @@
 pub mod atomic;
+pub mod config;
 pub mod hook;
 pub mod metadata;
 pub mod models;
@@ -95,6 +96,7 @@ pub fn validate_transcript_path(path: &Path) -> Result<(), String> {
 pub fn validate_output_path_allowlist(
     target: &Path,
     transcript_path: &Path,
+    force: bool,
 ) -> Result<PathBuf, String> {
     let target_parent = if target.is_dir() {
         target.to_path_buf()
@@ -193,6 +195,26 @@ pub fn validate_output_path_allowlist(
         Ok(canonical_target)
     } else {
         let file_name = target.file_name().unwrap_or_default();
-        Ok(canonical_target.join(file_name))
+        let fname_str = file_name.to_string_lossy();
+        if fname_str.starts_with('.') {
+            return Err(format!(
+                "Security Error: Output path '{}' is a hidden dotfile, which is disallowed.",
+                target.display()
+            ));
+        }
+        if !fname_str.ends_with(".md") {
+            return Err(format!(
+                "Security Error: Output path '{}' must have a .md extension.",
+                target.display()
+            ));
+        }
+        let full_output_path = canonical_target.join(file_name);
+        if full_output_path.exists() && !force && !fname_str.starts_with("shake_") {
+            return Err(format!(
+                "Safety Error: Output file '{}' already exists and is not a shake artifact. Use --force to overwrite.",
+                full_output_path.display()
+            ));
+        }
+        Ok(full_output_path)
     }
 }

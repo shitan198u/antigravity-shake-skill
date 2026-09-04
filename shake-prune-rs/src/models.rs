@@ -45,4 +45,6 @@ pub struct PruningStats {
     pub duration_ms: u64,
     /// Machine-readable trigger detail ("manual" for CLI; hook overrides in anchor).
     pub trigger_detail: String,
+    /// Maximum step index encountered in the active transcript.
+    pub max_step_index: u64,
 }
