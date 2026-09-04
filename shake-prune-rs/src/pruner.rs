@@ -849,7 +849,7 @@ pub fn run_compaction_pipeline(
         if line_str.trim().is_empty() {
             continue;
         }
-        raw_bytes += line_str.len();
+        raw_bytes += line_str.len() + 1;
         let original_line_no = line_idx + 1;
         let buf_idx = lines_buffer.len();
 
@@ -1013,7 +1013,8 @@ pub fn run_compaction_pipeline(
 
     let mut user_count = 0usize;
     let mut assistant_count = 0usize;
-    let mut pruned_tools_count = 0usize;
+    let mut newly_pruned_tools = 0usize;
+    let mut already_pruned_tools = 0usize;
     let mut retained_errors_count = 0usize;
     let mut retained_short_cmds = 0usize;
     let mut retained_recent_steps = 0usize;
@@ -1302,7 +1303,7 @@ pub fn run_compaction_pipeline(
                     ));
                 } else if stype == "RUN_COMMAND" {
                     if content_str.starts_with("[PRUNED") {
-                        pruned_tools_count += 1;
+                        already_pruned_tools += 1;
                         let (lc, ln, ap) = parse_receipt_info(content_str);
                         let lines_label = match lc {
                             Some(c) => format!("{} lines archived", c),
@@ -1330,7 +1331,7 @@ pub fn run_compaction_pipeline(
                         ));
                     } else {
                         let line_count = content_str.lines().count();
-                        pruned_tools_count += 1;
+                        newly_pruned_tools += 1;
 
                         // Check for warnings in historical output to surface in receipt
                         let warn_count = count_warnings(content_str);
@@ -1364,7 +1365,7 @@ pub fn run_compaction_pipeline(
                     }
                 } else if stype == "VIEW_FILE" {
                     if content_str.starts_with("[PRUNED") {
-                        pruned_tools_count += 1;
+                        already_pruned_tools += 1;
                         let (lc, ln, ap) = parse_receipt_info(content_str);
                         let lines_label = match lc {
                             Some(c) => format!("{} lines archived", c),
@@ -1383,7 +1384,7 @@ pub fn run_compaction_pipeline(
                         ));
                     } else {
                         let line_count = content_str.lines().count();
-                        pruned_tools_count += 1;
+                        newly_pruned_tools += 1;
                         let receipt = format!(
                             "[PRUNED tool=VIEW_FILE step={} lines={} archive={} line={}]",
                             step_idx, line_count, master_archive_abs_str, resolved_line_no
@@ -1398,8 +1399,26 @@ pub fn run_compaction_pipeline(
                             tool_name, summary_code, line_count, param_line, receipt, archive_link
                         ));
                     }
+                } else if content_str.starts_with("[PRUNED") {
+                    already_pruned_tools += 1;
+                    let (lc, ln, ap) = parse_receipt_info(content_str);
+                    let lines_label = match lc {
+                        Some(c) => format!("{} lines archived", c),
+                        None => "Archived receipt".to_string(),
+                    };
+                    let archive_link = match (ap.as_deref(), ln) {
+                        (Some(arch), Some(l)) => format!(
+                            "- **Master Archive**: [View line {} in transcript_full.jsonl](file://{}#L{})\n",
+                            l, arch, l
+                        ),
+                        _ => String::new(),
+                    };
+                    output_blocks.push(format!(
+                        "<details>\n<summary>⚙️ <b>{}</b>{} — <i>{}</i></summary>\n\n{}- **Archive Receipt**: `{}`\n{}\n</details>\n\n",
+                        tool_name, summary_code, lines_label, param_line, content_str, archive_link
+                    ));
                 } else {
-                    pruned_tools_count += 1;
+                    newly_pruned_tools += 1;
                     let receipt = format!(
                         "[PRUNED tool={} step={} archive={} line={}]",
                         stype, step_idx, master_archive_abs_str, resolved_line_no
@@ -1477,6 +1496,8 @@ pub fn run_compaction_pipeline(
             .to_string()
     };
 
+    let pruned_tools_count = newly_pruned_tools + already_pruned_tools;
+
     let header = format!(
         "# Shaken & Pruned History: {}\n\n\
         > [!IMPORTANT]\n\
@@ -1531,7 +1552,7 @@ pub fn run_compaction_pipeline(
     };
 
     let compacted_jsonl_bytes = compacted_output.len();
-    let this_run_savings_pct = if raw_bytes > 0 {
+    let this_run_savings_pct = if raw_bytes > 0 && compacted_jsonl_bytes < raw_bytes {
         (1.0 - (compacted_jsonl_bytes as f64 / raw_bytes as f64)) * 100.0
     } else {
         0.0
@@ -1564,6 +1585,8 @@ pub fn run_compaction_pipeline(
         user_turns: user_count,
         assistant_turns: assistant_count,
         pruned_tools: pruned_tools_count,
+        newly_pruned_tools,
+        already_pruned_tools,
         retained_errors: retained_errors_count,
         retained_short_cmds,
         retained_recent_steps,

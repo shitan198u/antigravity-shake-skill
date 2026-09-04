@@ -370,6 +370,8 @@ fn handle_preview(transcript_path: &Path, requested_mode: CompactionMode, json_o
             "user_turns": stats.user_turns,
             "assistant_turns": stats.assistant_turns,
             "pruned_tools": stats.pruned_tools,
+            "newly_pruned_tools": stats.newly_pruned_tools,
+            "already_pruned_tools": stats.already_pruned_tools,
             "retained_errors": stats.retained_errors,
             "continuity": continuity_card,
         });
@@ -409,20 +411,36 @@ fn handle_preview(transcript_path: &Path, requested_mode: CompactionMode, json_o
         transcript_path.display()
     );
 
+    let savings_label = if stats.this_run_savings_pct <= 0.0 {
+        "0.0% (Already compact)".to_string()
+    } else {
+        format!("{:.1}% estimated", stats.this_run_savings_pct)
+    };
+    let pruned_label = if stats.newly_pruned_tools == 0 && stats.already_pruned_tools > 0 {
+        format!("Already compact ({} archived)", stats.already_pruned_tools)
+    } else if stats.already_pruned_tools > 0 {
+        format!(
+            "{} to prune ({} total archived)",
+            stats.newly_pruned_tools, stats.pruned_tools
+        )
+    } else {
+        format!("{} to prune", stats.newly_pruned_tools)
+    };
+
     println!("| Metric | Current | Estimated After | Savings |");
     println!("| :--- | :--- | :--- | :--- |");
     println!(
-        "| **Context Payload** | `{}` ({}) | **`{}`** ({}) | **`{:.1}% estimated`** |",
+        "| **Context Payload** | `{}` ({}) | **`{}`** ({}) | **`{}`** |",
         format_bytes(stats.this_run_before_bytes),
         format_prompt_tokens(stats.raw_tokens),
         format_bytes(stats.this_run_after_bytes),
         format_prompt_tokens(stats.pruned_tokens),
-        stats.this_run_savings_pct
+        savings_label
     );
     println!(
-        "| **Pruned Tool Bloat** | {} tool executions | **Clean receipts** (`archive=...`) | **{} to prune** |",
+        "| **Pruned Tool Bloat** | {} tool executions | **Clean receipts** (`archive=...`) | **{}** |",
         stats.pruned_tools,
-        stats.pruned_tools
+        pruned_label
     );
     println!(
         "| **Working Memory** | Last {} user turns | **100% dialogue preserved** | Active |\n",
@@ -1032,6 +1050,8 @@ fn handle_run(args: &[String]) {
             "user_turns": stats.user_turns,
             "assistant_turns": stats.assistant_turns,
             "pruned_tools": stats.pruned_tools,
+            "newly_pruned_tools": stats.newly_pruned_tools,
+            "already_pruned_tools": stats.already_pruned_tools,
             "retained_errors": stats.retained_errors,
             "retained_short_cmds": stats.retained_short_cmds,
             "retained_recent_steps": stats.retained_recent_steps,
@@ -1091,20 +1111,36 @@ fn handle_run(args: &[String]) {
         );
     }
 
+    let savings_label = if stats.this_run_savings_pct <= 0.0 {
+        "0.0% (Already compact)".to_string()
+    } else {
+        format!("{:.1}% saved", stats.this_run_savings_pct)
+    };
+    let pruned_label = if stats.newly_pruned_tools == 0 && stats.already_pruned_tools > 0 {
+        format!("Already compact ({} archived)", stats.already_pruned_tools)
+    } else if stats.already_pruned_tools > 0 {
+        format!(
+            "{} newly pruned ({} total archived)",
+            stats.newly_pruned_tools, stats.pruned_tools
+        )
+    } else {
+        format!("{} pruned", stats.newly_pruned_tools)
+    };
+
     println!("| Metric | Before | After | Reduction |");
     println!("| :--- | :--- | :--- | :--- |");
     println!(
-        "| **Context Payload** | `{}` ({}) | **`{}`** ({}) | **`{:.1}% saved`** |",
+        "| **Context Payload** | `{}` ({}) | **`{}`** ({}) | **`{}`** |",
         format_bytes(stats.this_run_before_bytes),
         format_prompt_tokens(est_prompt_tokens_before),
         format_bytes(stats.this_run_after_bytes),
         format_prompt_tokens(est_prompt_tokens_after),
-        stats.this_run_savings_pct
+        savings_label
     );
     println!(
-        "| **Pruned Tool Bloat** | {} tool executions | **Clean receipts** (`archive=...`) | **{} pruned** |",
+        "| **Pruned Tool Bloat** | {} tool executions | **Clean receipts** (`archive=...`) | **{}** |",
         stats.pruned_tools,
-        stats.pruned_tools
+        pruned_label
     );
     println!(
         "| **Working Memory** | Last {} user turns | **100% dialogue preserved** | Active |\n",

@@ -284,3 +284,61 @@ fn test_subcommand_show_inspects_archive() {
     assert!(stdout.contains("Master Archive Record"));
     assert!(stdout.contains("secret_archived_output_marker_12345"));
 }
+
+#[test]
+fn test_repeated_compaction_metrics_precision_and_already_compact() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = fake_home(&tmp);
+    let transcript = trusted_transcript_path(&home, "conv_repeat_metrics");
+
+    let long_output = "a".repeat(500);
+    TranscriptBuilder::new()
+        .user("initial request")
+        .assistant("working")
+        .tool_output("RUN_COMMAND", &long_output, 0)
+        .assistant("done")
+        .write(&transcript);
+
+    // 1. First compaction: tool should be newly pruned
+    let run1 = Command::new(bin())
+        .args([
+            "run",
+            transcript.to_str().unwrap(),
+            "--recent-user-turns",
+            "0",
+            "--recent-window",
+            "1",
+        ])
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .output()
+        .unwrap();
+    if !run1.status.success() {
+        panic!(
+            "run1 failed: stdout={}\nstderr={}",
+            String::from_utf8_lossy(&run1.stdout),
+            String::from_utf8_lossy(&run1.stderr)
+        );
+    }
+    let stdout1 = String::from_utf8_lossy(&run1.stdout);
+    assert!(stdout1.contains("1 pruned") || stdout1.contains("1 newly pruned"));
+
+    // 2. Second compaction: should recognize already compact state without size growth
+    let run2 = Command::new(bin())
+        .args([
+            "run",
+            transcript.to_str().unwrap(),
+            "--recent-user-turns",
+            "0",
+            "--recent-window",
+            "1",
+        ])
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .output()
+        .unwrap();
+    assert!(run2.status.success());
+    let stdout2 = String::from_utf8_lossy(&run2.stdout);
+    assert!(stdout2.contains("Already compact"));
+    assert!(stdout2.contains("0.0% (Already compact)"));
+}
