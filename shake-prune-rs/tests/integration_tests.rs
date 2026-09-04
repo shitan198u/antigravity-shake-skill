@@ -425,8 +425,8 @@ fn test_version_flag() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("shake-prune 0.1.10"),
-        "Expected version 0.1.10, got: {}",
+        stdout.contains("shake-prune 0.2.0"),
+        "Expected version 0.2.0, got: {}",
         stdout
     );
 }

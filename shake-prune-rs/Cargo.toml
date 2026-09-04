@@ -1,6 +1,6 @@
 [package]
 name = "shake-prune"
-version = "0.1.10"
+version = "0.2.0"
 edition = "2021"
 description = "High-performance in-place context compaction and tree-shaking tool for Google Antigravity Agent"
 license = "MIT"

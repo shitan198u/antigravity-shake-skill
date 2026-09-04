@@ -437,11 +437,28 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
                             )
                         };
                         let _ = write_artifact_metadata(&output_path, &summary_text);
+
+                        let analysis_res = crate::analysis::analyze_transcript(
+                            t_path,
+                            &crate::analysis::AnalysisOptions::default(),
+                        );
+                        let continuity_card = if let Ok(ref analysis) = analysis_res {
+                            Some(crate::continuity::ContinuityCard::build(
+                                analysis,
+                                &master_archive_str,
+                                t_path,
+                                options.redact_secrets,
+                            ))
+                        } else {
+                            None
+                        };
+
                         let _ = write_active_anchor(
                             &output_path,
                             &stats,
                             trigger_label,
                             &master_archive_str,
+                            continuity_card.as_ref(),
                         );
 
                         let step_label = if stats.max_step_index > 0 {
@@ -450,15 +467,22 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
                             (stats.user_turns + stats.assistant_turns + stats.pruned_tools) as u64
                         };
 
-                        let ephemeral_msg = if trigger == "size" {
-                            format!(
-                                "[Context auto-compacted via /shake (exceeded 80k token threshold). Active state anchored in @{} (Step {}+). Treat prior raw tool stdout as archived.]",
-                                output_path.display(),
-                                step_label
+                        let trigger_phrase = if trigger == "size" {
+                            "exceeded 80k token threshold"
+                        } else {
+                            "unpruned tool burst >= 20"
+                        };
+
+                        let ephemeral_msg = if let Some(ref card) = continuity_card {
+                            card.to_ephemeral_notice(
+                                trigger_phrase,
+                                &output_path.to_string_lossy(),
+                                step_label,
                             )
                         } else {
                             format!(
-                                "[Context auto-compacted via /shake (unpruned tool burst >= 20). Active state anchored in @{} (Step {}+). Treat prior raw tool stdout as archived.]",
+                                "[Context auto-compacted via /shake ({}). Active state anchored in @{} (Step {}+). Treat prior raw tool stdout as archived.]",
+                                trigger_phrase,
                                 output_path.display(),
                                 step_label
                             )

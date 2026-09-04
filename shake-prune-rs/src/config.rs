@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AutoConfig {
-    #[serde(default = "default_true")]
+    #[serde(default = "default_true", alias = "auto_enabled")]
     pub enabled: bool,
     #[serde(
         default = "default_size_threshold_bytes",
@@ -126,9 +126,41 @@ fn default_log_level() -> String {
     "info".to_string()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+fn default_deep_after_user_turns() -> usize {
+    30
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ShakeCoreConfig {
+    #[serde(default = "default_recent_user_turns")]
+    pub keep_recent_turns: usize,
+    #[serde(default = "default_recent_tools_cap")]
+    pub keep_recent_tools: usize,
+    #[serde(default = "default_recent_errors_cap")]
+    pub keep_recent_errors: usize,
+    #[serde(default = "default_deep_after_user_turns")]
+    pub deep_after_user_turns: usize,
+    #[serde(default = "default_false")]
+    pub redact_secrets: bool,
+}
+
+impl Default for ShakeCoreConfig {
+    fn default() -> Self {
+        Self {
+            keep_recent_turns: default_recent_user_turns(),
+            keep_recent_tools: default_recent_tools_cap(),
+            keep_recent_errors: default_recent_errors_cap(),
+            deep_after_user_turns: default_deep_after_user_turns(),
+            redact_secrets: default_false(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ShakeConfig {
     #[serde(default)]
+    pub shake: Option<ShakeCoreConfig>,
+    #[serde(default, alias = "advanced")]
     pub auto: AutoConfig,
     #[serde(default)]
     pub retention: RetentionConfig,
@@ -136,9 +168,35 @@ pub struct ShakeConfig {
     pub privacy: PrivacyConfig,
     #[serde(default)]
     pub diagnostics: DiagnosticsConfig,
+    #[serde(default = "default_deep_after_user_turns")]
+    pub deep_after_user_turns: usize,
+}
+
+impl Default for ShakeConfig {
+    fn default() -> Self {
+        Self {
+            shake: None,
+            auto: AutoConfig::default(),
+            retention: RetentionConfig::default(),
+            privacy: PrivacyConfig::default(),
+            diagnostics: DiagnosticsConfig::default(),
+            deep_after_user_turns: default_deep_after_user_turns(),
+        }
+    }
 }
 
 impl ShakeConfig {
+    /// Normalizes configuration by syncing [shake] core table values into retention/privacy.
+    pub fn normalize(&mut self) {
+        if let Some(core) = &self.shake {
+            self.retention.recent_user_turns = core.keep_recent_turns;
+            self.retention.recent_tools_cap = core.keep_recent_tools;
+            self.retention.recent_errors_cap = core.keep_recent_errors;
+            self.deep_after_user_turns = core.deep_after_user_turns;
+            self.privacy.redact_secrets = core.redact_secrets;
+        }
+    }
+
     /// Resolves the default global config file path: `~/.gemini/config/shake.toml`.
     pub fn global_config_path() -> Option<PathBuf> {
         let home = env::var("HOME").or_else(|_| env::var("USERPROFILE")).ok()?;
@@ -157,7 +215,8 @@ impl ShakeConfig {
             if path.exists() {
                 if let Ok(content) = fs::read_to_string(&path) {
                     match toml::from_str::<ShakeConfig>(&content) {
-                        Ok(parsed) => {
+                        Ok(mut parsed) => {
+                            parsed.normalize();
                             config = parsed;
                         }
                         Err(e) => {
@@ -182,6 +241,7 @@ impl ShakeConfig {
             .map_err(|e| format!("Failed to read config file '{}': {}", path.display(), e))?;
         let mut config: ShakeConfig = toml::from_str(&content)
             .map_err(|e| format!("Failed to parse config file '{}': {}", path.display(), e))?;
+        config.normalize();
         config.apply_env_overrides();
         Ok(config)
     }
@@ -204,21 +264,33 @@ impl ShakeConfig {
             }
         }
 
-        if let Ok(val) = env::var("SHAKE_RECENT_USER_TURNS") {
+        if let Ok(val) =
+            env::var("SHAKE_KEEP_RECENT_TURNS").or_else(|_| env::var("SHAKE_RECENT_USER_TURNS"))
+        {
             if let Ok(parsed) = val.trim().parse::<usize>() {
                 self.retention.recent_user_turns = parsed;
             }
         }
 
-        if let Ok(val) = env::var("SHAKE_TOOLS_CAP") {
+        if let Ok(val) =
+            env::var("SHAKE_KEEP_RECENT_TOOLS").or_else(|_| env::var("SHAKE_TOOLS_CAP"))
+        {
             if let Ok(parsed) = val.trim().parse::<usize>() {
                 self.retention.recent_tools_cap = parsed;
             }
         }
 
-        if let Ok(val) = env::var("SHAKE_ERRORS_CAP") {
+        if let Ok(val) =
+            env::var("SHAKE_KEEP_RECENT_ERRORS").or_else(|_| env::var("SHAKE_ERRORS_CAP"))
+        {
             if let Ok(parsed) = val.trim().parse::<usize>() {
                 self.retention.recent_errors_cap = parsed;
+            }
+        }
+
+        if let Ok(val) = env::var("SHAKE_DEEP_AFTER_TURNS") {
+            if let Ok(parsed) = val.trim().parse::<usize>() {
+                self.deep_after_user_turns = parsed;
             }
         }
 
@@ -341,5 +413,32 @@ mod tests {
 
         let parsed: ShakeConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(parsed.auto.size_threshold_bytes, 123_456);
+    }
+
+    #[test]
+    fn test_modern_simplified_shake_config() {
+        let toml_str = r#"
+        [shake]
+        keep_recent_turns = 12
+        keep_recent_tools = 25
+        keep_recent_errors = 35
+        deep_after_user_turns = 40
+        redact_secrets = true
+
+        [advanced]
+        auto_enabled = true
+        token_threshold_bytes = 200000
+        "#;
+
+        let mut parsed: ShakeConfig = toml::from_str(toml_str).unwrap();
+        parsed.normalize();
+
+        assert_eq!(parsed.retention.recent_user_turns, 12);
+        assert_eq!(parsed.retention.recent_tools_cap, 25);
+        assert_eq!(parsed.retention.recent_errors_cap, 35);
+        assert_eq!(parsed.deep_after_user_turns, 40);
+        assert!(parsed.privacy.redact_secrets);
+        assert!(parsed.auto.enabled);
+        assert_eq!(parsed.auto.size_threshold_bytes, 200_000);
     }
 }
