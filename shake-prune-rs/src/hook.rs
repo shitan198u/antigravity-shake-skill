@@ -170,7 +170,12 @@ pub fn handle_hook() {
 
 fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
     let hook_start = std::time::Instant::now();
-    let hook_deadline = std::time::Duration::from_millis(2500); // 2.5s watchdog budget (P1-2)
+    // 2.5s watchdog budget (P1-2). Test override via env (0 forces expiry).
+    let deadline_ms: u64 = std::env::var("SHAKE_HOOK_DEADLINE_MS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(2500);
+    let hook_deadline = std::time::Duration::from_millis(deadline_ms);
 
     let mut stdin_buffer = String::new();
     let _ = io::stdin().take(65_536).read_to_string(&mut stdin_buffer);
