@@ -62,15 +62,12 @@ impl Default for RetentionConfig {
 pub struct PrivacyConfig {
     #[serde(default = "default_false")]
     pub redact_secrets: bool,
-    #[serde(default = "default_true")]
-    pub restrict_permissions: bool,
 }
 
 impl Default for PrivacyConfig {
     fn default() -> Self {
         Self {
             redact_secrets: default_false(),
-            restrict_permissions: default_true(),
         }
     }
 }
@@ -187,13 +184,27 @@ impl Default for ShakeConfig {
 
 impl ShakeConfig {
     /// Normalizes configuration by syncing [shake] core table values into retention/privacy.
+    /// Explicit modern-schema values win: a legacy [shake] key only fills its
+    /// counterpart when that counterpart is still at its default. This preserves
+    /// explicit [retention]/[privacy]/top-level settings when both schemas are present.
     pub fn normalize(&mut self) {
         if let Some(core) = &self.shake {
-            self.retention.recent_user_turns = core.keep_recent_turns;
-            self.retention.recent_tools_cap = core.keep_recent_tools;
-            self.retention.recent_errors_cap = core.keep_recent_errors;
-            self.deep_after_user_turns = core.deep_after_user_turns;
-            self.privacy.redact_secrets = core.redact_secrets;
+            let def_retention = RetentionConfig::default();
+            if self.retention.recent_user_turns == def_retention.recent_user_turns {
+                self.retention.recent_user_turns = core.keep_recent_turns;
+            }
+            if self.retention.recent_tools_cap == def_retention.recent_tools_cap {
+                self.retention.recent_tools_cap = core.keep_recent_tools;
+            }
+            if self.retention.recent_errors_cap == def_retention.recent_errors_cap {
+                self.retention.recent_errors_cap = core.keep_recent_errors;
+            }
+            if self.deep_after_user_turns == default_deep_after_user_turns() {
+                self.deep_after_user_turns = core.deep_after_user_turns;
+            }
+            if !self.privacy.redact_secrets {
+                self.privacy.redact_secrets = core.redact_secrets;
+            }
         }
     }
 
@@ -366,7 +377,47 @@ mod tests {
         assert_eq!(config.retention.recent_window_steps, 6);
         assert_eq!(config.retention.artifact_retention_count, 20);
         assert!(!config.privacy.redact_secrets);
-        assert!(config.privacy.restrict_permissions);
+        // Sensitive artifacts are always created 0600 on Unix; no opt-out knob.
+    }
+    #[test]
+    fn test_normalize_prefers_explicit_retention_over_legacy_shake() {
+        let toml_str = r#"
+        [shake]
+        keep_recent_turns = 10
+        keep_recent_tools = 10
+        keep_recent_errors = 10
+        deep_after_user_turns = 10
+        redact_secrets = false
+
+        [retention]
+        recent_user_turns = 99
+        recent_tools_cap = 98
+        recent_errors_cap = 97
+        "#;
+        let mut parsed: ShakeConfig = toml::from_str(toml_str).unwrap();
+        parsed.normalize();
+        assert_eq!(parsed.retention.recent_user_turns, 99);
+        assert_eq!(parsed.retention.recent_tools_cap, 98);
+        assert_eq!(parsed.retention.recent_errors_cap, 97);
+    }
+
+    #[test]
+    fn test_normalize_fills_defaults_from_legacy_shake() {
+        let toml_str = r#"
+        [shake]
+        keep_recent_turns = 12
+        keep_recent_tools = 25
+        keep_recent_errors = 35
+        deep_after_user_turns = 40
+        redact_secrets = true
+        "#;
+        let mut parsed: ShakeConfig = toml::from_str(toml_str).unwrap();
+        parsed.normalize();
+        assert_eq!(parsed.retention.recent_user_turns, 12);
+        assert_eq!(parsed.retention.recent_tools_cap, 25);
+        assert_eq!(parsed.retention.recent_errors_cap, 35);
+        assert_eq!(parsed.deep_after_user_turns, 40);
+        assert!(parsed.privacy.redact_secrets);
     }
 
     #[test]
