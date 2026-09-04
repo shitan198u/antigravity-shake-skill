@@ -1,5 +1,5 @@
 use crate::analysis::TranscriptAnalysis;
-use crate::pruner::{redact_secrets, safe_truncate};
+use crate::pruner::{redact_secrets, safe_truncate, shell_quote};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -70,7 +70,10 @@ impl ContinuityCard {
             .collect();
         recent_failures.reverse();
 
-        let undo_command = format!("shake-prune undo {}", transcript_path.display());
+        let undo_command = format!(
+            "shake-prune undo {}",
+            shell_quote(&transcript_path.to_string_lossy())
+        );
 
         Self {
             task,
@@ -178,7 +181,7 @@ mod tests {
         assert!(notice.contains("Task: Implement new feature"));
         assert!(notice.contains("Recent files: src/main.rs, src/lib.rs"));
         assert!(notice.contains("Recent failures: RUN_COMMAND step=40 exit=1"));
-        assert!(notice.contains("Undo: shake-prune undo /home/user/transcript.jsonl"));
+        assert!(notice.contains("Undo: shake-prune undo '/home/user/transcript.jsonl'"));
         assert!(notice.len() <= 1000);
     }
 }
