@@ -1,7 +1,10 @@
+pub mod analysis;
 pub mod atomic;
 pub mod config;
+pub mod continuity;
 pub mod hook;
 pub mod metadata;
+pub mod mode;
 pub mod models;
 pub mod pruner;
 pub mod receipts;

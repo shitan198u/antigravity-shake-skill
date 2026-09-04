@@ -31,6 +31,9 @@ pub struct AnchorFilePayload {
     /// Last failure message for diagnostics.
     #[serde(default)]
     pub last_error: Option<String>,
+    /// Optional continuity card for deterministic state tracking (v0.2.0).
+    #[serde(default)]
+    pub continuity: Option<crate::continuity::ContinuityCard>,
 }
 
 /// Parse `transcript.jsonl.bak_YYYYMMDD_HHMMSS` suffix into
@@ -141,6 +144,7 @@ pub fn write_active_anchor(
     stats: &PruningStats,
     trigger_type: &str,
     master_archive_path: &str,
+    continuity: Option<&crate::continuity::ContinuityCard>,
 ) -> std::io::Result<()> {
     if let Some(parent_dir) = markdown_path.parent() {
         let anchor_path = parent_dir.join("active_shake_anchor.json");
@@ -200,6 +204,7 @@ pub fn write_active_anchor(
             "consecutive_failures": 0,
             "circuit_disabled_until": 0,
             "last_error": null,
+            "continuity": continuity,
         });
 
         let mut tmp_file = Builder::new()
