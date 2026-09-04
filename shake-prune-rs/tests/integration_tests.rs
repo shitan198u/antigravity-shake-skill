@@ -1106,9 +1106,15 @@ fn test_restore_subcommand() {
     let transcript_path = tmp_dir.path().join("transcript.jsonl");
     let bak_path = tmp_dir.path().join("transcript.jsonl.bak");
 
-    // Write original and backup
-    fs::write(&transcript_path, "MODIFIED_COMPACTED_CONTENT").unwrap();
-    fs::write(&bak_path, "ORIGINAL_UNPRUNED_BACKUP_CONTENT").unwrap();
+    // Write original valid JSON and backup
+    let original = json!({"step_index": 1, "type": "USER_INPUT", "content": "ORIGINAL_UNPRUNED_BACKUP_CONTENT"}).to_string();
+    fs::write(
+        &transcript_path,
+        json!({"step_index": 1, "type": "USER_INPUT", "content": "MODIFIED_COMPACTED_CONTENT"})
+            .to_string(),
+    )
+    .unwrap();
+    fs::write(&bak_path, format!("{}\n", original)).unwrap();
 
     let bin = get_binary_path();
     let output = std::process::Command::new(&bin)
@@ -1119,7 +1125,19 @@ fn test_restore_subcommand() {
 
     assert!(output.status.success());
     let restored = fs::read_to_string(&transcript_path).unwrap();
-    assert_eq!(restored, "ORIGINAL_UNPRUNED_BACKUP_CONTENT");
+    assert_eq!(restored.trim(), original.trim());
+
+    // Test --force restores arbitrary non-JSON backup without failing
+    fs::write(&bak_path, "RAW_ARBITRARY_TEXT\n").unwrap();
+    let force_output = std::process::Command::new(&bin)
+        .arg("restore")
+        .arg(&transcript_path)
+        .arg("--force")
+        .output()
+        .expect("Failed to execute shake-prune restore with --force");
+    assert!(force_output.status.success());
+    let raw_restored = fs::read_to_string(&transcript_path).unwrap();
+    assert_eq!(raw_restored.trim(), "RAW_ARBITRARY_TEXT");
 }
 
 #[test]

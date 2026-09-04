@@ -115,7 +115,7 @@ Instead of creating dozens of multi-megabyte `.bak_*` files on every run (which 
 * On sessions with $> 30$ user turns:
   * **Turn 1 (Genesis)** is preserved 100% verbatim (original guidelines and constraints).
   * **Middle Turns (Turns 2 to N-25)** are collapsed into a structured Milestone Checkpoint block with exact line-indexed backup links.
-  * **Last 25 user turns** are preserved 100% verbatim.
+  * **Last 25 user turns**: Prompts and assistant dialogue are preserved 100% verbatim (with tool outputs subject to standard working window retention).
   * **Scratchpad thoughts** are windowed to the last 20 assistant turns.
 * Restores sub-second agility on threads that have been active for days.
 

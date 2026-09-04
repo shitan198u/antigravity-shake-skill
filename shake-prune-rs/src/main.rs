@@ -15,7 +15,7 @@ use shake_prune::{
     format_bytes, validate_output_path_allowlist, validate_transcript_path, VERSION,
 };
 
-fn handle_restore(target: &Path) {
+fn handle_restore(target: &Path, force: bool) {
     let abs_target = match target.canonicalize() {
         Ok(p) => p,
         Err(_) => target.to_path_buf(),
@@ -29,7 +29,7 @@ fn handle_restore(target: &Path) {
         process::exit(1);
     }
 
-    // 1. Validate backup is non-empty and readable before touching transcript (P2-9)
+    // 1. Validate backup is non-empty, readable, and contains valid JSON lines before touching transcript (P2-9, 5.2)
     let bak_len = match fs::metadata(&bak_path) {
         Ok(m) => m.len(),
         Err(e) => {
@@ -59,10 +59,18 @@ fn handle_restore(target: &Path) {
     let reader = std::io::BufReader::new(bak_file);
     use std::io::BufRead;
     let mut line_count = 0;
-    for line_res in reader.lines() {
+    for (idx, line_res) in reader.lines().enumerate() {
         match line_res {
             Ok(line_str) => {
                 if !line_str.trim().is_empty() {
+                    if !force && serde_json::from_str::<serde_json::Value>(&line_str).is_err() {
+                        eprintln!(
+                            "Error: Backup file at '{}' contains invalid JSON on line {}. Refusing to restore corrupt backup (use --force to override).",
+                            bak_path.display(),
+                            idx + 1
+                        );
+                        process::exit(1);
+                    }
                     line_count += 1;
                 }
             }
@@ -148,6 +156,18 @@ fn handle_doctor(json_output: bool) {
     let config_path = ShakeConfig::global_config_path();
     let config_exists = config_path.as_ref().map(|p| p.exists()).unwrap_or(false);
     let loaded_config = ShakeConfig::load();
+    let (config_valid, config_err) = if let Some(cp) = &config_path {
+        if cp.exists() {
+            match ShakeConfig::load_from_file(cp) {
+                Ok(_) => (true, None),
+                Err(e) => (false, Some(e)),
+            }
+        } else {
+            (true, None)
+        }
+    } else {
+        (true, None)
+    };
 
     let (gemini_exists, hook_active, hooks_path, logs_writable) = if home.is_empty() {
         (false, false, String::new(), false)
@@ -170,6 +190,26 @@ fn handle_doctor(json_output: bool) {
         )
     };
 
+    let stale_markers = if gemini_exists {
+        let brain_dir = Path::new(&home).join(".gemini/antigravity-ide/brain");
+        let mut markers = Vec::new();
+        if brain_dir.exists() {
+            if let Ok(entries) = fs::read_dir(&brain_dir) {
+                for entry in entries.flatten() {
+                    let marker = entry
+                        .path()
+                        .join(".system_generated/logs/.shake_in_progress");
+                    if marker.exists() {
+                        markers.push(marker);
+                    }
+                }
+            }
+        }
+        markers
+    } else {
+        Vec::new()
+    };
+
     if json_output {
         let val = serde_json::json!({
             "version": VERSION,
@@ -180,8 +220,11 @@ fn handle_doctor(json_output: bool) {
             "hooks_config": hooks_path,
             "config_path": config_path.map(|p| p.display().to_string()),
             "config_found": config_exists,
+            "config_valid": config_valid,
+            "config_error": config_err,
             "auto_shake_enabled": loaded_config.auto.enabled,
             "logs_writable": logs_writable,
+            "stale_intent_markers": stale_markers.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
         });
         println!("{}", val);
         return;
@@ -216,11 +259,15 @@ fn handle_doctor(json_output: bool) {
 
             if let Some(cp) = &config_path {
                 if cp.exists() {
-                    println!(
-                        "✅ Config File: {} (auto.enabled = {})",
-                        cp.display(),
-                        loaded_config.auto.enabled
-                    );
+                    if let Some(err) = &config_err {
+                        println!("❌ Config File: {} (SYNTAX ERROR: {})", cp.display(), err);
+                    } else {
+                        println!(
+                            "✅ Config File: {} (auto.enabled = {})",
+                            cp.display(),
+                            loaded_config.auto.enabled
+                        );
+                    }
                 } else {
                     println!(
                         "ℹ️ Config File: Not found at {} (using defaults; auto.enabled = {})",
@@ -228,6 +275,13 @@ fn handle_doctor(json_output: bool) {
                         loaded_config.auto.enabled
                     );
                 }
+            }
+
+            if !stale_markers.is_empty() {
+                println!(
+                    "⚠️ Stale Intent Markers: Found {} unrecovered marker(s) from interrupted compactions.",
+                    stale_markers.len()
+                );
             }
 
             if logs_writable {
@@ -254,7 +308,7 @@ USAGE:
     shake-prune <transcript_path.jsonl> [output_path.md] [OPTIONS]
     shake-prune --hook
     shake-prune doctor
-    shake-prune restore <transcript_path.jsonl>
+    shake-prune restore <transcript_path.jsonl> [--force]
 
 ARGUMENTS:
     <transcript_path.jsonl>  Path to active transcript.jsonl
@@ -268,6 +322,7 @@ OPTIONS:
     --full                   Full deep compaction (prunes thoughts older than window)
     --thought-window <N>     Number of recent turns to retain thoughts in full mode (default: 20)
     --redact-secrets         Redact credentials in active JSONL, reports, and filenames
+    --force                  Allow overwriting existing output files or restoring invalid JSON
     --dry-run                Simulate compaction without modifying transcript.jsonl
     --no-in-place            Generate markdown summary artifact without truncating JSONL
     --json                   Emit machine-readable JSON metrics on stdout
@@ -303,10 +358,17 @@ fn main() {
 
     if args[1] == "restore" {
         if args.len() < 3 {
-            eprintln!("Usage: shake-prune restore <path/to/transcript.jsonl>");
+            eprintln!("Usage: shake-prune restore <path/to/transcript.jsonl> [--force]");
             process::exit(1);
         }
-        handle_restore(&PathBuf::from(&args[2]));
+        let force = args.iter().any(|a| a == "--force");
+        let target = args.iter().skip(2).find(|a| *a != "--force");
+        if let Some(target_str) = target {
+            handle_restore(&PathBuf::from(target_str), force);
+        } else {
+            eprintln!("Usage: shake-prune restore <path/to/transcript.jsonl> [--force]");
+            process::exit(1);
+        }
         process::exit(0);
     }
 
@@ -331,6 +393,7 @@ fn main() {
         non_blocking_lock: false,
     };
     let mut json_output = false;
+    let mut force = false;
 
     let mut i = 2;
     while i < args.len() {
@@ -367,6 +430,9 @@ fn main() {
             i += 1;
         } else if args[i] == "--redact-secrets" {
             options.redact_secrets = true;
+            i += 1;
+        } else if args[i] == "--force" {
+            force = true;
             i += 1;
         } else if args[i] == "--dry-run" {
             options.dry_run = true;
@@ -420,7 +486,7 @@ fn main() {
     };
 
     let abs_output_path =
-        match validate_output_path_allowlist(&initial_output_path, &transcript_path) {
+        match validate_output_path_allowlist(&initial_output_path, &transcript_path, force) {
             Ok(p) => p,
             Err(err_msg) => {
                 eprintln!("{}", err_msg);

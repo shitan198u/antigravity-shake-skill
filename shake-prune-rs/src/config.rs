@@ -7,7 +7,10 @@ use std::path::{Path, PathBuf};
 pub struct AutoConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
-    #[serde(default = "default_size_threshold_bytes")]
+    #[serde(
+        default = "default_size_threshold_bytes",
+        alias = "token_threshold_bytes"
+    )]
     pub size_threshold_bytes: u64,
     #[serde(default = "default_tool_burst_threshold")]
     pub tool_burst_threshold: usize,
@@ -102,7 +105,7 @@ fn default_cooldown_seconds() -> i64 {
     180
 }
 fn default_growth_delta_bytes() -> u64 {
-    25_000
+    25_600
 }
 fn default_recent_user_turns() -> usize {
     10
@@ -153,8 +156,17 @@ impl ShakeConfig {
         if let Some(path) = Self::global_config_path() {
             if path.exists() {
                 if let Ok(content) = fs::read_to_string(&path) {
-                    if let Ok(parsed) = toml::from_str::<ShakeConfig>(&content) {
-                        config = parsed;
+                    match toml::from_str::<ShakeConfig>(&content) {
+                        Ok(parsed) => {
+                            config = parsed;
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "Warning: Failed to parse shake config file '{}': {}",
+                                path.display(),
+                                e
+                            );
+                        }
                     }
                 }
             }
@@ -275,7 +287,7 @@ mod tests {
         assert_eq!(config.auto.size_threshold_bytes, 264_000);
         assert_eq!(config.auto.tool_burst_threshold, 20);
         assert_eq!(config.auto.cooldown_seconds, 180);
-        assert_eq!(config.auto.growth_delta_bytes, 25_000);
+        assert_eq!(config.auto.growth_delta_bytes, 25_600);
         assert_eq!(config.retention.recent_user_turns, 10);
         assert_eq!(config.retention.recent_tools_cap, 20);
         assert_eq!(config.retention.recent_errors_cap, 30);
@@ -318,5 +330,16 @@ mod tests {
         assert_eq!(parsed.retention.recent_errors_cap, 15);
         assert!(parsed.privacy.redact_secrets);
         assert_eq!(parsed.diagnostics.log_level, "debug");
+    }
+
+    #[test]
+    fn test_token_threshold_bytes_alias() {
+        let toml_str = r#"
+        [auto]
+        token_threshold_bytes = 123456
+        "#;
+
+        let parsed: ShakeConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(parsed.auto.size_threshold_bytes, 123_456);
     }
 }

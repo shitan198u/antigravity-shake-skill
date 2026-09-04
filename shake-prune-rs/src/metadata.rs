@@ -10,6 +10,7 @@ use tempfile::Builder;
 #[derive(Deserialize, Serialize, Debug, Default, Clone)]
 pub struct AnchorFilePayload {
     pub active: Option<bool>,
+    pub injected: Option<bool>,
     pub shaken_file: Option<String>,
     pub anchored_at_step: Option<serde_json::Value>,
     pub last_compacted_bytes: Option<u64>,
@@ -149,7 +150,11 @@ pub fn write_active_anchor(
 
         let mut history = load_or_discover_history(&logs_dir, &anchor_path);
 
-        let anchored_step = (stats.user_turns + stats.assistant_turns + stats.pruned_tools) as u64;
+        let anchored_step = if stats.max_step_index > 0 {
+            stats.max_step_index
+        } else {
+            (stats.user_turns + stats.assistant_turns + stats.pruned_tools) as u64
+        };
 
         // `master_archive_path` is transcript_full.jsonl (permanent archive), not
         // the ephemeral transcript.jsonl.bak crash fallback (P2-5 naming fix).
@@ -181,6 +186,7 @@ pub fn write_active_anchor(
 
         let anchor_data = json!({
             "active": true,
+            "injected": false,
             "shaken_file": markdown_path.to_string_lossy(),
             "anchored_at_step": anchored_step,
             "last_compacted_bytes": t_size,

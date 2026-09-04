@@ -572,3 +572,317 @@ fn test_unindexed_synthetic_record_does_not_abort_compaction() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// P0-6: Master archive append must not corrupt JSONL if transcript_full.jsonl lacks trailing newline.
+#[test]
+fn test_master_archive_append_missing_trailing_newline() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let logs_dir = tmp_dir
+        .path()
+        .join(".gemini/brain/test-newline/.system_generated/logs");
+    fs::create_dir_all(&logs_dir).unwrap();
+    let transcript_path = logs_dir.join("transcript.jsonl");
+    let full_path = logs_dir.join("transcript_full.jsonl");
+
+    // Existing master archive WITHOUT trailing newline
+    fs::write(
+        &full_path,
+        json!({"step_index": 1, "type": "USER_INPUT", "content": "Question 1"}).to_string(),
+    )
+    .unwrap();
+
+    // Active transcript containing step 1 and step 2
+    {
+        let mut f = File::create(&transcript_path).unwrap();
+        writeln!(
+            f,
+            "{}",
+            json!({"step_index": 1, "type": "USER_INPUT", "content": "Question 1"})
+        )
+        .unwrap();
+        writeln!(
+            f,
+            "{}",
+            json!({"step_index": 2, "type": "PLANNER_RESPONSE", "content": "Answer 1"})
+        )
+        .unwrap();
+    }
+
+    let bin = bin();
+    let output = std::process::Command::new(&bin)
+        .arg(&transcript_path)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "Compaction must succeed");
+
+    // Verify all lines in transcript_full.jsonl are valid JSON and not concatenated
+    let content = fs::read_to_string(&full_path).unwrap();
+    let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(lines.len(), 2, "Must contain exactly 2 distinct lines");
+    for line in lines {
+        assert!(
+            serde_json::from_str::<Value>(line).is_ok(),
+            "Line must be valid JSON: '{}'",
+            line
+        );
+    }
+}
+
+/// P1-3: Duplicate step_index values in active transcript must not cause duplicate entries in master archive.
+#[test]
+fn test_master_archive_duplicate_step_index_deduplication() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let logs_dir = tmp_dir
+        .path()
+        .join(".gemini/brain/test-dup-step/.system_generated/logs");
+    fs::create_dir_all(&logs_dir).unwrap();
+    let transcript_path = logs_dir.join("transcript.jsonl");
+    let full_path = logs_dir.join("transcript_full.jsonl");
+
+    // Active transcript has two entries with step_index: 2
+    {
+        let mut f = File::create(&transcript_path).unwrap();
+        writeln!(
+            f,
+            "{}",
+            json!({"step_index": 1, "type": "USER_INPUT", "content": "Question 1"})
+        )
+        .unwrap();
+        writeln!(
+            f,
+            "{}",
+            json!({"step_index": 2, "type": "RUN_COMMAND", "content": "first call", "exit_code": 0})
+        )
+        .unwrap();
+        writeln!(
+            f,
+            "{}",
+            json!({"step_index": 2, "type": "RUN_COMMAND", "content": "duplicate step", "exit_code": 0})
+        )
+        .unwrap();
+        writeln!(
+            f,
+            "{}",
+            json!({"step_index": 3, "type": "PLANNER_RESPONSE", "content": "Done"})
+        )
+        .unwrap();
+    }
+
+    let bin = bin();
+    let output = std::process::Command::new(&bin)
+        .arg(&transcript_path)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "Compaction must succeed");
+
+    // Master archive must contain only one line with step_index: 2
+    let content = fs::read_to_string(&full_path).unwrap();
+    let mut step_2_count = 0;
+    for line in content.lines().filter(|l| !l.trim().is_empty()) {
+        if let Ok(val) = serde_json::from_str::<Value>(line) {
+            if val.get("step_index").and_then(|v| v.as_u64()) == Some(2) {
+                step_2_count += 1;
+            }
+        }
+    }
+    assert_eq!(
+        step_2_count, 1,
+        "step_index 2 must appear exactly once in master archive"
+    );
+}
+
+/// P0-4: Output path must reject dotfiles, non-.md files, and preexisting non-shake files unless --force.
+#[test]
+fn test_output_path_security_restrictions() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let logs_dir = tmp_dir
+        .path()
+        .join(".gemini/brain/test-out-sec/.system_generated/logs");
+    fs::create_dir_all(&logs_dir).unwrap();
+    let transcript_path = logs_dir.join("transcript.jsonl");
+
+    fs::write(
+        &transcript_path,
+        format!(
+            "{}\n",
+            json!({"step_index": 1, "type": "USER_INPUT", "content": "Hello"})
+        ),
+    )
+    .unwrap();
+
+    let bin = bin();
+
+    // 1. Disallow dotfile
+    let dotfile_out = logs_dir.join(".bashrc");
+    let out = std::process::Command::new(&bin)
+        .arg(&transcript_path)
+        .arg(&dotfile_out)
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "Dotfile output must fail");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("hidden dotfile"));
+
+    // 2. Disallow non-.md file
+    let txt_out = logs_dir.join("report.txt");
+    let out = std::process::Command::new(&bin)
+        .arg(&transcript_path)
+        .arg(&txt_out)
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "Non-.md output must fail");
+    assert!(String::from_utf8_lossy(&out.stderr).contains(".md extension"));
+
+    // 3. Disallow overwriting preexisting non-shake file without --force
+    let existing_file = logs_dir.join("my_notes.md");
+    fs::write(&existing_file, "Preexisting user notes").unwrap();
+
+    let out = std::process::Command::new(&bin)
+        .arg(&transcript_path)
+        .arg(&existing_file)
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "Overwriting non-shake file must fail without --force"
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("already exists"));
+
+    // 4. Overwrite allowed with --force
+    let out = std::process::Command::new(&bin)
+        .arg(&transcript_path)
+        .arg(&existing_file)
+        .arg("--force")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "Overwriting with --force must succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// P0-5: Anchor notice consumption lifecycle prevents repeated turn-by-turn prompt spam.
+#[test]
+fn test_anchor_notice_consumption_lifecycle() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let art_dir = tmp_dir.path().join(".gemini/brain/test-anchor-lifecycle");
+    fs::create_dir_all(&art_dir).unwrap();
+
+    let md_file = art_dir.join("shake_summary.md");
+    fs::write(&md_file, "# Summary").unwrap();
+
+    let anchor_file = art_dir.join("active_shake_anchor.json");
+    let anchor_payload = json!({
+        "active": true,
+        "injected": false,
+        "shaken_file": md_file.to_string_lossy(),
+        "anchored_at_step": 42,
+    });
+    fs::write(&anchor_file, anchor_payload.to_string()).unwrap();
+
+    let bin = bin();
+
+    let payload = json!({
+        "artifactDirectoryPath": art_dir.to_string_lossy(),
+        "invocationNum": 1
+    })
+    .to_string();
+
+    // First call: anchor is active, emits injection notice
+    let mut cmd = std::process::Command::new(&bin);
+    cmd.arg("--hook")
+        .env("HOME", tmp_dir.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped());
+    let mut child = cmd.spawn().unwrap();
+    use std::io::Write;
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(payload.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    let stdout1 = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout1.contains("injectSteps"),
+        "Turn 1 must inject anchor notice"
+    );
+
+    // Second call: anchor has been consumed, must emit {}
+    let mut cmd2 = std::process::Command::new(&bin);
+    cmd2.arg("--hook")
+        .env("HOME", tmp_dir.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped());
+    let mut child2 = cmd2.spawn().unwrap();
+    child2
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(payload.as_bytes())
+        .unwrap();
+    let out2 = child2.wait_with_output().unwrap();
+    assert!(out2.status.success());
+    let stdout2 = String::from_utf8_lossy(&out2.stdout);
+    assert_eq!(
+        stdout2.trim(),
+        "{}",
+        "Turn 2 must NOT re-inject anchor notice"
+    );
+}
+
+/// P1-5 / 7.4: When circuit breaker is open, anchor notice injection must be suppressed.
+#[test]
+fn test_anchor_circuit_breaker_suppresses_injection() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let art_dir = tmp_dir.path().join(".gemini/brain/test-cb-suppression");
+    fs::create_dir_all(&art_dir).unwrap();
+
+    let md_file = art_dir.join("shake_summary.md");
+    fs::write(&md_file, "# Summary").unwrap();
+
+    let anchor_file = art_dir.join("active_shake_anchor.json");
+    let future_ts = chrono::Utc::now().timestamp() + 3600;
+    let anchor_payload = json!({
+        "active": true,
+        "injected": false,
+        "shaken_file": md_file.to_string_lossy(),
+        "anchored_at_step": 10,
+        "consecutive_failures": 5,
+        "circuit_disabled_until": future_ts,
+    });
+    fs::write(&anchor_file, anchor_payload.to_string()).unwrap();
+
+    let bin = bin();
+    let payload = json!({
+        "artifactDirectoryPath": art_dir.to_string_lossy(),
+        "invocationNum": 1
+    })
+    .to_string();
+
+    let mut cmd = std::process::Command::new(&bin);
+    cmd.arg("--hook")
+        .env("HOME", tmp_dir.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped());
+    let mut child = cmd.spawn().unwrap();
+    use std::io::Write;
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(payload.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "{}",
+        "Circuit breaker open must suppress anchor injection"
+    );
+}

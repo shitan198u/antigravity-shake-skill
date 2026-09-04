@@ -72,9 +72,9 @@ struct HookPayload {
 }
 
 /// Strictly validates that a directory path is within the user's system-managed ~/.gemini directory
-/// to completely prevent context poisoning from arbitrary workspace git repositories.
-/// Counts the number of raw, unpruned tool execution outputs in the transcript.
-fn count_unpruned_tools(t_path: &Path) -> usize {
+/// Counts the number of raw, unpruned tool execution outputs in the transcript,
+/// stopping as soon as the provided threshold is reached (P1-4).
+fn count_unpruned_tools(t_path: &Path, threshold: usize) -> usize {
     let file = match File::open(t_path) {
         Ok(f) => f,
         Err(_) => return 0,
@@ -92,6 +92,9 @@ fn count_unpruned_tools(t_path: &Path) -> usize {
                 let content = val.get("content").and_then(|v| v.as_str()).unwrap_or("");
                 if !content.starts_with("[PRUNED tool=") {
                     count += 1;
+                    if count >= threshold {
+                        break;
+                    }
                 }
             }
         }
@@ -106,11 +109,36 @@ fn is_trusted_storage_path(p: &Path) -> bool {
     if home.is_empty() {
         return false;
     }
+
+    let mut trusted_roots: Vec<PathBuf> = Vec::new();
     let trusted_gemini = Path::new(&home).join(".gemini");
-    let trusted_canonical = match trusted_gemini.canonicalize() {
-        Ok(c) => c,
-        Err(_) => return false, // Fail closed if ~/.gemini does not exist or cannot be resolved
-    };
+    if let Ok(c) = trusted_gemini.canonicalize() {
+        trusted_roots.push(c);
+    }
+
+    if let Ok(extra) = std::env::var("SHAKE_TRUSTED_STORAGE_ROOTS") {
+        for root in extra.split([':', ';', ',']) {
+            let r = root.trim();
+            if !r.is_empty() {
+                if let Ok(c) = Path::new(r).canonicalize() {
+                    trusted_roots.push(c);
+                }
+            }
+        }
+    }
+
+    if let Ok(app_data) = std::env::var("ANTIGRAVITY_APP_DATA_DIR") {
+        let a = app_data.trim();
+        if !a.is_empty() {
+            if let Ok(c) = Path::new(a).canonicalize() {
+                trusted_roots.push(c);
+            }
+        }
+    }
+
+    if trusted_roots.is_empty() {
+        return false;
+    }
 
     let p_abs = if p.is_absolute() {
         p.to_path_buf()
@@ -122,7 +150,7 @@ fn is_trusted_storage_path(p: &Path) -> bool {
 
     // Mandatory canonicalization: fail closed to prevent symlink traversal or evasion
     match p_abs.canonicalize() {
-        Ok(canonical) => canonical.starts_with(&trusted_canonical),
+        Ok(canonical) => trusted_roots.iter().any(|root| canonical.starts_with(root)),
         Err(_) => false,
     }
 }
@@ -219,8 +247,19 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
 
     // P0-2: Auto-recover if a previous compaction crashed or was interrupted
     if let Some(t_path) = &resolved_transcript {
-        if let Ok(Some(recovery_msg)) = crate::atomic::recover_if_interrupted(t_path) {
-            log_with_level("INFO", &recovery_msg);
+        match crate::atomic::recover_if_interrupted(t_path) {
+            Ok(Some(recovery_msg)) => {
+                log_with_level("INFO", &recovery_msg);
+            }
+            Err(e) => {
+                log_with_level(
+                    "ERROR",
+                    &format!("Crash recovery failed for '{}': {}", t_path.display(), e),
+                );
+                println!("{{}}");
+                return Ok(());
+            }
+            _ => {}
         }
     }
 
@@ -232,12 +271,12 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let mut found_anchor: Option<AnchorFilePayload> = None;
+    let mut found_anchor: Option<(PathBuf, AnchorFilePayload)> = None;
     for path in candidate_paths {
         if path.exists() {
             if let Ok(file) = File::open(&path) {
                 if let Ok(data) = serde_json::from_reader::<_, AnchorFilePayload>(file) {
-                    found_anchor = Some(data);
+                    found_anchor = Some((path, data));
                     break;
                 }
             }
@@ -274,7 +313,7 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
             let now_ts = Utc::now().timestamp();
 
             // Circuit breaker (P1-5): skip auto-shake while disabled.
-            if let Some(anchor) = &found_anchor {
+            if let Some((_, anchor)) = &found_anchor {
                 if is_circuit_open(anchor, now_ts) {
                     log_with_level(
                         "WARN",
@@ -289,7 +328,7 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
 
             // 1. Evaluate Cooldown & Growth Delta Guards first (O(1))
             let (cooldown_ok, growth_ok) = match &found_anchor {
-                Some(anchor) => {
+                Some((_, anchor)) => {
                     let last_bytes = anchor.last_compacted_bytes.unwrap_or(0);
                     let last_attempt = anchor.last_attempt_timestamp.unwrap_or(0);
                     let cd_ok = (now_ts - last_attempt).abs() >= config.auto.cooldown_seconds;
@@ -321,7 +360,7 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
                     );
                     return emit_anchor_or_empty(&found_anchor);
                 }
-                let unpruned_tools = count_unpruned_tools(t_path);
+                let unpruned_tools = count_unpruned_tools(t_path, config.auto.tool_burst_threshold);
                 if unpruned_tools >= config.auto.tool_burst_threshold {
                     log_diagnostic("Auto-shake triggered: unpruned tools burst threshold hit");
                     Some("tools")
@@ -405,19 +444,45 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
                             &master_archive_str,
                         );
 
+                        let step_label = if stats.max_step_index > 0 {
+                            stats.max_step_index
+                        } else {
+                            (stats.user_turns + stats.assistant_turns + stats.pruned_tools) as u64
+                        };
+
                         let ephemeral_msg = if trigger == "size" {
                             format!(
                                 "[Context auto-compacted via /shake (exceeded 80k token threshold). Active state anchored in @{} (Step {}+). Treat prior raw tool stdout as archived.]",
                                 output_path.display(),
-                                stats.user_turns + stats.assistant_turns + stats.pruned_tools
+                                step_label
                             )
                         } else {
                             format!(
                                 "[Context auto-compacted via /shake (unpruned tool burst >= 20). Active state anchored in @{} (Step {}+). Treat prior raw tool stdout as archived.]",
                                 output_path.display(),
-                                stats.user_turns + stats.assistant_turns + stats.pruned_tools
+                                step_label
                             )
                         };
+
+                        // Mark anchor as consumed immediately since we inject the notice now (P0-5)
+                        let anchor_path = art_dir.join("active_shake_anchor.json");
+                        if let Ok(content) = fs::read_to_string(&anchor_path) {
+                            if let Ok(mut json_val) =
+                                serde_json::from_str::<serde_json::Value>(&content)
+                            {
+                                if let Some(obj) = json_val.as_object_mut() {
+                                    obj.insert("active".to_string(), json!(false));
+                                    obj.insert("injected".to_string(), json!(true));
+                                    obj.insert(
+                                        "injected_at".to_string(),
+                                        json!(Utc::now().timestamp()),
+                                    );
+                                    if let Ok(updated) = serde_json::to_string_pretty(&json_val) {
+                                        let _ = fs::write(&anchor_path, updated);
+                                    }
+                                }
+                            }
+                        }
 
                         if is_stop_event {
                             println!("{{}}");
@@ -465,26 +530,66 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Shared tail: emit stored anchor notice or fail-open `{}`.
 fn emit_anchor_or_empty(
-    found_anchor: &Option<AnchorFilePayload>,
+    found_anchor: &Option<(PathBuf, AnchorFilePayload)>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match found_anchor {
-        Some(anchor) if anchor.active.unwrap_or(false) => {
-            let shaken_file = anchor.shaken_file.clone().unwrap_or_default();
-            let anchored_step = match &anchor.anchored_at_step {
-                Some(serde_json::Value::Number(n)) => n.to_string(),
-                Some(serde_json::Value::String(s)) => s.clone(),
-                _ => "recent".to_string(),
-            };
-
-            if shaken_file.is_empty() {
+        Some((anchor_path, anchor))
+            if anchor.active.unwrap_or(false) && !anchor.injected.unwrap_or(false) =>
+        {
+            let now_ts = Utc::now().timestamp();
+            if is_circuit_open(anchor, now_ts) {
+                log_diagnostic("Suppressing anchor injection: circuit breaker is open");
                 println!("{{}}");
                 return Ok(());
             }
+
+            let shaken_file = anchor.shaken_file.clone().unwrap_or_default();
+            let shaken_path = Path::new(&shaken_file);
+            if shaken_file.is_empty()
+                || !shaken_file.ends_with(".md")
+                || shaken_file
+                    .chars()
+                    .any(|c| c.is_control() || c == '\n' || c == '\r')
+                || !shaken_path.exists()
+                || !is_trusted_storage_path(shaken_path)
+            {
+                log_diagnostic(
+                    "Anchor shaken_file failed validation, does not exist, or untrusted",
+                );
+                println!("{{}}");
+                return Ok(());
+            }
+
+            let anchored_step = match &anchor.anchored_at_step {
+                Some(serde_json::Value::Number(n)) => n.to_string(),
+                Some(serde_json::Value::String(s)) => {
+                    let sanitized: String = s
+                        .chars()
+                        .filter(|c| !c.is_control() && *c != '\n' && *c != '\r')
+                        .collect();
+                    sanitized
+                }
+                _ => "recent".to_string(),
+            };
 
             let ephemeral_msg = format!(
                 "[Context compacted via /shake. Active state anchored in @{} (Step {}+). Treat prior raw tool stdout as archived.]",
                 shaken_file, anchored_step
             );
+
+            // Mark anchor as consumed so subsequent turns do not repeat the injection notice (P0-5)
+            if let Ok(content) = fs::read_to_string(anchor_path) {
+                if let Ok(mut json_val) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(obj) = json_val.as_object_mut() {
+                        obj.insert("active".to_string(), json!(false));
+                        obj.insert("injected".to_string(), json!(true));
+                        obj.insert("injected_at".to_string(), json!(now_ts));
+                        if let Ok(updated) = serde_json::to_string_pretty(&json_val) {
+                            let _ = fs::write(anchor_path, updated);
+                        }
+                    }
+                }
+            }
 
             let response = json!({
                 "injectSteps": [

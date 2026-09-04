@@ -38,7 +38,7 @@ During long development sessions, AI coding agents accumulate tens of thousands 
 * ⚡ **Dual-Trigger Proactive Auto-Hook**: Background `PreInvocation` hook automatically detects and compacts conversations whenever file size crosses **80,000 tokens** (`264 KB`) **OR** the transcript accumulates **$\ge 20$ unpruned tool runs**, completely preventing lossy server-side `{{ CHECKPOINT }}` truncation and autonomous burst bloat!
 * ⏱️ **25 KB Growth Delta Guard**: Prevents redundant CPU/disk cycles when conversations contain extensive clean dialogue.
 * 🏛️ **Single Master Archive Architecture**: Receipts point directly to `transcript_full.jsonl` with exact 1-indexed line numbers (`line=N`). No broken links, ever.
-* 🧹 **Zero Disk Bloat Guarantee**: Eliminates redundant multi-megabyte `.bak_*` duplicates, maintaining only one atomic crash-recovery fallback (`transcript.jsonl.bak`).
+* 🧹 **Zero Backup Bloat Guarantee**: Eliminates redundant multi-megabyte `.bak_*` duplicates, retaining only a single permanent master archive (`transcript_full.jsonl`) and one atomic crash fallback (`transcript.jsonl.bak`).
 * 🎯 **Dual-Boundary Working Memory Engine**: Working memory is bounded by both human conversational context (last **10 user turns**) and autonomous tool volume (capped at last **20 tool outputs**). Autonomous tasks executing 30+ tools in 1 turn keep the last 20 outputs raw while compacting earlier tools into indexed receipts.
 * ✂️ **Historical Heredoc Compaction**: Compacts older bash heredocs (`cat << 'EOF' ...` > 250 chars) from assistant tool calls into line-indexed receipts.
 * ⚠️ **Warning Awareness**: Tracks and tags compiler warnings (`warnings=N`) in receipts so the AI knows warnings were emitted without carrying terminal bloat.

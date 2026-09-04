@@ -8,10 +8,11 @@ use crate::receipts::count_warnings;
 use crate::slug::{extract_conversation_id, generate_suggested_filename, generate_topic_slug};
 use fs2::FileExt;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 // Explicit pruning, truncation, and retention thresholds
@@ -113,17 +114,31 @@ pub fn purge_legacy_timestamped_backups(logs_dir: &Path) {
     }
 }
 
+static RE_GH: OnceLock<regex::Regex> = OnceLock::new();
+static RE_GH_PAT: OnceLock<regex::Regex> = OnceLock::new();
+static RE_AWS: OnceLock<regex::Regex> = OnceLock::new();
+static RE_BEARER: OnceLock<regex::Regex> = OnceLock::new();
+static RE_AUTH: OnceLock<regex::Regex> = OnceLock::new();
+static RE_KEY: OnceLock<regex::Regex> = OnceLock::new();
+
 /// Redacts sensitive credentials (GitHub tokens, AWS keys, Bearer tokens, private keys) from text (P1-3).
 pub fn redact_secrets(text: &str) -> String {
-    let pat_gh = regex::Regex::new(r"(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36}").unwrap();
-    let pat_gh_pat = regex::Regex::new(r"github_pat_[A-Za-z0-9_]{82}").unwrap();
-    let pat_aws = regex::Regex::new(r"\b(AKIA|ABIA|ACCA|ASIA)[0-9A-Z]{16}\b").unwrap();
-    let pat_bearer = regex::Regex::new(r"(?i)\bBearer\s+[A-Za-z0-9_\-\.]{20,}").unwrap();
-    let pat_auth = regex::Regex::new(r"(?i)Authorization:\s*[^\r\n]+").unwrap();
-    let pat_key = regex::Regex::new(
-        r"-----BEGIN (?:[A-Z ]+) PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z ]+) PRIVATE KEY-----",
-    )
-    .unwrap();
+    let pat_gh = RE_GH
+        .get_or_init(|| regex::Regex::new(r"(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36}").unwrap());
+    let pat_gh_pat =
+        RE_GH_PAT.get_or_init(|| regex::Regex::new(r"github_pat_[A-Za-z0-9_]{82}").unwrap());
+    let pat_aws =
+        RE_AWS.get_or_init(|| regex::Regex::new(r"\b(AKIA|ABIA|ACCA|ASIA)[0-9A-Z]{16}\b").unwrap());
+    let pat_bearer = RE_BEARER
+        .get_or_init(|| regex::Regex::new(r"(?i)\bBearer\s+[A-Za-z0-9_\-\.]{20,}").unwrap());
+    let pat_auth =
+        RE_AUTH.get_or_init(|| regex::Regex::new(r"(?i)Authorization:\s*[^\r\n]+").unwrap());
+    let pat_key = RE_KEY.get_or_init(|| {
+        regex::Regex::new(
+            r"-----BEGIN (?:[A-Z ]+) PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z ]+) PRIVATE KEY-----",
+        )
+        .unwrap()
+    });
 
     let s1 = pat_gh.replace_all(text, "[REDACTED_GH_TOKEN]");
     let s2 = pat_gh_pat.replace_all(&s1, "[REDACTED_GH_PAT]");
@@ -439,14 +454,35 @@ fn copy_from_locked_file(file: &mut File, dest_path: &Path) -> std::io::Result<u
 fn sync_master_full_transcript(
     file: &mut File,
     full_transcript_path: &Path,
+    redact_secrets_active: bool,
 ) -> Result<HashMap<u64, usize>, Box<dyn std::error::Error>> {
     if !full_transcript_path.exists() {
-        copy_from_locked_file(file, full_transcript_path).map_err(|e| {
-            format!(
-                "Critical: Failed to initialize permanent master archive at {}: {}. Compaction aborted to protect data integrity.",
-                full_transcript_path.display(), e
-            )
-        })?;
+        file.seek(SeekFrom::Start(0))?;
+        let reader = BufReader::new(&mut *file);
+        let mut full_file = File::create(full_transcript_path)?;
+        let mut seen_init: HashSet<u64> = HashSet::new();
+        for line_res in reader.lines() {
+            let line_str = line_res?;
+            if line_str.trim().is_empty() {
+                continue;
+            }
+            if let Ok(val) = serde_json::from_str::<Value>(&line_str) {
+                if let Some(step_idx) = val.get("step_index").and_then(|v| v.as_u64()) {
+                    if !seen_init.insert(step_idx) {
+                        continue; // Deduplicate: only record first occurrence of step_index in master archive
+                    }
+                }
+            }
+            let line_to_write = if redact_secrets_active {
+                redact_secrets(&line_str)
+            } else {
+                line_str
+            };
+            writeln!(full_file, "{}", line_to_write)?;
+        }
+        full_file.flush()?;
+        full_file.sync_all()?;
+        file.seek(SeekFrom::Start(0))?;
         set_user_only_permissions(full_transcript_path);
         let step_map = scan_master_full_transcript(full_transcript_path);
         store_cached_master_index(full_transcript_path, &step_map);
@@ -463,6 +499,7 @@ fn sync_master_full_transcript(
     file.seek(SeekFrom::Start(0))?;
     let reader = BufReader::new(&mut *file);
     let mut missing_lines: Vec<(u64, String)> = Vec::new();
+    let mut seen_in_active: HashSet<u64> = HashSet::new();
 
     for line_res in reader.lines() {
         let line_str = line_res?;
@@ -482,8 +519,13 @@ fn sync_master_full_transcript(
                 continue;
             }
             if let Some(step_idx) = val.get("step_index").and_then(|v| v.as_u64()) {
-                if !step_map.contains_key(&step_idx) {
-                    missing_lines.push((step_idx, line_str));
+                if !step_map.contains_key(&step_idx) && seen_in_active.insert(step_idx) {
+                    let line_to_record = if redact_secrets_active {
+                        redact_secrets(&line_str)
+                    } else {
+                        line_str
+                    };
+                    missing_lines.push((step_idx, line_to_record));
                 }
             }
         }
@@ -493,6 +535,7 @@ fn sync_master_full_transcript(
 
     if !missing_lines.is_empty() {
         let mut full_file = File::options()
+            .read(true)
             .append(true)
             .open(full_transcript_path)
             .map_err(|e| {
@@ -501,6 +544,17 @@ fn sync_master_full_transcript(
                     full_transcript_path.display(), e
                 )
             })?;
+
+        // Guard: check if existing file ends with a newline before appending (P0-6)
+        let meta = full_file.metadata()?;
+        let flen = meta.len();
+        if flen > 0 {
+            full_file.seek(SeekFrom::Start(flen - 1))?;
+            let mut last_byte = [0u8; 1];
+            if full_file.read_exact(&mut last_byte).is_ok() && last_byte[0] != b'\n' {
+                writeln!(full_file)?;
+            }
+        }
 
         for (step_idx, line_str) in missing_lines {
             current_line_count += 1;
@@ -523,8 +577,19 @@ pub fn run_compaction_pipeline(
     let pipeline_start = Instant::now();
 
     // P0-2: Auto-recover from any previous interrupted compaction before checking existence
-    if let Ok(Some(recovery_msg)) = recover_if_interrupted(transcript_path) {
-        eprintln!("{}", recovery_msg);
+    match recover_if_interrupted(transcript_path) {
+        Ok(Some(recovery_msg)) => {
+            eprintln!("{}", recovery_msg);
+        }
+        Err(e) => {
+            return Err(format!(
+                "Critical: Auto-recovery from interrupted compaction failed for '{}': {}. Compaction aborted.",
+                transcript_path.display(),
+                e
+            )
+            .into());
+        }
+        _ => {}
     }
 
     if !transcript_path.exists() {
@@ -561,7 +626,11 @@ pub fn run_compaction_pipeline(
             let snap = SnapshotFingerprint::from_file(&file)?;
 
             // P0-1: Guarantee permanent master archive synchronization under exclusive lock
-            let step_map = sync_master_full_transcript(&mut file, &full_transcript_path)?;
+            let step_map = sync_master_full_transcript(
+                &mut file,
+                &full_transcript_path,
+                options.redact_secrets,
+            )?;
 
             // Mandatory fail-closed crash fallback while holding the exclusive lock
             copy_from_locked_file(&mut file, &backup_latest).map_err(|e| {
@@ -619,6 +688,7 @@ pub fn run_compaction_pipeline(
     let mut lines_buffer: Vec<(usize, String)> = Vec::new();
     let mut raw_bytes = 0usize;
     let mut user_turn_positions: Vec<(usize, usize)> = Vec::new();
+    let mut max_step_index = 0u64;
 
     for (line_idx, line) in reader.lines().enumerate() {
         let line_str = line?;
@@ -630,12 +700,21 @@ pub fn run_compaction_pipeline(
         let buf_idx = lines_buffer.len();
 
         if let Ok(val) = serde_json::from_str::<Value>(&line_str) {
+            if let Some(step_idx) = val.get("step_index").and_then(|v| v.as_u64()) {
+                if step_idx > max_step_index {
+                    max_step_index = step_idx;
+                }
+            }
             let t = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
             if t == "USER_INPUT" {
                 user_turn_positions.push((user_turn_positions.len() + 1, buf_idx));
             }
         }
         lines_buffer.push((original_line_no, line_str));
+    }
+
+    if max_step_index == 0 {
+        max_step_index = lines_buffer.len() as u64;
     }
 
     let total_user_turns = user_turn_positions.len();
@@ -1247,6 +1326,7 @@ pub fn run_compaction_pipeline(
         history_events,
         duration_ms,
         trigger_detail,
+        max_step_index,
     };
 
     Ok((
