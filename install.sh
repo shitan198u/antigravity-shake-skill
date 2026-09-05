@@ -10,7 +10,19 @@ INSTALL_DIR="${HOME}/.gemini/bin"
 GLOBAL_SKILLS_DIR="${HOME}/.gemini/config/skills/shake"
 FULL_SHAKE_SKILLS_DIR="${HOME}/.gemini/config/skills/full-shake"
 HOOKS_CONFIG="${HOME}/.gemini/config/hooks.json"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SHAKE_VERSION="${SHAKE_VERSION:-v0.2.0}"
+
+# Piped execution safe SCRIPT_DIR detection
+SCRIPT_DIR=""
+if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
+
+# Determine if running in local development mode
+LOCAL_DEV=0
+if [ "${SHAKE_LOCAL_DEV:-0}" = "1" ] || [ "${1:-}" = "--local" ] || [ "${1:-}" = "-l" ]; then
+    LOCAL_DEV=1
+fi
 
 # ==============================================================================
 # UNINSTALL MODE
@@ -112,18 +124,27 @@ case "${OS}" in
         ;;
 esac
 
-# Binary acquisition: local override (CI) or download from GitHub Releases (users)
-if [ -f "${SCRIPT_DIR}/bin/${BIN_NAME}" ]; then
-    echo "📦 Using local pre-built binary..."
-    cp "${SCRIPT_DIR}/bin/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}"
-    chmod 755 "${INSTALL_DIR}/${BIN_NAME}"
-elif [ -f "${SCRIPT_DIR}/shake-prune-rs/target/release/${BIN_NAME}" ]; then
-    echo "📦 Using local cargo release binary..."
-    cp "${SCRIPT_DIR}/shake-prune-rs/target/release/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}"
-    chmod 755 "${INSTALL_DIR}/${BIN_NAME}"
-else
-    # Download prebuilt binary from GitHub Releases
-    SHAKE_VERSION="${SHAKE_VERSION:-v0.2.0}"
+REF="${SHAKE_VERSION}"
+[ "${REF}" = "latest" ] && REF="main"
+RAW_BASE_URL="https://raw.githubusercontent.com/${REPO}/${REF}"
+
+# 1. Binary acquisition
+INSTALLED_BIN=0
+if [ "${LOCAL_DEV}" = "1" ] && [ -n "${SCRIPT_DIR}" ]; then
+    if [ -f "${SCRIPT_DIR}/bin/${BIN_NAME}" ]; then
+        echo "📦 [Local Dev] Using local pre-built binary: ${SCRIPT_DIR}/bin/${BIN_NAME}"
+        cp -f "${SCRIPT_DIR}/bin/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}"
+        chmod 755 "${INSTALL_DIR}/${BIN_NAME}"
+        INSTALLED_BIN=1
+    elif [ -f "${SCRIPT_DIR}/shake-prune-rs/target/release/${BIN_NAME}" ]; then
+        echo "📦 [Local Dev] Using local cargo release binary: ${SCRIPT_DIR}/shake-prune-rs/target/release/${BIN_NAME}"
+        cp -f "${SCRIPT_DIR}/shake-prune-rs/target/release/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}"
+        chmod 755 "${INSTALL_DIR}/${BIN_NAME}"
+        INSTALLED_BIN=1
+    fi
+fi
+
+if [ "${INSTALLED_BIN}" = "0" ]; then
     if [ "${SHAKE_VERSION}" = "latest" ]; then
         BASE_RELEASE_URL="https://github.com/${REPO}/releases/latest/download"
     else
@@ -137,14 +158,14 @@ else
     trap 'rm -rf "${TMP_DIR}"' EXIT
     
     echo "🌐 Downloading precompiled binary (${BIN_NAME}-${TARGET}) from ${BASE_RELEASE_URL}..."
-    if ! curl -fsSL "${DOWNLOAD_URL}" -o "${TMP_DIR}/${BIN_NAME}"; then
+    if ! curl --connect-timeout 15 -fsSL "${DOWNLOAD_URL}" -o "${TMP_DIR}/${BIN_NAME}"; then
         echo "❌ Error: Failed to download precompiled binary from ${DOWNLOAD_URL}" >&2
         echo "   If you have Rust installed, you can build from source: cargo build --release --manifest-path shake-prune-rs/Cargo.toml" >&2
         exit 1
     fi
 
     echo "🔒 Downloading and verifying SHA256 integrity checksum..."
-    if ! curl -fsSL "${CHECKSUM_URL}" -o "${TMP_DIR}/SHA256SUMS.txt"; then
+    if ! curl --connect-timeout 15 -fsSL "${CHECKSUM_URL}" -o "${TMP_DIR}/SHA256SUMS.txt"; then
         echo "❌ Error: Failed to download SHA256SUMS.txt checksums from ${CHECKSUM_URL}. Aborting for supply-chain integrity." >&2
         exit 1
     fi
@@ -172,7 +193,7 @@ else
     fi
     echo "  ✓ Checksum successfully verified: ${ACTUAL_HASH}"
 
-    cp "${TMP_DIR}/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}"
+    cp -f "${TMP_DIR}/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}"
     chmod 755 "${INSTALL_DIR}/${BIN_NAME}"
 fi
 
@@ -181,28 +202,53 @@ if [ ! -x "${INSTALL_DIR}/${BIN_NAME}" ]; then
     exit 1
 fi
 
-# Install Global Skill
+# 2. Skill & Documentation deployment (Always fresh overwrite)
 mkdir -p "${GLOBAL_SKILLS_DIR}/references"
 mkdir -p "${GLOBAL_SKILLS_DIR}/bin"
 
-# Provide convenient skill-local symlink or copy to ensure legacy relative references resolve
-cp "${INSTALL_DIR}/${BIN_NAME}" "${GLOBAL_SKILLS_DIR}/bin/${BIN_NAME}"
+cp -f "${INSTALL_DIR}/${BIN_NAME}" "${GLOBAL_SKILLS_DIR}/bin/${BIN_NAME}"
 chmod 755 "${GLOBAL_SKILLS_DIR}/bin/${BIN_NAME}"
 
-if [ -f "${SCRIPT_DIR}/skills/shake/SKILL.md" ]; then
-    cp "${SCRIPT_DIR}/skills/shake/SKILL.md" "${GLOBAL_SKILLS_DIR}/SKILL.md"
-elif [ -f "${SCRIPT_DIR}/SKILL.md" ]; then
-    cp "${SCRIPT_DIR}/SKILL.md" "${GLOBAL_SKILLS_DIR}/SKILL.md"
-else
-    echo "⚠️ Warning: No SKILL.md found in ${SCRIPT_DIR}/skills/shake or ${SCRIPT_DIR}; skill text skipped." >&2
-fi
-if [ -d "${SCRIPT_DIR}/references" ]; then
-    cp -r "${SCRIPT_DIR}/references/"* "${GLOBAL_SKILLS_DIR}/references/" 2>/dev/null || true
-else
-    echo "⚠️ Warning: No references/ directory in ${SCRIPT_DIR}; references skipped." >&2
+SKILL_COPIED=0
+if [ "${LOCAL_DEV}" = "1" ] && [ -n "${SCRIPT_DIR}" ]; then
+    if [ -f "${SCRIPT_DIR}/skills/shake/SKILL.md" ]; then
+        echo "📋 [Local Dev] Deploying SKILL.md from local repository..."
+        cp -f "${SCRIPT_DIR}/skills/shake/SKILL.md" "${GLOBAL_SKILLS_DIR}/SKILL.md"
+        SKILL_COPIED=1
+    elif [ -f "${SCRIPT_DIR}/SKILL.md" ]; then
+        echo "📋 [Local Dev] Deploying SKILL.md from local repository..."
+        cp -f "${SCRIPT_DIR}/SKILL.md" "${GLOBAL_SKILLS_DIR}/SKILL.md"
+        SKILL_COPIED=1
+    fi
+    if [ -d "${SCRIPT_DIR}/references" ]; then
+        echo "📚 [Local Dev] Deploying reference documentation from local repository..."
+        cp -rf "${SCRIPT_DIR}/references/"* "${GLOBAL_SKILLS_DIR}/references/" 2>/dev/null || true
+    fi
 fi
 
-# Configure Background PreInvocation + Stop hooks in ~/.gemini/config/hooks.json
+if [ "${SKILL_COPIED}" = "0" ]; then
+    echo "📋 Downloading latest SKILL.md definition from GitHub (${REF})..."
+    if command -v curl >/dev/null 2>&1; then
+        curl --connect-timeout 10 -fsSL "${RAW_BASE_URL}/skills/shake/SKILL.md" -o "${GLOBAL_SKILLS_DIR}/SKILL.md" 2>/dev/null || \
+        curl --connect-timeout 10 -fsSL "${RAW_BASE_URL}/SKILL.md" -o "${GLOBAL_SKILLS_DIR}/SKILL.md" 2>/dev/null || \
+        echo "⚠️ Warning: Could not fetch SKILL.md from ${RAW_BASE_URL}" >&2
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO "${GLOBAL_SKILLS_DIR}/SKILL.md" "${RAW_BASE_URL}/skills/shake/SKILL.md" 2>/dev/null || \
+        wget -qO "${GLOBAL_SKILLS_DIR}/SKILL.md" "${RAW_BASE_URL}/SKILL.md" 2>/dev/null || \
+        echo "⚠️ Warning: Could not fetch SKILL.md from ${RAW_BASE_URL}" >&2
+    fi
+
+    echo "📚 Downloading reference documentation from GitHub (${REF})..."
+    for doc in antigravity_lifecycle.md how_it_works.md omp_comparison.md; do
+        if command -v curl >/dev/null 2>&1; then
+            curl --connect-timeout 10 -fsSL "${RAW_BASE_URL}/references/${doc}" -o "${GLOBAL_SKILLS_DIR}/references/${doc}" 2>/dev/null || true
+        elif command -v wget >/dev/null 2>&1; then
+            wget -qO "${GLOBAL_SKILLS_DIR}/references/${doc}" "${RAW_BASE_URL}/references/${doc}" 2>/dev/null || true
+        fi
+    done
+fi
+
+# 3. Configure Background Hooks in ~/.gemini/config/hooks.json
 HOOK_BIN="${INSTALL_DIR}/${BIN_NAME}"
 mkdir -p "$(dirname "${HOOKS_CONFIG}")"
 
@@ -292,6 +338,7 @@ if [ "${HOOK_MERGED}" = "1" ]; then
     echo "• Proactive auto-compaction hook configured in: ${HOOKS_CONFIG}"
     echo ""
     echo "👉 Type /shake in any Antigravity conversation to compact context!"
+    echo "👉 To uninstall: run ./install.sh --uninstall (or re-run piped with --uninstall)"
 else
     echo ""
     echo "⚠️ Binary verified, but hook merge was SKIPPED (see error above)." >&2

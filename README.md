@@ -53,21 +53,17 @@ Install `/shake` into your global Antigravity environment with a single self-con
 
 ### Linux / macOS:
 ```bash
-git clone https://github.com/shitan198u/antigravity-shake-skill.git
-cd antigravity-shake-skill
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/shitan198u/antigravity-shake-skill/main/install.sh | bash
 ```
 
 ### Windows (PowerShell):
 ```powershell
-git clone https://github.com/shitan198u/antigravity-shake-skill.git
-cd antigravity-shake-skill
-powershell -ExecutionPolicy Bypass -File .\install.ps1
+irm https://raw.githubusercontent.com/shitan198u/antigravity-shake-skill/main/install.ps1 | iex
 ```
 
 ### Uninstallation:
-- **Linux / macOS**: `./install.sh --uninstall`
-- **Windows**: `powershell -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall`
+- **Linux / macOS**: `curl -fsSL https://raw.githubusercontent.com/shitan198u/antigravity-shake-skill/main/install.sh | bash -s -- --uninstall` (or `./install.sh --uninstall`)
+- **Windows**: `& ([scriptblock]::Create((irm https://raw.githubusercontent.com/shitan198u/antigravity-shake-skill/main/install.ps1))) -Uninstall` (or `powershell -File .\install.ps1 -Uninstall`)
 
 ---
 
