@@ -19,6 +19,11 @@ use shake_prune::{
 };
 
 fn handle_restore(target: &Path, force: bool) {
+    if let Err(err_msg) = validate_transcript_path(target) {
+        eprintln!("Error: {}", err_msg);
+        process::exit(1);
+    }
+
     let abs_target = match target.canonicalize() {
         Ok(p) => p,
         Err(_) => target.to_path_buf(),
@@ -132,6 +137,15 @@ fn handle_restore(target: &Path, force: bool) {
             shake_prune::atomic::set_user_only_permissions(&abs_target);
             shake_prune::atomic::remove_intent_marker(&abs_target);
             let _ = fs2::FileExt::unlock(&target_file);
+
+            // Invalidate active anchor in artifact directory so ghost notifications are not injected
+            if let Some(parent) = abs_target.parent() {
+                let anchor_file = parent.join("active_shake_anchor.json");
+                if anchor_file.exists() {
+                    let _ = fs::remove_file(&anchor_file);
+                }
+            }
+
             println!(
                 "✅ Successfully restored '{}' from atomic backup '{}' ({} bytes, {} lines restored).",
                 abs_target.display(),
@@ -662,7 +676,13 @@ fn handle_show(
     pretty: bool,
     json_output: bool,
     full: bool,
+    redact: bool,
 ) {
+    if let Err(err_msg) = validate_transcript_path(transcript_path) {
+        eprintln!("Error: {}", err_msg);
+        process::exit(1);
+    }
+
     let logs_dir = transcript_path.parent().unwrap_or_else(|| Path::new("."));
     let full_archive = logs_dir.join("transcript_full.jsonl");
 
@@ -742,6 +762,13 @@ fn handle_show(
         }
     };
 
+    let raw_line = line_content;
+    let line_content = if redact {
+        shake_prune::pruner::redact_secrets(&raw_line)
+    } else {
+        raw_line
+    };
+
     if json_output {
         println!("{}", line_content);
         return;
@@ -772,6 +799,9 @@ fn handle_show(
             line_no,
             step_idx
         );
+        if !redact {
+            println!("> *(Note: Showing verbatim archive record. Use `--redact` to sanitize secrets.)*\n");
+        }
         println!("- **Type**: `{}`", stype);
         if !status.is_empty() {
             println!("- **Status**: `{}`", status);
@@ -1278,6 +1308,7 @@ fn main() {
             let mut json_flag = false;
             let mut pretty_flag = false;
             let mut full_flag = false;
+            let mut redact_flag = false;
             let mut step_opt = None;
             let mut line_opt = None;
             let mut target_str = None;
@@ -1304,6 +1335,9 @@ fn main() {
                 } else if args[i] == "--full" {
                     full_flag = true;
                     i += 1;
+                } else if args[i] == "--redact" {
+                    redact_flag = true;
+                    i += 1;
                 } else if !args[i].starts_with('-') && target_str.is_none() {
                     target_str = Some(&args[i]);
                     i += 1;
@@ -1320,9 +1354,10 @@ fn main() {
                     pretty_flag,
                     json_flag,
                     full_flag,
+                    redact_flag,
                 );
             } else {
-                eprintln!("Usage: shake-prune show <path/to/transcript.jsonl> (--step <N> | --line <N>) [--pretty] [--json] [--full]");
+                eprintln!("Usage: shake-prune show <path/to/transcript.jsonl> (--step <N> | --line <N>) [--pretty] [--json] [--full] [--redact]");
                 process::exit(1);
             }
             process::exit(0);

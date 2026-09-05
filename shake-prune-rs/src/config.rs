@@ -58,17 +58,15 @@ impl Default for RetentionConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct PrivacyConfig {
-    #[serde(default = "default_false")]
-    pub redact_secrets: bool,
+    #[serde(default)]
+    pub redact_secrets: Option<bool>,
 }
 
-impl Default for PrivacyConfig {
-    fn default() -> Self {
-        Self {
-            redact_secrets: default_false(),
-        }
+impl PrivacyConfig {
+    pub fn is_redact_secrets(&self) -> bool {
+        self.redact_secrets.unwrap_or(false)
     }
 }
 
@@ -202,8 +200,8 @@ impl ShakeConfig {
             if self.deep_after_user_turns == default_deep_after_user_turns() {
                 self.deep_after_user_turns = core.deep_after_user_turns;
             }
-            if !self.privacy.redact_secrets {
-                self.privacy.redact_secrets = core.redact_secrets;
+            if self.privacy.redact_secrets.is_none() {
+                self.privacy.redact_secrets = Some(core.redact_secrets);
             }
         }
     }
@@ -338,9 +336,9 @@ impl ShakeConfig {
         if let Ok(val) = env::var("SHAKE_SECRET_REDACTION") {
             let v = val.trim().to_lowercase();
             if v == "1" || v == "true" || v == "yes" {
-                self.privacy.redact_secrets = true;
+                self.privacy.redact_secrets = Some(true);
             } else if v == "0" || v == "false" || v == "no" {
-                self.privacy.redact_secrets = false;
+                self.privacy.redact_secrets = Some(false);
             }
         }
 
@@ -376,7 +374,7 @@ mod tests {
         assert_eq!(config.retention.recent_errors_cap, 30);
         assert_eq!(config.retention.recent_window_steps, 6);
         assert_eq!(config.retention.artifact_retention_count, 20);
-        assert!(!config.privacy.redact_secrets);
+        assert!(!config.privacy.is_redact_secrets());
         // Sensitive artifacts are always created 0600 on Unix; no opt-out knob.
     }
     #[test]
@@ -417,7 +415,7 @@ mod tests {
         assert_eq!(parsed.retention.recent_tools_cap, 25);
         assert_eq!(parsed.retention.recent_errors_cap, 35);
         assert_eq!(parsed.deep_after_user_turns, 40);
-        assert!(parsed.privacy.redact_secrets);
+        assert!(parsed.privacy.is_redact_secrets());
     }
 
     #[test]
@@ -451,7 +449,7 @@ mod tests {
         assert_eq!(parsed.retention.recent_user_turns, 5);
         assert_eq!(parsed.retention.recent_tools_cap, 10);
         assert_eq!(parsed.retention.recent_errors_cap, 15);
-        assert!(parsed.privacy.redact_secrets);
+        assert!(parsed.privacy.is_redact_secrets());
         assert_eq!(parsed.diagnostics.log_level, "debug");
     }
 
@@ -488,8 +486,25 @@ mod tests {
         assert_eq!(parsed.retention.recent_tools_cap, 25);
         assert_eq!(parsed.retention.recent_errors_cap, 35);
         assert_eq!(parsed.deep_after_user_turns, 40);
-        assert!(parsed.privacy.redact_secrets);
+        assert!(parsed.privacy.is_redact_secrets());
         assert!(parsed.auto.enabled);
         assert_eq!(parsed.auto.size_threshold_bytes, 200_000);
+    }
+
+    #[test]
+    fn test_normalize_explicit_modern_privacy_false_wins_over_legacy_true() {
+        let toml_str = r#"
+        [shake]
+        redact_secrets = true
+
+        [privacy]
+        redact_secrets = false
+        "#;
+        let mut parsed: ShakeConfig = toml::from_str(toml_str).unwrap();
+        parsed.normalize();
+        assert!(
+            !parsed.privacy.is_redact_secrets(),
+            "Explicit modern [privacy] redact_secrets = false must win over legacy [shake] true"
+        );
     }
 }
