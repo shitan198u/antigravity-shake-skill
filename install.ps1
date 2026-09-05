@@ -9,13 +9,15 @@ param(
 $ErrorActionPreference = "Stop"
 
 $Repo = "shitan198u/antigravity-shake-skill"
-$DefaultTag = "v0.2.0"
+$DefaultTag = "latest"
 $UserHome = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile)
 $GlobalSkillsDir = Join-Path $UserHome ".gemini\config\skills\shake"
 $FullShakeSkillsDir = Join-Path $UserHome ".gemini\config\skills\full-shake"
 $GlobalBinDir = Join-Path $UserHome ".gemini\bin"
 $HooksConfig = Join-Path $UserHome ".gemini\config\hooks.json"
 $TargetExe = Join-Path $GlobalBinDir "shake-prune.exe"
+$CmdScript = Join-Path $GlobalBinDir "shake-uninstall.cmd"
+$PsScript = Join-Path $GlobalBinDir "shake-uninstall.ps1"
 
 $ScriptDir = if ($MyInvocation.MyCommand.Path) { Split-Path -Parent $MyInvocation.MyCommand.Path } else { $null }
 $LocalDev = $Local.IsPresent -or ($env:SHAKE_LOCAL_DEV -eq "1")
@@ -29,6 +31,14 @@ if ($Uninstall) {
     if (Test-Path $TargetExe) {
         Remove-Item -Force $TargetExe
         Write-Host "  [OK] Removed $TargetExe"
+    }
+    if (Test-Path $CmdScript) {
+        Remove-Item -Force $CmdScript
+        Write-Host "  [OK] Removed $CmdScript"
+    }
+    if (Test-Path $PsScript) {
+        Remove-Item -Force $PsScript
+        Write-Host "  [OK] Removed $PsScript"
     }
     if (Test-Path $GlobalSkillsDir) {
         Remove-Item -Recurse -Force $GlobalSkillsDir
@@ -154,7 +164,82 @@ if (-not $InstalledBinary) {
     }
 }
 
-# 2. Skill & Reference deployment (Always fresh overwrite)
+# 2. Deploy local uninstaller scripts alongside shake-prune.exe
+$PsScript = Join-Path $GlobalBinDir "shake-uninstall.ps1"
+$CmdScript = Join-Path $GlobalBinDir "shake-uninstall.cmd"
+
+$UninstallPs1Content = @'
+# ==============================================================================
+# Antigravity /shake Local Uninstaller (Windows PowerShell)
+# ==============================================================================
+$ErrorActionPreference = "SilentlyContinue"
+$UserHome = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile)
+$GlobalSkillsDir = Join-Path $UserHome ".gemini\config\skills\shake"
+$FullShakeSkillsDir = Join-Path $UserHome ".gemini\config\skills\full-shake"
+$GlobalBinDir = Join-Path $UserHome ".gemini\bin"
+$HooksConfig = Join-Path $UserHome ".gemini\config\hooks.json"
+$TargetExe = Join-Path $GlobalBinDir "shake-prune.exe"
+$CmdScript = Join-Path $GlobalBinDir "shake-uninstall.cmd"
+$PsScript = Join-Path $GlobalBinDir "shake-uninstall.ps1"
+
+Write-Host "[*] Uninstalling Antigravity /shake..." -ForegroundColor Cyan
+
+if (Test-Path $TargetExe) {
+    Remove-Item -Force $TargetExe
+    Write-Host "  [OK] Removed $TargetExe"
+}
+if (Test-Path $GlobalSkillsDir) {
+    Remove-Item -Recurse -Force $GlobalSkillsDir
+    Write-Host "  [OK] Removed $GlobalSkillsDir"
+}
+if (Test-Path $FullShakeSkillsDir) {
+    Remove-Item -Recurse -Force $FullShakeSkillsDir
+    Write-Host "  [OK] Removed $FullShakeSkillsDir"
+}
+
+if (Test-Path $HooksConfig) {
+    try {
+        $HooksObj = Get-Content $HooksConfig -Raw | ConvertFrom-Json
+        $Modified = $false
+        if ($HooksObj.hooks -and $HooksObj.hooks.PreInvocation) {
+            $Filtered = @($HooksObj.hooks.PreInvocation | Where-Object { $_.command -notmatch "shake-prune" })
+            $HooksObj.hooks.PreInvocation = $Filtered
+            $Modified = $true
+            Write-Host "  [OK] Cleaned PreInvocation hook from $HooksConfig"
+        }
+        if ($HooksObj.hooks -and $HooksObj.hooks.Stop) {
+            $FilteredStop = @($HooksObj.hooks.Stop | Where-Object { $_.command -notmatch "shake-prune" })
+            $HooksObj.hooks.Stop = $FilteredStop
+            $Modified = $true
+            Write-Host "  [OK] Cleaned Stop hook from $HooksConfig"
+        }
+        if ($Modified) {
+            $HooksObj | ConvertTo-Json -Depth 5 | Set-Content $HooksConfig -Encoding UTF8
+        }
+    } catch {
+        Write-Warning "Could not update hooks.json: $_"
+    }
+}
+
+if (Test-Path $CmdScript) {
+    Remove-Item -Force $CmdScript
+    Write-Host "  [OK] Removed $CmdScript"
+}
+if (Test-Path $PsScript) {
+    Remove-Item -Force $PsScript
+    Write-Host "  [OK] Removed $PsScript"
+}
+
+Write-Host "[DONE] Antigravity /shake binaries, skills, and hooks removed." -ForegroundColor Green
+Write-Host "Retained (delete manually if desired): shake.toml, logs, transcript_full.jsonl archives, and .bak files."
+'@
+
+Set-Content -Path $PsScript -Value $UninstallPs1Content -Encoding UTF8
+$UninstallCmdContent = "@echo off`r`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File `"%~dp0shake-uninstall.ps1`"`r`n"
+Set-Content -Path $CmdScript -Value $UninstallCmdContent -Encoding ASCII
+Write-Host "- Installed local uninstaller: $CmdScript"
+
+# 3. Skill & Reference deployment (Always fresh overwrite)
 Write-Host "- Installing skill definitions to: $GlobalSkillsDir"
 Copy-Item $TargetExe (Join-Path $GlobalSkillsDir "bin\shake-prune.exe") -Force
 
@@ -255,7 +340,10 @@ Write-Host "- Verifying installation..."
 Write-Host ""
 Write-Host "[DONE] Installation Complete!" -ForegroundColor Green
 Write-Host "- Binary installed to: $TargetExe"
+Write-Host "- Local uninstaller: $CmdScript"
 Write-Host "- Skill installed to: $GlobalSkillsDir"
 Write-Host "- Native hooks configured in: $HooksConfig"
+Write-Host ""
 Write-Host "Type /shake in any conversation to compact context!" -ForegroundColor Cyan
-Write-Host "To uninstall: powershell -File .\install.ps1 -Uninstall" -ForegroundColor Cyan
+Write-Host "To update: re-run the installation command anytime (overwrites all assets)."
+Write-Host "To uninstall: run shake-uninstall (or .\install.ps1 -Uninstall)."

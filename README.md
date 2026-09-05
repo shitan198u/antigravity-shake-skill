@@ -61,9 +61,12 @@ curl -fsSL https://raw.githubusercontent.com/shitan198u/antigravity-shake-skill/
 irm https://raw.githubusercontent.com/shitan198u/antigravity-shake-skill/main/install.ps1 | iex
 ```
 
+### Updating:
+Re-run the installation command anytime to update the binary, skill definitions, and reference documentation to the latest version.
+
 ### Uninstallation:
-- **Linux / macOS**: `curl -fsSL https://raw.githubusercontent.com/shitan198u/antigravity-shake-skill/main/install.sh | bash -s -- --uninstall` (or `./install.sh --uninstall`)
-- **Windows**: `& ([scriptblock]::Create((irm https://raw.githubusercontent.com/shitan198u/antigravity-shake-skill/main/install.ps1))) -Uninstall` (or `powershell -File .\install.ps1 -Uninstall`)
+- **Linux / macOS**: `shake-uninstall` (or `~/.gemini/bin/shake-uninstall` / `./install.sh --uninstall`)
+- **Windows**: `shake-uninstall` (or `~/.gemini/bin/shake-uninstall.cmd` / `powershell -File .\install.ps1 -Uninstall`)
 
 ---
 

@@ -10,7 +10,7 @@ INSTALL_DIR="${HOME}/.gemini/bin"
 GLOBAL_SKILLS_DIR="${HOME}/.gemini/config/skills/shake"
 FULL_SHAKE_SKILLS_DIR="${HOME}/.gemini/config/skills/full-shake"
 HOOKS_CONFIG="${HOME}/.gemini/config/hooks.json"
-SHAKE_VERSION="${SHAKE_VERSION:-v0.2.0}"
+SHAKE_VERSION="${SHAKE_VERSION:-latest}"
 
 # Piped execution safe SCRIPT_DIR detection
 SCRIPT_DIR=""
@@ -30,10 +30,14 @@ fi
 if [ "${1:-}" = "--uninstall" ] || [ "${1:-}" = "-u" ]; then
     echo "⚡ Uninstalling Antigravity /shake..."
 
-    # 1. Remove binary
+    # 1. Remove binary and uninstaller
     if [ -f "${INSTALL_DIR}/${BIN_NAME}" ]; then
         rm -f "${INSTALL_DIR}/${BIN_NAME}"
         echo "  ✓ Removed ${INSTALL_DIR}/${BIN_NAME}"
+    fi
+    if [ -f "${INSTALL_DIR}/shake-uninstall" ]; then
+        rm -f "${INSTALL_DIR}/shake-uninstall"
+        echo "  ✓ Removed ${INSTALL_DIR}/shake-uninstall"
     fi
 
     # 2. Remove skills
@@ -202,7 +206,92 @@ if [ ! -x "${INSTALL_DIR}/${BIN_NAME}" ]; then
     exit 1
 fi
 
-# 2. Skill & Documentation deployment (Always fresh overwrite)
+# 2. Deploy local uninstaller script alongside shake-prune
+cat << 'EOF' > "${INSTALL_DIR}/shake-uninstall"
+#!/usr/bin/env bash
+# ==============================================================================
+# ⚡ Antigravity /shake Local Uninstaller
+# ==============================================================================
+set -euo pipefail
+
+INSTALL_DIR="${HOME}/.gemini/bin"
+BIN_NAME="shake-prune"
+GLOBAL_SKILLS_DIR="${HOME}/.gemini/config/skills/shake"
+FULL_SHAKE_SKILLS_DIR="${HOME}/.gemini/config/skills/full-shake"
+HOOKS_CONFIG="${HOME}/.gemini/config/hooks.json"
+
+echo "⚡ Uninstalling Antigravity /shake..."
+
+# 1. Remove binary
+if [ -f "${INSTALL_DIR}/${BIN_NAME}" ]; then
+    rm -f "${INSTALL_DIR}/${BIN_NAME}"
+    echo "  ✓ Removed ${INSTALL_DIR}/${BIN_NAME}"
+fi
+
+# 2. Remove skills
+if [ -d "${GLOBAL_SKILLS_DIR}" ]; then
+    rm -rf "${GLOBAL_SKILLS_DIR}"
+    echo "  ✓ Removed ${GLOBAL_SKILLS_DIR}"
+fi
+if [ -d "${FULL_SHAKE_SKILLS_DIR}" ]; then
+    rm -rf "${FULL_SHAKE_SKILLS_DIR}"
+    echo "  ✓ Removed ${FULL_SHAKE_SKILLS_DIR}"
+fi
+
+# 3. Clean hooks from hooks.json
+if [ -f "${HOOKS_CONFIG}" ]; then
+    if command -v jq >/dev/null 2>&1; then
+        jq --arg bin "${INSTALL_DIR}/${BIN_NAME} --hook" '
+            if .hooks then
+                if .hooks.PreInvocation then
+                    .hooks.PreInvocation = (.hooks.PreInvocation | map(select(.command != $bin and (.command | contains("shake-prune") | not))))
+                else . end |
+                if .hooks.Stop then
+                    .hooks.Stop = (.hooks.Stop | map(select(.command != $bin and (.command | contains("shake-prune") | not))))
+                else . end
+            else . end
+        ' "${HOOKS_CONFIG}" > "${HOOKS_CONFIG}.tmp" && mv "${HOOKS_CONFIG}.tmp" "${HOOKS_CONFIG}"
+        echo "  ✓ Cleaned PreInvocation and Stop hooks from ${HOOKS_CONFIG}"
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 -c '
+import json, os
+config_path = os.path.expanduser("'"${HOOKS_CONFIG}"'")
+if os.path.exists(config_path):
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if "hooks" in data:
+            if "PreInvocation" in data["hooks"]:
+                data["hooks"]["PreInvocation"] = [
+                    h for h in data["hooks"]["PreInvocation"]
+                    if not ("shake-prune" in str(h.get("command", "")))
+                ]
+            if "Stop" in data["hooks"]:
+                data["hooks"]["Stop"] = [
+                    h for h in data["hooks"]["Stop"]
+                    if not ("shake-prune" in str(h.get("command", "")))
+                ]
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        print("  ✓ Cleaned PreInvocation and Stop hooks via python3")
+    except Exception as e:
+        print(f"  ⚠️ Could not clean hooks: {e}")
+'
+    fi
+fi
+
+# 4. Remove uninstaller self
+rm -f "${INSTALL_DIR}/shake-uninstall"
+echo "  ✓ Removed ${INSTALL_DIR}/shake-uninstall"
+
+echo ""
+echo "🎉 Antigravity /shake binaries, skills, and hooks removed."
+echo "   Retained (delete manually if desired): ~/.gemini/config/shake.toml, logs, transcript_full.jsonl archives, and .bak files."
+EOF
+chmod 755 "${INSTALL_DIR}/shake-uninstall"
+echo "  ✓ Installed local uninstaller: ${INSTALL_DIR}/shake-uninstall"
+
+# 3. Skill & Documentation deployment (Always fresh overwrite)
 mkdir -p "${GLOBAL_SKILLS_DIR}/references"
 mkdir -p "${GLOBAL_SKILLS_DIR}/bin"
 
@@ -229,8 +318,8 @@ fi
 if [ "${SKILL_COPIED}" = "0" ]; then
     echo "📋 Downloading latest SKILL.md definition from GitHub (${REF})..."
     if command -v curl >/dev/null 2>&1; then
-        curl --connect-timeout 10 -fsSL "${RAW_BASE_URL}/skills/shake/SKILL.md" -o "${GLOBAL_SKILLS_DIR}/SKILL.md" 2>/dev/null || \
-        curl --connect-timeout 10 -fsSL "${RAW_BASE_URL}/SKILL.md" -o "${GLOBAL_SKILLS_DIR}/SKILL.md" 2>/dev/null || \
+        curl --connect-timeout 10 -H "Cache-Control: no-cache" -fsSL "${RAW_BASE_URL}/skills/shake/SKILL.md" -o "${GLOBAL_SKILLS_DIR}/SKILL.md" 2>/dev/null || \
+        curl --connect-timeout 10 -H "Cache-Control: no-cache" -fsSL "${RAW_BASE_URL}/SKILL.md" -o "${GLOBAL_SKILLS_DIR}/SKILL.md" 2>/dev/null || \
         echo "⚠️ Warning: Could not fetch SKILL.md from ${RAW_BASE_URL}" >&2
     elif command -v wget >/dev/null 2>&1; then
         wget -qO "${GLOBAL_SKILLS_DIR}/SKILL.md" "${RAW_BASE_URL}/skills/shake/SKILL.md" 2>/dev/null || \
@@ -241,14 +330,14 @@ if [ "${SKILL_COPIED}" = "0" ]; then
     echo "📚 Downloading reference documentation from GitHub (${REF})..."
     for doc in antigravity_lifecycle.md how_it_works.md omp_comparison.md; do
         if command -v curl >/dev/null 2>&1; then
-            curl --connect-timeout 10 -fsSL "${RAW_BASE_URL}/references/${doc}" -o "${GLOBAL_SKILLS_DIR}/references/${doc}" 2>/dev/null || true
+            curl --connect-timeout 10 -H "Cache-Control: no-cache" -fsSL "${RAW_BASE_URL}/references/${doc}" -o "${GLOBAL_SKILLS_DIR}/references/${doc}" 2>/dev/null || true
         elif command -v wget >/dev/null 2>&1; then
             wget -qO "${GLOBAL_SKILLS_DIR}/references/${doc}" "${RAW_BASE_URL}/references/${doc}" 2>/dev/null || true
         fi
     done
 fi
 
-# 3. Configure Background Hooks in ~/.gemini/config/hooks.json
+# 4. Configure Background Hooks in ~/.gemini/config/hooks.json
 HOOK_BIN="${INSTALL_DIR}/${BIN_NAME}"
 mkdir -p "$(dirname "${HOOKS_CONFIG}")"
 
@@ -334,11 +423,13 @@ if [ "${HOOK_MERGED}" = "1" ]; then
     echo ""
     echo "🎉 Installation Complete!"
     echo "• Binary installed to: ${INSTALL_DIR}/${BIN_NAME}"
+    echo "• Local uninstaller: ${INSTALL_DIR}/shake-uninstall"
     echo "• /shake skill installed to: ${GLOBAL_SKILLS_DIR}"
     echo "• Proactive auto-compaction hook configured in: ${HOOKS_CONFIG}"
     echo ""
     echo "👉 Type /shake in any Antigravity conversation to compact context!"
-    echo "👉 To uninstall: run ./install.sh --uninstall (or re-run piped with --uninstall)"
+    echo "👉 To update: re-run the installation command anytime (overwrites all assets)"
+    echo "👉 To uninstall: run shake-uninstall (or ./install.sh --uninstall)"
 else
     echo ""
     echo "⚠️ Binary verified, but hook merge was SKIPPED (see error above)." >&2

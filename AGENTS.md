@@ -150,5 +150,5 @@ After installing, run:
 - Confirm `<Global Skill Directory>/SKILL.md` exists and is non-empty.
 
 To completely uninstall:
-- Linux/macOS: `./install.sh --uninstall`
-- Windows: `powershell -File .\install.ps1 -Uninstall`
+- Linux/macOS: `shake-uninstall` (or `~/.gemini/bin/shake-uninstall` / `./install.sh --uninstall`)
+- Windows: `shake-uninstall` (or `%USERPROFILE%\.gemini\bin\shake-uninstall.cmd` / `powershell -File .\install.ps1 -Uninstall`)
