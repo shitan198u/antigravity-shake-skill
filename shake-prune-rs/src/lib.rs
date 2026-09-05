@@ -1,7 +1,10 @@
+pub mod analysis;
 pub mod atomic;
 pub mod config;
+pub mod continuity;
 pub mod hook;
 pub mod metadata;
+pub mod mode;
 pub mod models;
 pub mod pruner;
 pub mod receipts;
@@ -19,6 +22,17 @@ pub fn format_bytes(bytes: usize) -> String {
         format!("{:.1} KB", bytes as f64 / 1024.0)
     } else {
         format!("{} B", bytes)
+    }
+}
+
+/// Format token count for human-readable terminal display (D4).
+pub fn format_prompt_tokens(tokens: usize) -> String {
+    if tokens >= 1_000_000 {
+        format!("~{:.1}M", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("~{}k", (tokens + 500) / 1000)
+    } else {
+        format!("~{}", tokens)
     }
 }
 
@@ -209,9 +223,9 @@ pub fn validate_output_path_allowlist(
             ));
         }
         let full_output_path = canonical_target.join(file_name);
-        if full_output_path.exists() && !force && !fname_str.starts_with("shake_") {
+        if full_output_path.exists() && !force && fname_str != "shake_latest.md" {
             return Err(format!(
-                "Safety Error: Output file '{}' already exists and is not a shake artifact. Use --force to overwrite.",
+                "Safety Error: Output file '{}' already exists. Use --force to overwrite.",
                 full_output_path.display()
             ));
         }

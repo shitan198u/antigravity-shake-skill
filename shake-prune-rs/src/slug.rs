@@ -41,7 +41,7 @@ pub fn generate_topic_slug(first_user_text: &str) -> String {
 }
 
 pub fn generate_suggested_filename(topic_slug: &str) -> String {
-    let timestamp = Local::now().format("%Y%m%d_%H%M").to_string();
+    let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
     format!("shake_{}_{}.md", topic_slug, timestamp)
 }
 

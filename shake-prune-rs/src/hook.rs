@@ -20,18 +20,13 @@ fn log_with_level(level: &str, msg: &str) {
         }
     }
 
-    if let Ok(mut f) = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_file)
-    {
+    if let Ok(mut f) = crate::atomic::open_user_only_append(&log_file) {
         use std::io::Write;
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let _ = writeln!(f, "[{}] [{}] {}", ts, level, msg);
-        crate::atomic::set_user_only_permissions(&log_file);
     }
 }
 
@@ -76,7 +71,15 @@ struct HookPayload {
 /// stopping as soon as the provided threshold is reached (P1-4).
 fn count_unpruned_tools(t_path: &Path, threshold: usize) -> usize {
     let file = match File::open(t_path) {
-        Ok(f) => f,
+        Ok(f) => {
+            // On Windows, reading a file locked exclusively by another process blocks.
+            // Check if the file is contended before reading.
+            if fs2::FileExt::try_lock_exclusive(&f).is_err() {
+                return 0;
+            }
+            let _ = fs2::FileExt::unlock(&f);
+            f
+        }
         Err(_) => return 0,
     };
     let reader = io::BufReader::new(file);
@@ -85,12 +88,9 @@ fn count_unpruned_tools(t_path: &Path, threshold: usize) -> usize {
     for l in reader.lines().map_while(Result::ok) {
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(&l) {
             let t = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            if matches!(
-                t,
-                "RUN_COMMAND" | "VIEW_FILE" | "SEARCH_WEB" | "GREP_SEARCH" | "CODE_ACTION"
-            ) {
+            if crate::receipts::is_tool_step_type(t) {
                 let content = val.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                if !content.starts_with("[PRUNED tool=") {
+                if !crate::receipts::is_pruned_receipt(content) {
                     count += 1;
                     if count >= threshold {
                         break;
@@ -117,11 +117,19 @@ fn is_trusted_storage_path(p: &Path) -> bool {
     }
 
     if let Ok(extra) = std::env::var("SHAKE_TRUSTED_STORAGE_ROOTS") {
-        for root in extra.split([':', ';', ',']) {
+        #[cfg(windows)]
+        const ROOT_SEPARATORS: [char; 2] = [';', ','];
+        #[cfg(not(windows))]
+        const ROOT_SEPARATORS: [char; 3] = [':', ';', ','];
+        for root in extra.split(ROOT_SEPARATORS) {
             let r = root.trim();
             if !r.is_empty() {
-                if let Ok(c) = Path::new(r).canonicalize() {
-                    trusted_roots.push(c);
+                match Path::new(r).canonicalize() {
+                    Ok(c) => trusted_roots.push(c),
+                    Err(e) => log_with_level(
+                        "WARN",
+                        &format!("Ignoring unresolvable trusted root '{}': {}", r, e),
+                    ),
                 }
             }
         }
@@ -170,7 +178,12 @@ pub fn handle_hook() {
 
 fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
     let hook_start = std::time::Instant::now();
-    let hook_deadline = std::time::Duration::from_millis(2500); // 2.5s watchdog budget (P1-2)
+    // 2.5s watchdog budget (P1-2). Test override via env (0 forces expiry).
+    let deadline_ms: u64 = std::env::var("SHAKE_HOOK_DEADLINE_MS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(2500);
+    let hook_deadline = std::time::Duration::from_millis(deadline_ms);
 
     let mut stdin_buffer = String::new();
     let _ = io::stdin().take(65_536).read_to_string(&mut stdin_buffer);
@@ -247,7 +260,7 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
 
     // P0-2: Auto-recover if a previous compaction crashed or was interrupted
     if let Some(t_path) = &resolved_transcript {
-        match crate::atomic::recover_if_interrupted(t_path) {
+        match crate::atomic::recover_if_interrupted_with_options(t_path, true) {
             Ok(Some(recovery_msg)) => {
                 log_with_level("INFO", &recovery_msg);
             }
@@ -310,6 +323,17 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
     if let (Some(t_path), Some(art_dir)) = (&resolved_transcript, &resolved_art_dir) {
         if let Ok(meta) = fs::metadata(t_path) {
             let file_size = meta.len();
+            const MAX_HOOK_TRANSCRIPT_BYTES: u64 = 50 * 1024 * 1024; // 50MB safety limit (S7)
+            if file_size > MAX_HOOK_TRANSCRIPT_BYTES {
+                log_with_level(
+                    "WARN",
+                    &format!(
+                        "Auto-shake bypassed: transcript file size ({} bytes) exceeds 50MB safety limit",
+                        file_size
+                    ),
+                );
+                return emit_anchor_or_empty(&found_anchor);
+            }
             let now_ts = Utc::now().timestamp();
 
             // Circuit breaker (P1-5): skip auto-shake while disabled.
@@ -378,18 +402,10 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
                     return emit_anchor_or_empty(&found_anchor);
                 }
 
-                let options = CompactionOptions {
-                    recent_user_turns: config.retention.recent_user_turns,
-                    recent_tools_cap: config.retention.recent_tools_cap,
-                    recent_errors_cap: config.retention.recent_errors_cap,
-                    recent_window_steps: config.retention.recent_window_steps,
-                    thought_window_turns: None,
-                    marathon_horizon: false,
-                    in_place: true,
-                    dry_run: false,
-                    redact_secrets: config.privacy.redact_secrets,
-                    non_blocking_lock: true, // Non-blocking lock: fail open on contention (P1-2)
-                };
+                let mut options = CompactionOptions::from_config(&config, true, false, true);
+                options.deadline = Some(hook_start + hook_deadline);
+                // P0-1: Adaptive deep compaction for marathon threads (>30 user turns) in auto-hook
+                options.auto_adaptive_deep = true;
 
                 let auto_start = std::time::Instant::now();
                 match run_compaction_pipeline(t_path, &options) {
@@ -408,11 +424,25 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
                                 master_archive_str,
                             ),
                         );
-                        let output_path = art_dir.join(&stats.suggested_filename);
-                        if let Ok(mut f) = File::create(&output_path) {
+                        // P0-2: Always update canonical shake_latest.md for reliable anchor links
+                        let canonical_path = art_dir.join("shake_latest.md");
+                        if let Ok(mut f) = crate::atomic::create_user_only_file(&canonical_path) {
                             let _ = f.write_all(pruned_md.as_bytes());
-                            crate::atomic::set_user_only_permissions(&output_path);
                         }
+
+                        if config.retention.artifact_retention_count > 0 {
+                            let timestamped_path = art_dir.join(&stats.suggested_filename);
+                            if let Ok(mut f) =
+                                crate::atomic::create_user_only_file(&timestamped_path)
+                            {
+                                let _ = f.write_all(pruned_md.as_bytes());
+                            }
+                        }
+                        let _ = crate::metadata::prune_old_artifacts(
+                            art_dir,
+                            config.retention.artifact_retention_count,
+                        );
+                        let output_path = canonical_path;
 
                         let trigger_label = if trigger == "size" {
                             "Auto (80k Threshold)"
@@ -437,11 +467,28 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
                             )
                         };
                         let _ = write_artifact_metadata(&output_path, &summary_text);
+
+                        let analysis_res = crate::analysis::analyze_transcript(
+                            t_path,
+                            &crate::analysis::AnalysisOptions::default(),
+                        );
+                        let continuity_card = if let Ok(ref analysis) = analysis_res {
+                            Some(crate::continuity::ContinuityCard::build(
+                                analysis,
+                                &master_archive_str,
+                                t_path,
+                                options.redact_secrets,
+                            ))
+                        } else {
+                            None
+                        };
+
                         let _ = write_active_anchor(
                             &output_path,
                             &stats,
                             trigger_label,
                             &master_archive_str,
+                            continuity_card.as_ref(),
                         );
 
                         let step_label = if stats.max_step_index > 0 {
@@ -450,41 +497,32 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
                             (stats.user_turns + stats.assistant_turns + stats.pruned_tools) as u64
                         };
 
-                        let ephemeral_msg = if trigger == "size" {
-                            format!(
-                                "[Context auto-compacted via /shake (exceeded 80k token threshold). Active state anchored in @{} (Step {}+). Treat prior raw tool stdout as archived.]",
-                                output_path.display(),
-                                step_label
+                        let trigger_phrase = if trigger == "size" {
+                            "exceeded 80k token threshold"
+                        } else {
+                            "unpruned tool burst >= 20"
+                        };
+
+                        let ephemeral_msg = if let Some(ref card) = continuity_card {
+                            card.to_ephemeral_notice(
+                                trigger_phrase,
+                                &output_path.to_string_lossy(),
+                                step_label,
                             )
                         } else {
                             format!(
-                                "[Context auto-compacted via /shake (unpruned tool burst >= 20). Active state anchored in @{} (Step {}+). Treat prior raw tool stdout as archived.]",
+                                "[Context auto-compacted via /shake ({}). Active state anchored in @{} (Step {}+). Treat prior raw tool stdout as archived.]",
+                                trigger_phrase,
                                 output_path.display(),
                                 step_label
                             )
                         };
 
-                        // Mark anchor as consumed immediately since we inject the notice now (P0-5)
                         let anchor_path = art_dir.join("active_shake_anchor.json");
-                        if let Ok(content) = fs::read_to_string(&anchor_path) {
-                            if let Ok(mut json_val) =
-                                serde_json::from_str::<serde_json::Value>(&content)
-                            {
-                                if let Some(obj) = json_val.as_object_mut() {
-                                    obj.insert("active".to_string(), json!(false));
-                                    obj.insert("injected".to_string(), json!(true));
-                                    obj.insert(
-                                        "injected_at".to_string(),
-                                        json!(Utc::now().timestamp()),
-                                    );
-                                    if let Ok(updated) = serde_json::to_string_pretty(&json_val) {
-                                        let _ = fs::write(&anchor_path, updated);
-                                    }
-                                }
-                            }
-                        }
 
                         if is_stop_event {
+                            // On Stop event, keep anchor active and injected:false so the next
+                            // user message (PreInvocation) will emit the continuity anchor notice (A1).
                             println!("{{}}");
                             return Ok(());
                         }
@@ -498,6 +536,9 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
                         });
 
                         println!("{}", serde_json::to_string(&response)?);
+
+                        // Mark anchor as consumed after successful emission, preserving 0600 permissions (B3, S2, D7)
+                        let _ = crate::metadata::consume_anchor(&anchor_path);
                         return Ok(());
                     }
                     Err(e) => {
@@ -572,24 +613,19 @@ fn emit_anchor_or_empty(
                 _ => "recent".to_string(),
             };
 
-            let ephemeral_msg = format!(
-                "[Context compacted via /shake. Active state anchored in @{} (Step {}+). Treat prior raw tool stdout as archived.]",
-                shaken_file, anchored_step
-            );
-
-            // Mark anchor as consumed so subsequent turns do not repeat the injection notice (P0-5)
-            if let Ok(content) = fs::read_to_string(anchor_path) {
-                if let Ok(mut json_val) = serde_json::from_str::<serde_json::Value>(&content) {
-                    if let Some(obj) = json_val.as_object_mut() {
-                        obj.insert("active".to_string(), json!(false));
-                        obj.insert("injected".to_string(), json!(true));
-                        obj.insert("injected_at".to_string(), json!(now_ts));
-                        if let Ok(updated) = serde_json::to_string_pretty(&json_val) {
-                            let _ = fs::write(anchor_path, updated);
-                        }
-                    }
-                }
-            }
+            let ephemeral_msg = if let Some(card) = &anchor.continuity {
+                let step_num = match &anchor.anchored_at_step {
+                    Some(serde_json::Value::Number(n)) => n.as_u64().unwrap_or(1),
+                    Some(serde_json::Value::String(s)) => s.parse::<u64>().unwrap_or(1),
+                    _ => 1,
+                };
+                card.to_ephemeral_notice("Context compacted via /shake", &shaken_file, step_num)
+            } else {
+                format!(
+                    "[Context compacted via /shake. Active state anchored in @{} (Step {}+). Treat prior raw tool stdout as archived.]",
+                    shaken_file, anchored_step
+                )
+            };
 
             let response = json!({
                 "injectSteps": [
@@ -600,6 +636,9 @@ fn emit_anchor_or_empty(
             });
 
             println!("{}", serde_json::to_string(&response)?);
+
+            // Mark anchor as consumed after successful emission, preserving 0600 permissions (B3, S2, D7, B12c)
+            let _ = crate::metadata::consume_anchor(anchor_path);
         }
         _ => {
             println!("{{}}");

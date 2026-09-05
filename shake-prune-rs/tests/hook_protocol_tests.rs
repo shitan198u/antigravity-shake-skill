@@ -452,4 +452,163 @@ fn test_hook_stop_event_compacts_in_background_silently() {
         anchor_file.exists(),
         "Anchor file must be created by Stop hook"
     );
+    let anchor_data: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&anchor_file).unwrap()).unwrap();
+    assert_eq!(
+        anchor_data.get("active").and_then(|v| v.as_bool()),
+        Some(true),
+        "Anchor must remain active after Stop event so PreInvocation can inject it"
+    );
+    assert_eq!(
+        anchor_data.get("injected").and_then(|v| v.as_bool()),
+        Some(false),
+        "Anchor must NOT be marked injected during Stop event"
+    );
+}
+
+/// P0: Lock contention must fail open with exit 0 + {} and leave transcript intact.
+#[test]
+fn test_hook_lock_contention_fails_open() {
+    use fs2::FileExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let home = fake_home(&tmp);
+    let transcript = trusted_transcript_path(&home, "conv_lock_contention");
+    TranscriptBuilder::new()
+        .user("Contended task")
+        .tool_output("RUN_COMMAND", &"x".repeat(300_000), 0)
+        .assistant("done")
+        .write(&transcript);
+    let before = std::fs::read(&transcript).unwrap();
+    // Hold the exclusive lock for the duration of the hook run.
+    let _guard = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&transcript)
+        .unwrap();
+    _guard.lock_exclusive().unwrap();
+    let payload = serde_json::json!({ "transcriptPath": transcript.to_string_lossy() });
+    let mut child = Command::new(bin())
+        .arg("--hook")
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "contended hook must exit 0");
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "{}");
+    drop(_guard);
+    let after = std::fs::read(&transcript).unwrap();
+    assert_eq!(before, after, "contended hook must not modify transcript");
+}
+
+/// P0: Expired watchdog budget must fail open with exit 0 + {}.
+#[test]
+fn test_hook_watchdog_expiry_fails_open() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = fake_home(&tmp);
+    let transcript = trusted_transcript_path(&home, "conv_watchdog");
+    TranscriptBuilder::new()
+        .user("Watchdog task")
+        .tool_output("RUN_COMMAND", &"x".repeat(300_000), 0)
+        .assistant("done")
+        .write(&transcript);
+    let payload = serde_json::json!({ "transcriptPath": transcript.to_string_lossy() });
+    let mut child = Command::new(bin())
+        .arg("--hook")
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("SHAKE_HOOK_DEADLINE_MS", "0")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "watchdog-expired hook must exit 0");
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "{}");
+}
+
+/// P0-1 / P0-2: Auto-hook on marathon session (>30 user turns) applies deep compaction
+/// and updates canonical shake_latest.md.
+#[test]
+fn test_hook_adaptive_deep_mode_past_30_turns() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = fake_home(&tmp);
+    let transcript = trusted_transcript_path(&home, "conv_hook_deep");
+
+    // Build 35 user turns to cross deep_after_user_turns (30)
+    let mut builder = TranscriptBuilder::new();
+    for i in 1..=35 {
+        builder = builder
+            .user(&format!("User request {}", i))
+            .tool_output("RUN_COMMAND", &format!("tool output turn {}", i), 0)
+            .assistant_with_thinking(
+                &format!("Assistant reply turn {}", i),
+                &format!("Scratchpad thinking turn {}", i),
+            );
+    }
+    builder.write(&transcript);
+
+    let art_dir = transcript.parent().unwrap().parent().unwrap();
+    let payload = serde_json::json!({
+        "transcriptPath": transcript.to_string_lossy(),
+        "artifactDirectoryPath": art_dir.to_string_lossy(),
+        "invocationNum": 1
+    });
+
+    let mut child = Command::new(bin())
+        .arg("--hook")
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+
+    // Canonical shake_latest.md must exist (P0-2)
+    let canonical = art_dir.join("shake_latest.md");
+    assert!(
+        canonical.exists(),
+        "Canonical shake_latest.md must be created by auto-hook"
+    );
+    let content = std::fs::read_to_string(&canonical).unwrap();
+    // In deep mode on marathon sessions, Milestone Horizon note or deep compaction note must be present (P0-1)
+    assert!(
+        content.contains("Marathon Reset") || content.contains("Deep Compaction"),
+        "Auto-hook must apply deep compaction on marathon threads (>30 user turns)"
+    );
+
+    // Active anchor must reference shake_latest.md (P0-2)
+    let anchor_path = art_dir.join("active_shake_anchor.json");
+    assert!(anchor_path.exists());
+    let anchor_json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&anchor_path).unwrap()).unwrap();
+    assert!(
+        anchor_json["shaken_file"]
+            .as_str()
+            .unwrap()
+            .ends_with("shake_latest.md"),
+        "Anchor shaken_file must point to canonical shake_latest.md"
+    );
 }

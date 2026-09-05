@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-#  ⚡ Antigravity /shake & /full-shake Multi-Platform Installer & Uninstaller
+#  ⚡ Antigravity /shake Context Compactor & Utility Suite Installer
 # ==============================================================================
 set -euo pipefail
 
@@ -16,7 +16,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # UNINSTALL MODE
 # ==============================================================================
 if [ "${1:-}" = "--uninstall" ] || [ "${1:-}" = "-u" ]; then
-    echo "⚡ Uninstalling Antigravity /shake & /full-shake..."
+    echo "⚡ Uninstalling Antigravity /shake..."
 
     # 1. Remove binary
     if [ -f "${INSTALL_DIR}/${BIN_NAME}" ]; then
@@ -77,14 +77,15 @@ if os.path.exists(config_path):
     fi
 
     echo ""
-    echo "🎉 Antigravity /shake has been completely uninstalled."
+    echo "🎉 Antigravity /shake binaries, skills, and hooks removed."
+    echo "   Retained (delete manually if desired): ~/.gemini/config/shake.toml, logs, transcript_full.jsonl archives, and .bak files."
     exit 0
 fi
 
 # ==============================================================================
 # INSTALL MODE
 # ==============================================================================
-echo "⚡ Installing Antigravity /shake & /full-shake Context Compactor..."
+echo "⚡ Installing Antigravity /shake Context Compactor..."
 
 # Ensure secure installation directory with 0700 permissions
 mkdir -p "${INSTALL_DIR}"
@@ -127,7 +128,7 @@ elif command -v cargo >/dev/null 2>&1 && [ -f "${SCRIPT_DIR}/shake-prune-rs/Carg
     chmod 755 "${INSTALL_DIR}/${BIN_NAME}"
 else
     # Determine release URL (pinned tag via SHAKE_VERSION; explicit "latest" opts into floating)
-    SHAKE_VERSION="${SHAKE_VERSION:-v0.1.10}"
+    SHAKE_VERSION="${SHAKE_VERSION:-v0.2.0}"
     if [ "${SHAKE_VERSION}" = "latest" ]; then
         BASE_RELEASE_URL="https://github.com/${REPO}/releases/latest/download"
     else
@@ -184,10 +185,9 @@ if [ ! -x "${INSTALL_DIR}/${BIN_NAME}" ]; then
     exit 1
 fi
 
-# Install Global Skills
+# Install Global Skill
 mkdir -p "${GLOBAL_SKILLS_DIR}/references"
 mkdir -p "${GLOBAL_SKILLS_DIR}/bin"
-mkdir -p "${FULL_SHAKE_SKILLS_DIR}"
 
 # Provide convenient skill-local symlink or copy to ensure legacy relative references resolve
 cp "${INSTALL_DIR}/${BIN_NAME}" "${GLOBAL_SKILLS_DIR}/bin/${BIN_NAME}"
@@ -197,21 +197,26 @@ if [ -f "${SCRIPT_DIR}/skills/shake/SKILL.md" ]; then
     cp "${SCRIPT_DIR}/skills/shake/SKILL.md" "${GLOBAL_SKILLS_DIR}/SKILL.md"
 elif [ -f "${SCRIPT_DIR}/SKILL.md" ]; then
     cp "${SCRIPT_DIR}/SKILL.md" "${GLOBAL_SKILLS_DIR}/SKILL.md"
+else
+    echo "⚠️ Warning: No SKILL.md found in ${SCRIPT_DIR}/skills/shake or ${SCRIPT_DIR}; skill text skipped." >&2
 fi
 if [ -d "${SCRIPT_DIR}/references" ]; then
     cp -r "${SCRIPT_DIR}/references/"* "${GLOBAL_SKILLS_DIR}/references/" 2>/dev/null || true
-fi
-if [ -f "${SCRIPT_DIR}/skills/full-shake/SKILL.md" ]; then
-    cp "${SCRIPT_DIR}/skills/full-shake/SKILL.md" "${FULL_SHAKE_SKILLS_DIR}/SKILL.md"
+else
+    echo "⚠️ Warning: No references/ directory in ${SCRIPT_DIR}; references skipped." >&2
 fi
 
-# Configure Background PreInvocation Hook in ~/.gemini/config/hooks.json
+# Configure Background PreInvocation + Stop hooks in ~/.gemini/config/hooks.json
 HOOK_BIN="${INSTALL_DIR}/${BIN_NAME}"
 mkdir -p "$(dirname "${HOOKS_CONFIG}")"
 
 echo "⚙️ Configuring background PreInvocation hook (preserving existing user hooks)..."
 if [ -f "${HOOKS_CONFIG}" ]; then
-    cp "${HOOKS_CONFIG}" "${HOOKS_CONFIG}.bak" 2>/dev/null || true
+    HOOK_BACKUP="${HOOKS_CONFIG}.bak"
+    if [ -f "${HOOK_BACKUP}" ]; then
+        HOOK_BACKUP="${HOOKS_CONFIG}.bak.$(date +%s)"
+    fi
+    cp "${HOOKS_CONFIG}" "${HOOK_BACKUP}" 2>/dev/null || true
     EXISTING_CONTENT="$(cat "${HOOKS_CONFIG}")"
     if [ -z "${EXISTING_CONTENT// }" ]; then
         EXISTING_CONTENT="{}"
@@ -220,16 +225,18 @@ else
     EXISTING_CONTENT="{}"
 fi
 
+HOOK_MERGED=1
+
 if command -v jq >/dev/null 2>&1; then
     echo "${EXISTING_CONTENT}" | jq --arg bin "${HOOK_BIN} --hook" '
         del(."shake-anchor") |
         .hooks = (.hooks // {}) |
         .hooks.PreInvocation = (
-            ((.hooks.PreInvocation // []) | map(select((.command != $bin) and (.command | contains("shake-prune") | not)))) +
+            (((.hooks.PreInvocation // []) | if type == "array" then . else [] end) | map(select((.command != $bin) and (.command | contains("shake-prune") | not)))) +
             [{"command": $bin}]
         ) |
         .hooks.Stop = (
-            ((.hooks.Stop // []) | map(select((.command != $bin) and (.command | contains("shake-prune") | not)))) +
+            (((.hooks.Stop // []) | if type == "array" then . else [] end) | map(select((.command != $bin) and (.command | contains("shake-prune") | not)))) +
             [{"command": $bin}]
         )
     ' > "${HOOKS_CONFIG}.tmp"
@@ -271,14 +278,28 @@ with open(config_path, "w", encoding="utf-8") as f:
     json.dump(data, f, indent=2)
 '
 else
-    echo "⚠️ Warning: Neither jq nor python3 was found. Please ensure ${HOOKS_CONFIG} contains PreInvocation hook."
+    echo "❌ Error: Neither jq nor python3 was found; cannot merge hooks into ${HOOKS_CONFIG}." >&2
+    echo "   Install jq or python3, then re-run ./install.sh (your existing hooks were backed up, nothing was removed)." >&2
+    HOOK_MERGED=0
 fi
 
 echo ""
-echo "🎉 Installation Complete!"
-echo "• Binary installed to: ${INSTALL_DIR}/${BIN_NAME}"
-echo "• /shake skill installed to: ${GLOBAL_SKILLS_DIR}"
-echo "• /full-shake skill installed to: ${FULL_SHAKE_SKILLS_DIR}"
-echo "• Proactive 80k token auto-compaction hook configured in: ${HOOKS_CONFIG}"
-echo ""
-echo "👉 Type /shake or /full-shake in any Antigravity conversation to compact context!"
+echo "🔍 Verifying installation..."
+"${INSTALL_DIR}/${BIN_NAME}" --version || { echo "❌ Error: installed binary failed --version check." >&2; exit 1; }
+"${INSTALL_DIR}/${BIN_NAME}" doctor --json >/dev/null || { echo "❌ Error: installed binary failed 'doctor --json' check." >&2; exit 1; }
+
+if [ "${HOOK_MERGED}" = "1" ]; then
+    echo ""
+    echo "🎉 Installation Complete!"
+    echo "• Binary installed to: ${INSTALL_DIR}/${BIN_NAME}"
+    echo "• /shake skill installed to: ${GLOBAL_SKILLS_DIR}"
+    echo "• Proactive auto-compaction hook configured in: ${HOOKS_CONFIG}"
+    echo ""
+    echo "👉 Type /shake in any Antigravity conversation to compact context!"
+else
+    echo ""
+    echo "⚠️ Binary verified, but hook merge was SKIPPED (see error above)." >&2
+    echo "• Binary installed to: ${INSTALL_DIR}/${BIN_NAME}"
+    echo "• /shake skill installed to: ${GLOBAL_SKILLS_DIR}"
+    exit 1
+fi

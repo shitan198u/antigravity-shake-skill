@@ -84,25 +84,23 @@ The IDE's file descriptor remains valid, and the context window is physically co
 
 ---
 
-## 3. The PreInvocation Lifecycle Hook
+## 3. The PreInvocation + Stop Lifecycle Hooks
 
 Antigravity provides lifecycle hooks defined in `~/.gemini/config/hooks.json`.
+The installer registers the absolute-path binary for both events:
 
 ```json
 {
   "hooks": {
-    "PreInvocation": [
-      {
-        "command": "shake-prune --hook"
-      }
-    ]
+    "PreInvocation": [{ "command": "<HOME>/.gemini/bin/shake-prune --hook" }],
+    "Stop": [{ "command": "<HOME>/.gemini/bin/shake-prune --hook" }]
   }
 }
 ```
 
 On every prompt submission:
 1. The IDE executes `shake-prune --hook`, piping session metadata (conversation ID, transcript path, artifact directory) via `stdin`.
-2. The hook checks `transcript.jsonl` size. If $\ge 264\text{ KB}$ (~80k tokens), it triggers auto-compaction.
+2. The hook evaluates two triggers: size $\ge 264\text{ KB}$ (~80k tokens) OR $\ge 20$ unpruned tool outputs (burst, even within one turn). Triggers are gated by a 25 KB growth delta, 180 s cooldown, and a circuit breaker — Stop events compact silently (`{}`) by design.
 3. If compacted, it injects an ephemeral anchor message into the prompt stream:
    `[Context compacted via /shake. Active state anchored in @... (Step N+). Treat prior raw tool stdout as archived.]`
 4. The hook runs with `panic::catch_unwind` protection—if any error occurs, it emits `{}` and exits `0` immediately (fail-open guarantee).

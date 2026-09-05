@@ -1,10 +1,10 @@
 use crate::atomic::{
-    commit_staged_in_place_with_snapshot, recover_if_interrupted, set_user_only_permissions,
-    stage_compacted_output, SnapshotFingerprint,
+    commit_staged_in_place_with_snapshot, create_user_only_file, recover_if_interrupted,
+    set_user_only_permissions, stage_compacted_output, SnapshotFingerprint,
 };
 use crate::metadata::load_or_discover_history;
 use crate::models::{CompactionEvent, PruningStats};
-use crate::receipts::count_warnings;
+use crate::receipts::{build_receipt, count_warnings, render_receipt_card};
 use crate::slug::{extract_conversation_id, generate_suggested_filename, generate_topic_slug};
 use fs2::FileExt;
 use serde_json::Value;
@@ -34,11 +34,46 @@ pub struct CompactionOptions {
     pub recent_errors_cap: usize, // Maximum recent tool calls to preserve raw errors (default: 30)
     pub recent_window_steps: usize, // Fallback step-level minimum (default: 6)
     pub thought_window_turns: Option<usize>, // Thought window (e.g. Some(20) for /full-shake)
-    pub marathon_horizon: bool,   // Enable Milestone Horizon on marathon threads (>30 user turns)
+    pub marathon_horizon: bool,   // Enable Milestone Horizon on marathon threads
+    pub deep_after_user_turns: usize, // Threshold to trigger Milestone Horizon (default: 30) (B6)
     pub in_place: bool,
     pub dry_run: bool,
     pub redact_secrets: bool, // Redact API keys, tokens, and Authorization headers (P1-3)
     pub non_blocking_lock: bool, // Fail open immediately on lock contention (P1-2)
+    pub deadline: Option<std::time::Instant>, // Watchdog timeout budget (B11)
+    pub auto_adaptive_deep: bool,
+}
+
+impl CompactionOptions {
+    pub fn from_config(
+        config: &crate::config::ShakeConfig,
+        in_place: bool,
+        dry_run: bool,
+        non_blocking_lock: bool,
+    ) -> Self {
+        Self {
+            recent_user_turns: config.retention.recent_user_turns,
+            recent_tools_cap: config.retention.recent_tools_cap,
+            recent_errors_cap: config.retention.recent_errors_cap,
+            recent_window_steps: config.retention.recent_window_steps,
+            thought_window_turns: None,
+            marathon_horizon: false,
+            deep_after_user_turns: config.deep_after_user_turns,
+            in_place,
+            dry_run,
+            redact_secrets: config.privacy.is_redact_secrets(),
+            non_blocking_lock,
+            deadline: None,
+            auto_adaptive_deep: false,
+        }
+    }
+
+    pub fn apply_deep(&mut self, default_thought_window: usize) {
+        self.marathon_horizon = true;
+        if self.thought_window_turns.is_none() {
+            self.thought_window_turns = Some(default_thought_window);
+        }
+    }
 }
 
 impl Default for CompactionOptions {
@@ -50,10 +85,13 @@ impl Default for CompactionOptions {
             recent_window_steps: 6,
             thought_window_turns: None,
             marathon_horizon: false,
+            deep_after_user_turns: 30,
             in_place: true,
             dry_run: false,
             redact_secrets: false,
             non_blocking_lock: false,
+            deadline: None,
+            auto_adaptive_deep: false,
         }
     }
 }
@@ -171,24 +209,7 @@ pub fn extract_short_target(name: &str, args_map: &serde_json::Map<String, Value
     }
 }
 
-pub fn parse_receipt_info(receipt: &str) -> (Option<usize>, Option<usize>, Option<String>) {
-    let mut lines_count = None;
-    let mut line_no = None;
-    let mut archive_path = None;
-    for token in receipt
-        .trim_matches(|c| c == '[' || c == ']')
-        .split_whitespace()
-    {
-        if let Some(val) = token.strip_prefix("lines=") {
-            lines_count = val.parse::<usize>().ok();
-        } else if let Some(val) = token.strip_prefix("line=") {
-            line_no = val.parse::<usize>().ok();
-        } else if let Some(val) = token.strip_prefix("archive=") {
-            archive_path = Some(val.to_string());
-        }
-    }
-    (lines_count, line_no, archive_path)
-}
+pub use crate::receipts::parse_receipt_info;
 
 pub fn flush_pending_tools(pending: &mut Vec<PendingToolCall>, blocks: &mut Vec<String>) {
     for tc in pending.drain(..) {
@@ -274,8 +295,13 @@ static RE_AWS: OnceLock<regex::Regex> = OnceLock::new();
 static RE_BEARER: OnceLock<regex::Regex> = OnceLock::new();
 static RE_AUTH: OnceLock<regex::Regex> = OnceLock::new();
 static RE_KEY: OnceLock<regex::Regex> = OnceLock::new();
+static RE_OAI: OnceLock<regex::Regex> = OnceLock::new();
+static RE_GOOGLE: OnceLock<regex::Regex> = OnceLock::new();
+static RE_SLACK: OnceLock<regex::Regex> = OnceLock::new();
+static RE_GENERIC_KEY: OnceLock<regex::Regex> = OnceLock::new();
 
-/// Redacts sensitive credentials (GitHub tokens, AWS keys, Bearer tokens, private keys) from text (P1-3).
+/// Redacts sensitive credentials (GitHub tokens, AWS keys, OpenAI keys, Google keys,
+/// Slack tokens, Bearer tokens, private keys, generic API assignments) from text (P1-3, P0-6).
 pub fn redact_secrets(text: &str) -> String {
     let pat_gh = RE_GH
         .get_or_init(|| regex::Regex::new(r"(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36}").unwrap());
@@ -286,10 +312,23 @@ pub fn redact_secrets(text: &str) -> String {
     let pat_bearer = RE_BEARER
         .get_or_init(|| regex::Regex::new(r"(?i)\bBearer\s+[A-Za-z0-9_\-\.]{20,}").unwrap());
     let pat_auth =
-        RE_AUTH.get_or_init(|| regex::Regex::new(r"(?i)Authorization:\s*[^\r\n]+").unwrap());
+        RE_AUTH.get_or_init(|| regex::Regex::new(r#"(?i)Authorization:\s*[^"\r\n]+"#).unwrap());
     let pat_key = RE_KEY.get_or_init(|| {
         regex::Regex::new(
             r"-----BEGIN (?:[A-Z ]+) PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z ]+) PRIVATE KEY-----",
+        )
+        .unwrap()
+    });
+    let pat_oai = RE_OAI.get_or_init(|| {
+        regex::Regex::new(r"\bsk-(?:live|proj|test)?[A-Za-z0-9_-]{20,}\b").unwrap()
+    });
+    let pat_google =
+        RE_GOOGLE.get_or_init(|| regex::Regex::new(r"\bAIza[0-9A-Za-z\-_]{35}\b").unwrap());
+    let pat_slack =
+        RE_SLACK.get_or_init(|| regex::Regex::new(r"\bxox[baprs]-[0-9A-Za-z]{10,48}\b").unwrap());
+    let pat_generic = RE_GENERIC_KEY.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?i)\b(api_key|apikey|secret_key|client_secret)(\s*[:=]\s*["']?)[A-Za-z0-9_\-\.]{16,}(["']?)"#,
         )
         .unwrap()
     });
@@ -300,7 +339,11 @@ pub fn redact_secrets(text: &str) -> String {
     let s4 = pat_bearer.replace_all(&s3, "Bearer [REDACTED]");
     let s5 = pat_auth.replace_all(&s4, "Authorization: [REDACTED]");
     let s6 = pat_key.replace_all(&s5, "[REDACTED_PRIVATE_KEY]");
-    s6.to_string()
+    let s7 = pat_oai.replace_all(&s6, "[REDACTED_OPENAI_KEY]");
+    let s8 = pat_google.replace_all(&s7, "[REDACTED_GOOGLE_KEY]");
+    let s9 = pat_slack.replace_all(&s8, "[REDACTED_SLACK_TOKEN]");
+    let s10 = pat_generic.replace_all(&s9, "${1}${2}[REDACTED_SECRET]${3}");
+    s10.to_string()
 }
 
 /// Builds an O(1) step_index -> 1-indexed line number lookup map for `transcript_full.jsonl`.
@@ -396,8 +439,9 @@ fn store_cached_master_index(full_transcript_path: &Path, map: &HashMap<u64, usi
                     .as_bytes(),
             )
             .is_ok()
+            && tmp.persist(&cache_path).is_ok()
         {
-            let _ = tmp.persist(&cache_path);
+            set_user_only_permissions(&cache_path);
         }
     }
 }
@@ -557,11 +601,15 @@ pub fn format_history_timeline(events: &[CompactionEvent]) -> String {
             "—".to_string()
         };
         let archive_link = if !ev.backup_file.is_empty() {
-            let enc_link = format!(
-                "file://{}",
-                urlencoding::encode(&ev.backup_file).replace("%2F", "/")
-            );
-            format!("[📄 Archive #{}]({})", idx + 1, enc_link)
+            if Path::new(&ev.backup_file).exists() {
+                let enc_link = format!(
+                    "file://{}",
+                    urlencoding::encode(&ev.backup_file).replace("%2F", "/")
+                );
+                format!("[📄 Archive #{}]({})", idx + 1, enc_link)
+            } else {
+                format!("Archive #{} (purged)", idx + 1)
+            }
         } else {
             "—".to_string()
         };
@@ -594,7 +642,7 @@ pub fn format_history_timeline(events: &[CompactionEvent]) -> String {
 // file handles to the same path (avoiding Windows ERROR_LOCK_VIOLATION / os error 33).
 fn copy_from_locked_file(file: &mut File, dest_path: &Path) -> std::io::Result<u64> {
     file.seek(SeekFrom::Start(0))?;
-    let mut dest = File::create(dest_path)?;
+    let mut dest = create_user_only_file(dest_path)?;
     let bytes = std::io::copy(file, &mut dest)?;
     dest.flush()?;
     dest.sync_all()?;
@@ -605,15 +653,16 @@ fn copy_from_locked_file(file: &mut File, dest_path: &Path) -> std::io::Result<u
 /// Synchronizes the permanent master archive (`transcript_full.jsonl`) under exclusive lock
 /// before in-place pruning. Any steps present in the live transcript that are not yet recorded
 /// in the master archive are appended atomically, guaranteed with 0600 permissions and synced (P0-1).
+/// Note: The master archive intentionally retains verbatim historical data for forensic recovery
+/// and line-indexing integrity (B5, Invariant #10, how_it_works.md §10).
 fn sync_master_full_transcript(
     file: &mut File,
     full_transcript_path: &Path,
-    redact_secrets_active: bool,
 ) -> Result<HashMap<u64, usize>, Box<dyn std::error::Error>> {
     if !full_transcript_path.exists() {
         file.seek(SeekFrom::Start(0))?;
         let reader = BufReader::new(&mut *file);
-        let mut full_file = File::create(full_transcript_path)?;
+        let mut full_file = create_user_only_file(full_transcript_path)?;
         let mut seen_init: HashSet<u64> = HashSet::new();
         for line_res in reader.lines() {
             let line_str = line_res?;
@@ -627,12 +676,7 @@ fn sync_master_full_transcript(
                     }
                 }
             }
-            let line_to_write = if redact_secrets_active {
-                redact_secrets(&line_str)
-            } else {
-                line_str
-            };
-            writeln!(full_file, "{}", line_to_write)?;
+            writeln!(full_file, "{}", line_str)?;
         }
         full_file.flush()?;
         full_file.sync_all()?;
@@ -674,12 +718,7 @@ fn sync_master_full_transcript(
             }
             if let Some(step_idx) = val.get("step_index").and_then(|v| v.as_u64()) {
                 if !step_map.contains_key(&step_idx) && seen_in_active.insert(step_idx) {
-                    let line_to_record = if redact_secrets_active {
-                        redact_secrets(&line_str)
-                    } else {
-                        line_str
-                    };
-                    missing_lines.push((step_idx, line_to_record));
+                    missing_lines.push((step_idx, line_str));
                 }
             }
         }
@@ -688,10 +727,7 @@ fn sync_master_full_transcript(
     file.seek(SeekFrom::Start(0))?;
 
     if !missing_lines.is_empty() {
-        let mut full_file = File::options()
-            .read(true)
-            .append(true)
-            .open(full_transcript_path)
+        let mut full_file = crate::atomic::open_user_only_append(full_transcript_path)
             .map_err(|e| {
                 format!(
                     "Critical: Failed to open permanent master archive at {} for append: {}. Compaction aborted.",
@@ -724,14 +760,33 @@ fn sync_master_full_transcript(
     Ok(step_map)
 }
 
+#[inline]
+fn check_deadline(
+    deadline: Option<Instant>,
+    phase: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(dl) = deadline {
+        if Instant::now() > dl {
+            return Err(format!("Hook watchdog budget exceeded during {}", phase).into());
+        }
+    }
+    Ok(())
+}
+
 pub fn run_compaction_pipeline(
     transcript_path: &Path,
     options: &CompactionOptions,
 ) -> Result<(String, String, PruningStats, String), Box<dyn std::error::Error>> {
     let pipeline_start = Instant::now();
+    check_deadline(options.deadline, "pipeline initialization")?;
 
     // P0-2: Auto-recover from any previous interrupted compaction before checking existence
-    match recover_if_interrupted(transcript_path) {
+    let recovery_res = if options.non_blocking_lock {
+        crate::atomic::recover_if_interrupted_with_options(transcript_path, true)
+    } else {
+        recover_if_interrupted(transcript_path)
+    };
+    match recovery_res {
         Ok(Some(recovery_msg)) => {
             eprintln!("{}", recovery_msg);
         }
@@ -775,16 +830,14 @@ pub fn run_compaction_pipeline(
             } else {
                 file.lock_exclusive()?;
             }
+            check_deadline(options.deadline, "lock acquisition")?;
 
             // P0-3: Record snapshot fingerprint while holding exclusive lock before reading
             let snap = SnapshotFingerprint::from_file(&file)?;
 
             // P0-1: Guarantee permanent master archive synchronization under exclusive lock
-            let step_map = sync_master_full_transcript(
-                &mut file,
-                &full_transcript_path,
-                options.redact_secrets,
-            )?;
+            let step_map = sync_master_full_transcript(&mut file, &full_transcript_path)?;
+            check_deadline(options.deadline, "master archive synchronization")?;
 
             // Mandatory fail-closed crash fallback while holding the exclusive lock
             copy_from_locked_file(&mut file, &backup_latest).map_err(|e| {
@@ -849,7 +902,7 @@ pub fn run_compaction_pipeline(
         if line_str.trim().is_empty() {
             continue;
         }
-        raw_bytes += line_str.len();
+        raw_bytes += line_str.len() + 1;
         let original_line_no = line_idx + 1;
         let buf_idx = lines_buffer.len();
 
@@ -872,13 +925,19 @@ pub fn run_compaction_pipeline(
     }
 
     let total_user_turns = user_turn_positions.len();
+    check_deadline(options.deadline, "transcript read")?;
 
-    // ⚡ MILESTONE HORIZON (For Marathon Threads > 30 User Turns)
+    let mut options = options.clone();
+    if options.auto_adaptive_deep && total_user_turns > options.deep_after_user_turns {
+        options.apply_deep(20);
+    }
+
+    // ⚡ MILESTONE HORIZON (For Marathon Threads > deep_after_user_turns)
     let mut effective_lines: Vec<(usize, String)> = Vec::with_capacity(lines_buffer.len());
     let mut is_milestone_horizon_active = false;
     let mut genesis_end_idx = 0usize;
 
-    if options.marathon_horizon && total_user_turns > 30 {
+    if options.marathon_horizon && total_user_turns > options.deep_after_user_turns {
         is_milestone_horizon_active = true;
         genesis_end_idx = if user_turn_positions.len() > 1 {
             user_turn_positions[1].1
@@ -886,7 +945,10 @@ pub fn run_compaction_pipeline(
             1
         };
 
-        let horizon_turn_idx = total_user_turns.saturating_sub(25);
+        let horizon_turn_idx = total_user_turns
+            .saturating_sub(25)
+            .max(1)
+            .min(total_user_turns.saturating_sub(1));
         let horizon_start_idx = user_turn_positions[horizon_turn_idx].1;
 
         // 1. Genesis Turn 1
@@ -1013,14 +1075,19 @@ pub fn run_compaction_pipeline(
 
     let mut user_count = 0usize;
     let mut assistant_count = 0usize;
-    let mut pruned_tools_count = 0usize;
+    let mut newly_pruned_tools = 0usize;
+    let mut already_pruned_tools = 0usize;
     let mut retained_errors_count = 0usize;
     let mut retained_short_cmds = 0usize;
     let mut retained_recent_steps = 0usize;
     let mut first_user_prompt = String::new();
     let mut pending_tool_calls: Vec<PendingToolCall> = Vec::new();
 
-    for (i, (orig_line_no, line_str)) in effective_lines.into_iter().enumerate() {
+    for (i, (_orig_line_no, line_str)) in effective_lines.into_iter().enumerate() {
+        if i % 50 == 0 {
+            check_deadline(options.deadline, "compaction pipeline")?;
+        }
+
         let mut step_val: Value = match serde_json::from_str(&line_str) {
             Ok(v) => v,
             Err(_) => {
@@ -1092,20 +1159,26 @@ pub fn run_compaction_pipeline(
                 .unwrap_or(false);
 
         // Exact line number in the master archive (transcript_full.jsonl)
-        let resolved_line_no = if let Some(m) = &master_step_to_line {
-            match m.get(&step_idx).copied() {
-                Some(l) => l,
-                None if options.dry_run || !has_explicit_step_idx || is_synthetic => orig_line_no,
-                None => {
-                    return Err(format!(
-                        "Critical integrity failure: step {} cannot be resolved in master archive '{}'. Refusing to emit unresolvable receipt.",
-                        step_idx,
-                        master_archive_abs_str
-                    ).into());
+        let resolved_archive: Option<(&str, usize)> = if let Some(m) = &master_step_to_line {
+            if !has_explicit_step_idx || is_synthetic {
+                // Unindexed or synthetic records are not recorded in master archive.
+                // Omit archive= and line= to guarantee every emitted receipt pointer resolves (B4).
+                None
+            } else {
+                match m.get(&step_idx).copied() {
+                    Some(l) => Some((master_archive_abs_str.as_str(), l)),
+                    None if options.dry_run || !options.in_place => None,
+                    None => {
+                        return Err(format!(
+                            "Critical integrity failure: step {} cannot be resolved in master archive '{}'. Refusing to emit unresolvable receipt.",
+                            step_idx,
+                            master_archive_abs_str
+                        ).into());
+                    }
                 }
             }
         } else {
-            orig_line_no
+            None
         };
 
         match stype.as_str() {
@@ -1174,9 +1247,10 @@ pub fn run_compaction_pipeline(
                         assistant_text
                     };
                     if is_thought_retained && !clean_thinking.is_empty() {
+                        let safe_thinking = sanitize_markdown_snippet(&clean_thinking);
                         assistant_block.push_str(&format!(
                             "<details>\n<summary>💭 Thought Process</summary>\n\n{}\n\n</details>\n\n",
-                            clean_thinking
+                            safe_thinking
                         ));
                     }
                     if !clean_assistant.is_empty() {
@@ -1198,13 +1272,9 @@ pub fn run_compaction_pipeline(
                             .to_string();
                         if let Some(args_map) = tc.get_mut("args").and_then(|v| v.as_object_mut()) {
                             if !is_recent_tool {
-                                compact_tool_call_args(
-                                    &name,
-                                    args_map,
-                                    step_idx,
-                                    &master_archive_abs_str,
-                                    resolved_line_no,
-                                );
+                                if let Some((arch, line)) = resolved_archive {
+                                    compact_tool_call_args(&name, args_map, step_idx, arch, line);
+                                }
                             }
                             let mut arg_items = Vec::new();
                             for (k, v) in args_map.iter() {
@@ -1281,9 +1351,14 @@ pub fn run_compaction_pipeline(
                         content_str,
                         ACTIVE_TOOL_SNIPPET_CHARS,
                     ));
+                    let exit_label = match exit_code {
+                        Some(code) => format!("exit {}", code),
+                        None if is_error => "failed".to_string(),
+                        None => "exit 0".to_string(),
+                    };
                     output_blocks.push(format!(
-                        "<details>\n<summary>⚙️ <b>{}</b>{} — <b>Active Memory (exit 0)</b></summary>\n\n{}- **Output**:\n```\n{}\n```\n\n</details>\n\n",
-                        tool_name, summary_code, param_line, snippet
+                        "<details>\n<summary>⚙️ <b>{}</b>{} — <b>Active Memory ({})</b></summary>\n\n{}- **Output**:\n```\n{}\n```\n\n</details>\n\n",
+                        tool_name, summary_code, exit_label, param_line, snippet
                     ));
                 } else if is_recent_error {
                     retained_errors_count += 1;
@@ -1300,46 +1375,34 @@ pub fn run_compaction_pipeline(
                         "<details open>\n<summary>⚠️ <b>{} Failed</b>{} — <b>{}</b></summary>\n\n{}- **Error Trace**:\n```\n{}\n```\n\n</details>\n\n",
                         tool_name, summary_code, exit_label, param_line, snippet
                     ));
-                } else if stype == "RUN_COMMAND" {
-                    if content_str.starts_with("[PRUNED") {
-                        pruned_tools_count += 1;
-                        let (lc, ln, ap) = parse_receipt_info(content_str);
-                        let lines_label = match lc {
-                            Some(c) => format!("{} lines archived", c),
-                            None => "Archived receipt".to_string(),
-                        };
-                        let archive_link = match (ap.as_deref(), ln) {
-                            (Some(arch), Some(l)) => format!(
-                                "- **Master Archive**: [View line {} in transcript_full.jsonl](file://{}#L{})\n",
-                                l, arch, l
-                            ),
-                            _ => String::new(),
-                        };
-                        output_blocks.push(format!(
-                            "<details>\n<summary>⚙️ <b>{}</b>{} — <i>{}</i></summary>\n\n{}- **Archive Receipt**: `{}`\n{}\n</details>\n\n",
-                            tool_name, summary_code, lines_label, param_line, content_str, archive_link
-                        ));
-                    } else if !is_error
-                        && content_str.trim().chars().count() < SHORT_CMD_RETENTION_CHARS
-                    {
-                        retained_short_cmds += 1;
-                        let safe_cmd = sanitize_markdown_snippet(content_str.trim());
-                        output_blocks.push(format!(
-                            "<details>\n<summary>⚙️ <b>{}</b>{} — <i>exit 0</i></summary>\n\n{}- **Command Output**:\n```\n{}\n```\n\n</details>\n\n",
-                            tool_name, summary_code, param_line, safe_cmd
-                        ));
-                    } else {
-                        let line_count = content_str.lines().count();
-                        pruned_tools_count += 1;
-
-                        // Check for warnings in historical output to surface in receipt
+                } else if content_str.starts_with("[PRUNED") {
+                    already_pruned_tools += 1;
+                    output_blocks.push(render_receipt_card(
+                        &tool_name,
+                        &summary_code,
+                        &param_line,
+                        content_str,
+                    ));
+                } else if stype == "RUN_COMMAND"
+                    && !is_error
+                    && content_str.trim().chars().count() < SHORT_CMD_RETENTION_CHARS
+                {
+                    retained_short_cmds += 1;
+                    let safe_cmd = sanitize_markdown_snippet(content_str.trim());
+                    output_blocks.push(format!(
+                        "<details>\n<summary>⚙️ <b>{}</b>{} — <i>exit 0</i></summary>\n\n{}- **Command Output**:\n```\n{}\n```\n\n</details>\n\n",
+                        tool_name, summary_code, param_line, safe_cmd
+                    ));
+                } else {
+                    newly_pruned_tools += 1;
+                    let line_count = content_str.lines().count();
+                    let (lines_opt, extra_tag) = if stype == "RUN_COMMAND" {
                         let warn_count = count_warnings(content_str);
                         let warn_tag = if warn_count > 0 {
                             format!(" warnings={}", warn_count)
                         } else {
                             String::new()
                         };
-
                         let exit_str = if let Some(code) = exit_code {
                             code.to_string()
                         } else if is_error {
@@ -1347,71 +1410,29 @@ pub fn run_compaction_pipeline(
                         } else {
                             "0".to_string()
                         };
-
-                        let receipt = format!(
-                            "[PRUNED tool=RUN_COMMAND step={} exit={}{} lines={} archive={} line={}]",
-                            step_idx, exit_str, warn_tag, line_count, master_archive_abs_str, resolved_line_no
-                        );
-                        step_val["content"] = serde_json::json!(receipt);
-                        let archive_link = format!(
-                            "- **Master Archive**: [View line {} in transcript_full.jsonl](file://{}#L{})\n",
-                            resolved_line_no, master_archive_abs_str, resolved_line_no
-                        );
-                        output_blocks.push(format!(
-                            "<details>\n<summary>⚙️ <b>{}</b>{} — <i>{} lines archived</i></summary>\n\n{}- **Archive Receipt**: `{}`\n{}\n</details>\n\n",
-                            tool_name, summary_code, line_count, param_line, receipt, archive_link
-                        ));
-                    }
-                } else if stype == "VIEW_FILE" {
-                    if content_str.starts_with("[PRUNED") {
-                        pruned_tools_count += 1;
-                        let (lc, ln, ap) = parse_receipt_info(content_str);
-                        let lines_label = match lc {
-                            Some(c) => format!("{} lines archived", c),
-                            None => "Archived receipt".to_string(),
-                        };
-                        let archive_link = match (ap.as_deref(), ln) {
-                            (Some(arch), Some(l)) => format!(
-                                "- **Master Archive**: [View line {} in transcript_full.jsonl](file://{}#L{})\n",
-                                l, arch, l
-                            ),
-                            _ => String::new(),
-                        };
-                        output_blocks.push(format!(
-                            "<details>\n<summary>⚙️ <b>{}</b>{} — <i>{}</i></summary>\n\n{}- **Archive Receipt**: `{}`\n{}\n</details>\n\n",
-                            tool_name, summary_code, lines_label, param_line, content_str, archive_link
-                        ));
+                        (
+                            Some(line_count),
+                            Some(format!("exit={}{}", exit_str, warn_tag)),
+                        )
+                    } else if stype == "VIEW_FILE" {
+                        (Some(line_count), None)
                     } else {
-                        let line_count = content_str.lines().count();
-                        pruned_tools_count += 1;
-                        let receipt = format!(
-                            "[PRUNED tool=VIEW_FILE step={} lines={} archive={} line={}]",
-                            step_idx, line_count, master_archive_abs_str, resolved_line_no
-                        );
-                        step_val["content"] = serde_json::json!(receipt);
-                        let archive_link = format!(
-                            "- **Master Archive**: [View line {} in transcript_full.jsonl](file://{}#L{})\n",
-                            resolved_line_no, master_archive_abs_str, resolved_line_no
-                        );
-                        output_blocks.push(format!(
-                            "<details>\n<summary>⚙️ <b>{}</b>{} — <i>{} lines archived</i></summary>\n\n{}- **Archive Receipt**: `{}`\n{}\n</details>\n\n",
-                            tool_name, summary_code, line_count, param_line, receipt, archive_link
-                        ));
-                    }
-                } else {
-                    pruned_tools_count += 1;
-                    let receipt = format!(
-                        "[PRUNED tool={} step={} archive={} line={}]",
-                        stype, step_idx, master_archive_abs_str, resolved_line_no
+                        (None, None)
+                    };
+
+                    let receipt = build_receipt(
+                        &stype,
+                        Some(step_idx),
+                        resolved_archive,
+                        lines_opt,
+                        extra_tag.as_deref(),
                     );
                     step_val["content"] = serde_json::json!(receipt);
-                    let archive_link = format!(
-                        "- **Master Archive**: [View line {} in transcript_full.jsonl](file://{}#L{})\n",
-                        resolved_line_no, master_archive_abs_str, resolved_line_no
-                    );
-                    output_blocks.push(format!(
-                        "<details>\n<summary>⚙️ <b>{}</b>{} — <i>Archived receipt</i></summary>\n\n{}- **Archive Receipt**: `{}`\n{}\n</details>\n\n",
-                        tool_name, summary_code, param_line, receipt, archive_link
+                    output_blocks.push(render_receipt_card(
+                        &tool_name,
+                        &summary_code,
+                        &param_line,
+                        &receipt,
                     ));
                 }
             }
@@ -1435,6 +1456,7 @@ pub fn run_compaction_pipeline(
         // P0-3 near-atomic path: stage + verify BEFORE touching the original
         // inode, then commit in place with verified rollback (P0-1 / P0-2).
         // Any error below leaves `transcript.jsonl.bak` intact for restore.
+        check_deadline(options.deadline, "pre-commit verification")?;
         let staged = stage_compacted_output(&abs_target, &compacted_output)?;
         match commit_staged_in_place_with_snapshot(
             &mut file,
@@ -1476,6 +1498,8 @@ pub fn run_compaction_pipeline(
         "> - **Compaction Mode**: 🟢 Standard Zero-Loss Compaction (100% thoughts retained).\n"
             .to_string()
     };
+
+    let pruned_tools_count = newly_pruned_tools + already_pruned_tools;
 
     let header = format!(
         "# Shaken & Pruned History: {}\n\n\
@@ -1531,7 +1555,7 @@ pub fn run_compaction_pipeline(
     };
 
     let compacted_jsonl_bytes = compacted_output.len();
-    let this_run_savings_pct = if raw_bytes > 0 {
+    let this_run_savings_pct = if raw_bytes > 0 && compacted_jsonl_bytes < raw_bytes {
         (1.0 - (compacted_jsonl_bytes as f64 / raw_bytes as f64)) * 100.0
     } else {
         0.0
@@ -1564,6 +1588,8 @@ pub fn run_compaction_pipeline(
         user_turns: user_count,
         assistant_turns: assistant_count,
         pruned_tools: pruned_tools_count,
+        newly_pruned_tools,
+        already_pruned_tools,
         retained_errors: retained_errors_count,
         retained_short_cmds,
         retained_recent_steps,

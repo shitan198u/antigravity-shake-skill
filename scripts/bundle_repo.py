@@ -40,7 +40,6 @@ VALID_EXTENSIONS = {
 
 SKIP_FILES = {
     "repo_bundle.txt",
-    "bundle_repo.rs",
     "Cargo.lock",
 }
 
@@ -52,18 +51,22 @@ PRIORITY_ORDER = [
     "hooks.json",
     "install.sh",
     "install.ps1",
+    ".github/workflows/ci.yml",
     ".github/workflows/release.yml",
     "references/antigravity_lifecycle.md",
     "references/how_it_works.md",
     "references/omp_comparison.md",
     "skills/shake/SKILL.md",
-    "skills/full-shake/SKILL.md",
     "shake-prune-rs/Cargo.toml",
+    "shake-prune-rs/src/analysis.rs",
+    "shake-prune-rs/src/mode.rs",
+    "shake-prune-rs/src/continuity.rs",
     "shake-prune-rs/src/models.rs",
     "shake-prune-rs/src/slug.rs",
     "shake-prune-rs/src/metadata.rs",
     "shake-prune-rs/src/pruner.rs",
     "shake-prune-rs/src/hook.rs",
+    "shake-prune-rs/src/config.rs",
     "shake-prune-rs/src/main.rs",
     "shake-prune-rs/tests/integration_tests.rs",
 ]
@@ -77,7 +80,7 @@ def get_repo_root() -> Path:
 def collect_files(repo_root: Path):
     collected = []
     for root, dirs, files in os.walk(repo_root):
-        dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith(".")]
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS and (not d.startswith(".") or d == ".github")]
         for f in files:
             if f in SKIP_FILES:
                 continue
@@ -107,6 +110,13 @@ def generate_bundle(repo_root: Path, output_file: Path):
     lines_out.append(f"Generated At: {now_iso}")
     lines_out.append(f"Repository Root: {repo_root}")
     lines_out.append(f"Total Files Bundled: {len(rel_files)}")
+    lines_out.append("")
+    lines_out.append("INTENTIONALLY OMITTED FILES (PRESENT IN REPOSITORY, SKIPPED IN BUNDLE):")
+    lines_out.append("  - shake-prune-rs/Cargo.lock: Committed & tracked in Git for deterministic builds.")
+    lines_out.append("    Omitted from this text bundle to conserve context tokens during LLM code review.")
+    lines_out.append("  - bin/shake-prune & bin/shake-prune.exe: Compiled machine binaries built via CI / cargo.")
+    lines_out.append("    Omitted from text bundle as non-text binary artifacts.")
+    lines_out.append("  - target/ & .git/: Standard Rust target build cache and Git VCS internal metadata.")
     lines_out.append("")
     lines_out.append("TABLE OF CONTENTS:")
     lines_out.append("-" * 80)

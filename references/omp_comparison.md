@@ -24,7 +24,7 @@ Antigravity operates with a rich suite of artifacts, knowledge items, transcript
 | **In-Window Continuity** | Retains terminal scrollback | **Seamless in-window continuity** (`shake-prune --hook`) |
 | **Lossy Summarization?** | No (strips tool outputs only) | **No** (100% verbatim dialogue, thoughts, & diffs) |
 | **Error Handling** | May prune errors unless recent | **Strict signal preservation** (all error traces retained) |
-| **Active Momentum** | Last N messages kept | Configurable active working window (default: last 6 tool steps) |
+| **Active Momentum** | Last N messages kept | Configurable active working window (default: last 10 user turns ∩ last 20 tools, 30-call error window) |
 | **IDE Integration** | Terminal output only | Automatic **Interactive IDE Artifact** (`.metadata.json`) |
 | **Platform Portability** | Node / Bun runtime | Self-contained ELF binary (0 Python/Rust runtime dependencies) |
 

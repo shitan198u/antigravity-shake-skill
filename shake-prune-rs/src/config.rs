@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AutoConfig {
-    #[serde(default = "default_true")]
+    #[serde(default = "default_true", alias = "auto_enabled")]
     pub enabled: bool,
     #[serde(
         default = "default_size_threshold_bytes",
@@ -58,20 +58,15 @@ impl Default for RetentionConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct PrivacyConfig {
-    #[serde(default = "default_false")]
-    pub redact_secrets: bool,
-    #[serde(default = "default_true")]
-    pub restrict_permissions: bool,
+    #[serde(default)]
+    pub redact_secrets: Option<bool>,
 }
 
-impl Default for PrivacyConfig {
-    fn default() -> Self {
-        Self {
-            redact_secrets: default_false(),
-            restrict_permissions: default_true(),
-        }
+impl PrivacyConfig {
+    pub fn is_redact_secrets(&self) -> bool {
+        self.redact_secrets.unwrap_or(false)
     }
 }
 
@@ -126,9 +121,41 @@ fn default_log_level() -> String {
     "info".to_string()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+fn default_deep_after_user_turns() -> usize {
+    30
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ShakeCoreConfig {
+    #[serde(default = "default_recent_user_turns")]
+    pub keep_recent_turns: usize,
+    #[serde(default = "default_recent_tools_cap")]
+    pub keep_recent_tools: usize,
+    #[serde(default = "default_recent_errors_cap")]
+    pub keep_recent_errors: usize,
+    #[serde(default = "default_deep_after_user_turns")]
+    pub deep_after_user_turns: usize,
+    #[serde(default = "default_false")]
+    pub redact_secrets: bool,
+}
+
+impl Default for ShakeCoreConfig {
+    fn default() -> Self {
+        Self {
+            keep_recent_turns: default_recent_user_turns(),
+            keep_recent_tools: default_recent_tools_cap(),
+            keep_recent_errors: default_recent_errors_cap(),
+            deep_after_user_turns: default_deep_after_user_turns(),
+            redact_secrets: default_false(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ShakeConfig {
     #[serde(default)]
+    pub shake: Option<ShakeCoreConfig>,
+    #[serde(default, alias = "advanced")]
     pub auto: AutoConfig,
     #[serde(default)]
     pub retention: RetentionConfig,
@@ -136,9 +163,49 @@ pub struct ShakeConfig {
     pub privacy: PrivacyConfig,
     #[serde(default)]
     pub diagnostics: DiagnosticsConfig,
+    #[serde(default = "default_deep_after_user_turns")]
+    pub deep_after_user_turns: usize,
+}
+
+impl Default for ShakeConfig {
+    fn default() -> Self {
+        Self {
+            shake: None,
+            auto: AutoConfig::default(),
+            retention: RetentionConfig::default(),
+            privacy: PrivacyConfig::default(),
+            diagnostics: DiagnosticsConfig::default(),
+            deep_after_user_turns: default_deep_after_user_turns(),
+        }
+    }
 }
 
 impl ShakeConfig {
+    /// Normalizes configuration by syncing [shake] core table values into retention/privacy.
+    /// Explicit modern-schema values win: a legacy [shake] key only fills its
+    /// counterpart when that counterpart is still at its default. This preserves
+    /// explicit [retention]/[privacy]/top-level settings when both schemas are present.
+    pub fn normalize(&mut self) {
+        if let Some(core) = &self.shake {
+            let def_retention = RetentionConfig::default();
+            if self.retention.recent_user_turns == def_retention.recent_user_turns {
+                self.retention.recent_user_turns = core.keep_recent_turns;
+            }
+            if self.retention.recent_tools_cap == def_retention.recent_tools_cap {
+                self.retention.recent_tools_cap = core.keep_recent_tools;
+            }
+            if self.retention.recent_errors_cap == def_retention.recent_errors_cap {
+                self.retention.recent_errors_cap = core.keep_recent_errors;
+            }
+            if self.deep_after_user_turns == default_deep_after_user_turns() {
+                self.deep_after_user_turns = core.deep_after_user_turns;
+            }
+            if self.privacy.redact_secrets.is_none() {
+                self.privacy.redact_secrets = Some(core.redact_secrets);
+            }
+        }
+    }
+
     /// Resolves the default global config file path: `~/.gemini/config/shake.toml`.
     pub fn global_config_path() -> Option<PathBuf> {
         let home = env::var("HOME").or_else(|_| env::var("USERPROFILE")).ok()?;
@@ -157,7 +224,8 @@ impl ShakeConfig {
             if path.exists() {
                 if let Ok(content) = fs::read_to_string(&path) {
                     match toml::from_str::<ShakeConfig>(&content) {
-                        Ok(parsed) => {
+                        Ok(mut parsed) => {
+                            parsed.normalize();
                             config = parsed;
                         }
                         Err(e) => {
@@ -182,6 +250,7 @@ impl ShakeConfig {
             .map_err(|e| format!("Failed to read config file '{}': {}", path.display(), e))?;
         let mut config: ShakeConfig = toml::from_str(&content)
             .map_err(|e| format!("Failed to parse config file '{}': {}", path.display(), e))?;
+        config.normalize();
         config.apply_env_overrides();
         Ok(config)
     }
@@ -204,21 +273,33 @@ impl ShakeConfig {
             }
         }
 
-        if let Ok(val) = env::var("SHAKE_RECENT_USER_TURNS") {
+        if let Ok(val) =
+            env::var("SHAKE_KEEP_RECENT_TURNS").or_else(|_| env::var("SHAKE_RECENT_USER_TURNS"))
+        {
             if let Ok(parsed) = val.trim().parse::<usize>() {
                 self.retention.recent_user_turns = parsed;
             }
         }
 
-        if let Ok(val) = env::var("SHAKE_TOOLS_CAP") {
+        if let Ok(val) =
+            env::var("SHAKE_KEEP_RECENT_TOOLS").or_else(|_| env::var("SHAKE_TOOLS_CAP"))
+        {
             if let Ok(parsed) = val.trim().parse::<usize>() {
                 self.retention.recent_tools_cap = parsed;
             }
         }
 
-        if let Ok(val) = env::var("SHAKE_ERRORS_CAP") {
+        if let Ok(val) =
+            env::var("SHAKE_KEEP_RECENT_ERRORS").or_else(|_| env::var("SHAKE_ERRORS_CAP"))
+        {
             if let Ok(parsed) = val.trim().parse::<usize>() {
                 self.retention.recent_errors_cap = parsed;
+            }
+        }
+
+        if let Ok(val) = env::var("SHAKE_DEEP_AFTER_TURNS") {
+            if let Ok(parsed) = val.trim().parse::<usize>() {
+                self.deep_after_user_turns = parsed;
             }
         }
 
@@ -255,9 +336,9 @@ impl ShakeConfig {
         if let Ok(val) = env::var("SHAKE_SECRET_REDACTION") {
             let v = val.trim().to_lowercase();
             if v == "1" || v == "true" || v == "yes" {
-                self.privacy.redact_secrets = true;
+                self.privacy.redact_secrets = Some(true);
             } else if v == "0" || v == "false" || v == "no" {
-                self.privacy.redact_secrets = false;
+                self.privacy.redact_secrets = Some(false);
             }
         }
 
@@ -293,8 +374,48 @@ mod tests {
         assert_eq!(config.retention.recent_errors_cap, 30);
         assert_eq!(config.retention.recent_window_steps, 6);
         assert_eq!(config.retention.artifact_retention_count, 20);
-        assert!(!config.privacy.redact_secrets);
-        assert!(config.privacy.restrict_permissions);
+        assert!(!config.privacy.is_redact_secrets());
+        // Sensitive artifacts are always created 0600 on Unix; no opt-out knob.
+    }
+    #[test]
+    fn test_normalize_prefers_explicit_retention_over_legacy_shake() {
+        let toml_str = r#"
+        [shake]
+        keep_recent_turns = 10
+        keep_recent_tools = 10
+        keep_recent_errors = 10
+        deep_after_user_turns = 10
+        redact_secrets = false
+
+        [retention]
+        recent_user_turns = 99
+        recent_tools_cap = 98
+        recent_errors_cap = 97
+        "#;
+        let mut parsed: ShakeConfig = toml::from_str(toml_str).unwrap();
+        parsed.normalize();
+        assert_eq!(parsed.retention.recent_user_turns, 99);
+        assert_eq!(parsed.retention.recent_tools_cap, 98);
+        assert_eq!(parsed.retention.recent_errors_cap, 97);
+    }
+
+    #[test]
+    fn test_normalize_fills_defaults_from_legacy_shake() {
+        let toml_str = r#"
+        [shake]
+        keep_recent_turns = 12
+        keep_recent_tools = 25
+        keep_recent_errors = 35
+        deep_after_user_turns = 40
+        redact_secrets = true
+        "#;
+        let mut parsed: ShakeConfig = toml::from_str(toml_str).unwrap();
+        parsed.normalize();
+        assert_eq!(parsed.retention.recent_user_turns, 12);
+        assert_eq!(parsed.retention.recent_tools_cap, 25);
+        assert_eq!(parsed.retention.recent_errors_cap, 35);
+        assert_eq!(parsed.deep_after_user_turns, 40);
+        assert!(parsed.privacy.is_redact_secrets());
     }
 
     #[test]
@@ -328,7 +449,7 @@ mod tests {
         assert_eq!(parsed.retention.recent_user_turns, 5);
         assert_eq!(parsed.retention.recent_tools_cap, 10);
         assert_eq!(parsed.retention.recent_errors_cap, 15);
-        assert!(parsed.privacy.redact_secrets);
+        assert!(parsed.privacy.is_redact_secrets());
         assert_eq!(parsed.diagnostics.log_level, "debug");
     }
 
@@ -341,5 +462,49 @@ mod tests {
 
         let parsed: ShakeConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(parsed.auto.size_threshold_bytes, 123_456);
+    }
+
+    #[test]
+    fn test_modern_simplified_shake_config() {
+        let toml_str = r#"
+        [shake]
+        keep_recent_turns = 12
+        keep_recent_tools = 25
+        keep_recent_errors = 35
+        deep_after_user_turns = 40
+        redact_secrets = true
+
+        [advanced]
+        auto_enabled = true
+        token_threshold_bytes = 200000
+        "#;
+
+        let mut parsed: ShakeConfig = toml::from_str(toml_str).unwrap();
+        parsed.normalize();
+
+        assert_eq!(parsed.retention.recent_user_turns, 12);
+        assert_eq!(parsed.retention.recent_tools_cap, 25);
+        assert_eq!(parsed.retention.recent_errors_cap, 35);
+        assert_eq!(parsed.deep_after_user_turns, 40);
+        assert!(parsed.privacy.is_redact_secrets());
+        assert!(parsed.auto.enabled);
+        assert_eq!(parsed.auto.size_threshold_bytes, 200_000);
+    }
+
+    #[test]
+    fn test_normalize_explicit_modern_privacy_false_wins_over_legacy_true() {
+        let toml_str = r#"
+        [shake]
+        redact_secrets = true
+
+        [privacy]
+        redact_secrets = false
+        "#;
+        let mut parsed: ShakeConfig = toml::from_str(toml_str).unwrap();
+        parsed.normalize();
+        assert!(
+            !parsed.privacy.is_redact_secrets(),
+            "Explicit modern [privacy] redact_secrets = false must win over legacy [shake] true"
+        );
     }
 }
