@@ -157,6 +157,7 @@ jobs:
           test -f shake-prune-linux-aarch64
           test -f shake-prune-macos-universal
           test -f shake-prune-windows-x86_64.exe
+          chmod +x shake-prune-linux-* shake-prune-macos-*
           ./shake-prune-linux-x86_64 --version
       - name: Generate CycloneDX SBOM (Precompiled via install-action)
         uses: taiki-e/install-action@v2
