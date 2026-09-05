@@ -1270,6 +1270,7 @@ fn test_deep_after_user_turns_config_knob() {
         redact_secrets: false,
         non_blocking_lock: false,
         deadline: None,
+        auto_adaptive_deep: false,
     };
 
     let (_jsonl, _md, stats, _arch) =
@@ -1371,6 +1372,7 @@ fn test_compaction_watchdog_deadline_aborts() {
         redact_secrets: false,
         non_blocking_lock: false,
         deadline: Some(std::time::Instant::now() - std::time::Duration::from_millis(10)),
+        auto_adaptive_deep: false,
     };
 
     let res = shake_prune::pruner::run_compaction_pipeline(&transcript_path, &options);
@@ -1439,8 +1441,16 @@ fn test_thought_window_preserved_with_explicit_flag() {
 /// P0-6: Extended secret redaction patterns (OpenAI, Google, Slack, generic assignment).
 #[test]
 fn test_extended_secret_redaction() {
-    let oai = format!("{}-{}", "sk-".to_string() + "proj", "1234567890abcdefghijklmnopqrstuvwxyz1234");
-    let google = format!("{}{}", "AI".to_string() + "za", "SyD-1234567890abcdefghijklmnopqr123");
+    let oai = format!(
+        "{}-{}",
+        "sk-".to_string() + "proj",
+        "1234567890abcdefghijklmnopqrstuvwxyz1234"
+    );
+    let google = format!(
+        "{}{}",
+        "AI".to_string() + "za",
+        "SyD-1234567890abcdefghijklmnopqr123"
+    );
     let slack = format!(
         "{}-{}-{}-{}",
         "xox".to_string() + "b",
@@ -1448,7 +1458,10 @@ fn test_extended_secret_redaction() {
         "123456789012",
         "abcdefghijklmnopqrstuvwx"
     );
-    let generic = format!("client_{} = \"{}\"", "secret", "super_secret_token_1234567890");
+    let generic = format!(
+        "client_{} = \"{}\"",
+        "secret", "super_secret_token_1234567890"
+    );
 
     let text = format!(
         "oai: {}, google: {}, slack: {}, generic: {}",

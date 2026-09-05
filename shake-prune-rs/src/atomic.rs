@@ -206,12 +206,8 @@ pub fn recover_if_interrupted_with_options(
             .open(transcript_path)?;
 
         if non_blocking {
-            match fs2::FileExt::try_lock_exclusive(&file) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    return Ok(None);
-                }
-                Err(e) => return Err(e.into()),
+            if fs2::FileExt::try_lock_exclusive(&file).is_err() {
+                return Ok(None);
             }
         } else {
             fs2::FileExt::lock_exclusive(&file)?;

@@ -71,7 +71,15 @@ struct HookPayload {
 /// stopping as soon as the provided threshold is reached (P1-4).
 fn count_unpruned_tools(t_path: &Path, threshold: usize) -> usize {
     let file = match File::open(t_path) {
-        Ok(f) => f,
+        Ok(f) => {
+            // On Windows, reading a file locked exclusively by another process blocks.
+            // Check if the file is contended before reading.
+            if fs2::FileExt::try_lock_exclusive(&f).is_err() {
+                return 0;
+            }
+            let _ = fs2::FileExt::unlock(&f);
+            f
+        }
         Err(_) => return 0,
     };
     let reader = io::BufReader::new(file);
@@ -388,24 +396,8 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
 
                 let mut options = CompactionOptions::from_config(&config, true, false, true);
                 options.deadline = Some(hook_start + hook_deadline);
-
                 // P0-1: Adaptive deep compaction for marathon threads (>30 user turns) in auto-hook
-                let pre_analysis = crate::analysis::analyze_transcript(
-                    t_path,
-                    &crate::analysis::AnalysisOptions::default(),
-                );
-                let resolved_mode = if let Ok(ref analysis) = pre_analysis {
-                    crate::mode::resolve_mode(
-                        crate::mode::CompactionMode::Auto,
-                        analysis,
-                        config.deep_after_user_turns,
-                    )
-                } else {
-                    crate::mode::ResolvedMode::Standard
-                };
-                if resolved_mode == crate::mode::ResolvedMode::Deep {
-                    options.apply_deep(20);
-                }
+                options.auto_adaptive_deep = true;
 
                 let auto_start = std::time::Instant::now();
                 match run_compaction_pipeline(t_path, &options) {

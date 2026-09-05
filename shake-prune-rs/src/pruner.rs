@@ -41,6 +41,7 @@ pub struct CompactionOptions {
     pub redact_secrets: bool, // Redact API keys, tokens, and Authorization headers (P1-3)
     pub non_blocking_lock: bool, // Fail open immediately on lock contention (P1-2)
     pub deadline: Option<std::time::Instant>, // Watchdog timeout budget (B11)
+    pub auto_adaptive_deep: bool,
 }
 
 impl CompactionOptions {
@@ -63,6 +64,7 @@ impl CompactionOptions {
             redact_secrets: config.privacy.is_redact_secrets(),
             non_blocking_lock,
             deadline: None,
+            auto_adaptive_deep: false,
         }
     }
 
@@ -89,6 +91,7 @@ impl Default for CompactionOptions {
             redact_secrets: false,
             non_blocking_lock: false,
             deadline: None,
+            auto_adaptive_deep: false,
         }
     }
 }
@@ -778,7 +781,12 @@ pub fn run_compaction_pipeline(
     check_deadline(options.deadline, "pipeline initialization")?;
 
     // P0-2: Auto-recover from any previous interrupted compaction before checking existence
-    match recover_if_interrupted(transcript_path) {
+    let recovery_res = if options.non_blocking_lock {
+        crate::atomic::recover_if_interrupted_with_options(transcript_path, true)
+    } else {
+        recover_if_interrupted(transcript_path)
+    };
+    match recovery_res {
         Ok(Some(recovery_msg)) => {
             eprintln!("{}", recovery_msg);
         }
@@ -918,6 +926,11 @@ pub fn run_compaction_pipeline(
 
     let total_user_turns = user_turn_positions.len();
     check_deadline(options.deadline, "transcript read")?;
+
+    let mut options = options.clone();
+    if options.auto_adaptive_deep && total_user_turns > options.deep_after_user_turns {
+        options.apply_deep(20);
+    }
 
     // ⚡ MILESTONE HORIZON (For Marathon Threads > deep_after_user_turns)
     let mut effective_lines: Vec<(usize, String)> = Vec::with_capacity(lines_buffer.len());
