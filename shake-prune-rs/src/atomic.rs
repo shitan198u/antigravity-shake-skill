@@ -44,6 +44,34 @@ pub fn set_user_only_permissions(path: &Path) {
     }
 }
 
+/// Atomically creates or truncates a file with restrictive permissions (0600: user read/write only) on Unix (S1).
+pub fn create_user_only_file(path: &Path) -> std::io::Result<File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true).write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let file = opts.open(path)?;
+    set_user_only_permissions(path);
+    Ok(file)
+}
+
+/// Atomically creates or opens a file in append mode with restrictive permissions (0600) on Unix (S1).
+pub fn open_user_only_append(path: &Path) -> std::io::Result<File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true).write(true).create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let file = opts.open(path)?;
+    set_user_only_permissions(path);
+    Ok(file)
+}
+
 /// Snapshot fingerprint used for pre-commit concurrent modification detection (P0-3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SnapshotFingerprint {
@@ -112,7 +140,7 @@ pub fn write_intent_marker(
         "backup_path": backup_path.to_string_lossy(),
         "staged_bytes": staged_bytes,
     });
-    let mut f = File::create(&marker)?;
+    let mut f = create_user_only_file(&marker)?;
     f.write_all(payload.to_string().as_bytes())?;
     f.flush()?;
     f.sync_all()?;
@@ -133,15 +161,16 @@ pub fn recover_if_interrupted(
 ) -> Result<Option<String>, Box<dyn std::error::Error>> {
     let marker = intent_marker_path(transcript_path);
     let marker_exists = marker.exists();
-    let target_meta = std::fs::metadata(transcript_path).ok();
-    let is_empty_or_missing = target_meta.map(|m| m.len() == 0).unwrap_or(true);
 
     let backup_path = transcript_path.with_extension("jsonl.bak");
     let backup_len = std::fs::metadata(&backup_path)
         .map(|m| m.len())
         .unwrap_or(0);
 
-    if (marker_exists || is_empty_or_missing) && backup_len > 0 {
+    // B1 fix: Only recover when intent marker exists, indicating an interrupted compaction.
+    // An empty or missing transcript without an intent marker is a clean new session;
+    // restoring an unreferenced stale backup would cause context poisoning.
+    if marker_exists && backup_len > 0 {
         // Validate backup lines before restoring
         let bak_file = File::open(&backup_path)?;
         let reader = std::io::BufReader::new(bak_file);
@@ -322,7 +351,8 @@ pub fn commit_staged_in_place_with_snapshot(
 
     // P0-2: Write intent marker before destructive truncation so any power-loss/SIGKILL
     // can be detected and auto-recovered on the next run.
-    let _ = write_intent_marker(transcript_path, backup_path, staged.len());
+    write_intent_marker(transcript_path, backup_path, staged.len())
+        .map_err(|e| format!("Failed to write intent marker before truncation: {}", e))?;
 
     let write_result: Result<(), Box<dyn std::error::Error>> =
         (|| -> Result<(), Box<dyn std::error::Error>> {

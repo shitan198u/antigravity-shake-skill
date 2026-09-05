@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs::{self, File};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tempfile::Builder;
 
 #[derive(Deserialize, Serialize, Debug, Default, Clone)]
@@ -37,32 +37,28 @@ pub struct AnchorFilePayload {
 }
 
 /// Parse `transcript.jsonl.bak_YYYYMMDD_HHMMSS` suffix into
-/// `(iso_8601, display_HH:MM:SS)`. Falls back to raw suffix on parse failure.
-fn parse_legacy_backup_timestamp(ts_part: &str) -> (String, String) {
-    if ts_part.len() >= 15
-        && ts_part.as_bytes().get(8) == Some(&b'_')
-        && ts_part[..8].chars().all(|c| c.is_ascii_digit())
-        && ts_part[9..15].chars().all(|c| c.is_ascii_digit())
+/// `(iso_8601, display_HH:MM:SS)`. Falls back to raw suffix on parse failure (B8).
+pub fn parse_legacy_backup_timestamp(ts_part: &str) -> (String, String) {
+    let bytes = ts_part.as_bytes();
+    if bytes.len() >= 15
+        && bytes.get(8) == Some(&b'_')
+        && bytes[0..8].iter().all(|b| b.is_ascii_digit())
+        && bytes[9..15].iter().all(|b| b.is_ascii_digit())
     {
-        let (y, m, d) = (&ts_part[0..4], &ts_part[4..6], &ts_part[6..8]);
-        let (hh, mm, ss) = (&ts_part[9..11], &ts_part[11..13], &ts_part[13..15]);
+        let y = std::str::from_utf8(&bytes[0..4]).unwrap_or("0000");
+        let m = std::str::from_utf8(&bytes[4..6]).unwrap_or("00");
+        let d = std::str::from_utf8(&bytes[6..8]).unwrap_or("00");
+        let hh = std::str::from_utf8(&bytes[9..11]).unwrap_or("00");
+        let mm = std::str::from_utf8(&bytes[11..13]).unwrap_or("00");
+        let ss = std::str::from_utf8(&bytes[13..15]).unwrap_or("00");
         return (
             format!("{}-{}-{}T{}:{}:{}Z", y, m, d, hh, mm, ss),
             format!("{}:{}:{}", hh, mm, ss),
         );
     }
-    // Fallback: preserve old HH:MM:SS slicing when possible.
-    let display = if ts_part.len() >= 15 {
-        format!(
-            "{}:{}:{}",
-            &ts_part[9..11],
-            &ts_part[11..13],
-            &ts_part[13..15]
-        )
-    } else {
-        ts_part.to_string()
-    };
-    (ts_part.to_string(), display)
+    // Safe fallback: take first 20 chars without panicking on char boundaries
+    let safe_snippet: String = ts_part.chars().take(20).collect();
+    (ts_part.to_string(), safe_snippet)
 }
 
 pub fn load_or_discover_history(logs_dir: &Path, current_anchor: &Path) -> Vec<CompactionEvent> {
@@ -196,7 +192,7 @@ pub fn write_active_anchor(
             "last_compacted_bytes": t_size,
             "last_attempt_timestamp": Utc::now().timestamp(),
             "topic": stats.topic_slug,
-            "token_savings_pct": stats.reduction_pct,
+            "token_savings_pct": stats.this_run_savings_pct,
             "raw_tokens": stats.raw_tokens,
             "pruned_tokens": stats.pruned_tokens,
             "timestamp": now_iso,
@@ -218,6 +214,74 @@ pub fn write_active_anchor(
         crate::atomic::set_user_only_permissions(&anchor_path);
     }
     Ok(())
+}
+
+/// Mark anchor file as consumed and injected with strict 0600 permissions (B3, S2, D7).
+pub fn consume_anchor(anchor_path: &Path) -> std::io::Result<()> {
+    if !anchor_path.exists() {
+        return Ok(());
+    }
+    let content = fs::read_to_string(anchor_path)?;
+    let mut json_val = serde_json::from_str::<serde_json::Value>(&content)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+    if let Some(obj) = json_val.as_object_mut() {
+        obj.insert("active".to_string(), json!(false));
+        obj.insert("injected".to_string(), json!(true));
+        obj.insert("injected_at".to_string(), json!(Utc::now().timestamp()));
+        let updated = serde_json::to_string_pretty(&json_val)?;
+
+        let parent = anchor_path.parent().unwrap_or_else(|| Path::new("."));
+        let mut tmp_file = Builder::new()
+            .prefix(".shake_anchor_")
+            .tempfile_in(parent)?;
+        tmp_file.write_all(updated.as_bytes())?;
+        tmp_file.flush()?;
+        tmp_file.persist(anchor_path).map_err(|e| e.error)?;
+        crate::atomic::set_user_only_permissions(anchor_path);
+    }
+    Ok(())
+}
+
+/// Prune old timestamped `shake_<topic>_<timestamp>.md` artifacts down to `keep_count` (B2).
+/// Does not delete `shake_latest.md`. Also deletes corresponding `.metadata.json` sidecars.
+pub fn prune_old_artifacts(artifact_dir: &Path, keep_count: usize) -> std::io::Result<usize> {
+    if !artifact_dir.exists() || keep_count == 0 {
+        return Ok(0);
+    }
+
+    let mut timestamped_artifacts: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+
+    if let Ok(entries) = fs::read_dir(artifact_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Some(fname) = path.file_name().and_then(|s| s.to_str()) {
+                if fname.starts_with("shake_") && fname.ends_with(".md") && fname != "shake_latest.md" {
+                    let mtime = entry.metadata()
+                        .and_then(|m| m.modified())
+                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                    timestamped_artifacts.push((mtime, path));
+                }
+            }
+        }
+    }
+
+    // Sort ascending by modification time (oldest first)
+    timestamped_artifacts.sort_by_key(|(mtime, _)| *mtime);
+
+    let mut pruned_count = 0;
+    if timestamped_artifacts.len() > keep_count {
+        let to_remove = timestamped_artifacts.len() - keep_count;
+        for (_, md_path) in timestamped_artifacts.into_iter().take(to_remove) {
+            let _ = fs::remove_file(&md_path);
+            let fname_str = md_path.file_name().unwrap_or_default().to_string_lossy();
+            let meta_path = md_path.with_file_name(format!("{}.metadata.json", fname_str));
+            let _ = fs::remove_file(meta_path);
+            pruned_count += 1;
+        }
+    }
+
+    Ok(pruned_count)
 }
 
 /// Circuit breaker: auto-shake is disabled while `now < circuit_disabled_until`.

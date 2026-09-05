@@ -1020,3 +1020,398 @@ fn test_master_archive_grows_append_only() {
         "second compaction must preserve prior archive bytes verbatim"
     );
 }
+
+/// B1: Crash recovery must require an intent marker and must NOT restore over an empty transcript.
+#[test]
+fn test_recovery_requires_intent_marker_not_empty_transcript() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let transcript = tmp_dir.path().join("transcript.jsonl");
+    let backup = tmp_dir.path().join("transcript.jsonl.bak");
+
+    // Scenario A: empty transcript, backup exists, NO intent marker
+    File::create(&transcript).unwrap();
+    fs::write(&backup, "{\"step_index\": 1}\n").unwrap();
+
+    let res = recover_if_interrupted(&transcript).unwrap();
+    assert_eq!(
+        res, None,
+        "Recovery must NOT fire when marker does not exist, even if transcript is empty"
+    );
+    assert_eq!(fs::metadata(&transcript).unwrap().len(), 0);
+
+    // Scenario B: marker exists, backup exists
+    let staged_path = tmp_dir.path().join("dummy_staged_path");
+    write_intent_marker(&transcript, &staged_path, 100).unwrap();
+    let res2 = recover_if_interrupted(&transcript).unwrap();
+    assert!(res2.is_some(), "Recovery MUST fire when marker exists");
+    assert_eq!(
+        fs::read_to_string(&transcript).unwrap(),
+        "{\"step_index\": 1}\n"
+    );
+    assert!(!tmp_dir.path().join(".shake_in_progress").exists());
+}
+
+/// B2: Historical artifact retention pruning keeps only latest N artifacts.
+#[test]
+fn test_artifact_retention_pruning() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let art_dir = tmp_dir.path();
+
+    for i in 1..=15 {
+        let name = format!("shake_summary_topic_{:02}.md", i);
+        let meta_name = format!("shake_summary_topic_{:02}.md.metadata.json", i);
+        fs::write(art_dir.join(&name), "content").unwrap();
+        fs::write(art_dir.join(&meta_name), "{}").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(15));
+    }
+    // shake_latest.md must never be pruned
+    fs::write(art_dir.join("shake_latest.md"), "latest").unwrap();
+
+    let pruned = shake_prune::metadata::prune_old_artifacts(art_dir, 5).unwrap();
+    assert_eq!(pruned, 10, "Should prune 10 oldest artifacts down to limit of 5");
+    assert!(
+        art_dir.join("shake_latest.md").exists(),
+        "shake_latest.md must never be pruned"
+    );
+}
+
+/// B3 / S2: Anchor file permissions must stay 0600 on Unix after consumption.
+#[cfg(unix)]
+#[test]
+fn test_anchor_permissions_stay_0600_after_consumption() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let anchor_path = tmp_dir.path().join("active_shake_anchor.json");
+
+    let stats = shake_prune::models::PruningStats {
+        this_run_savings_pct: 45.0,
+        topic_slug: "test_slug".to_string(),
+        ..Default::default()
+    };
+    let art_file = tmp_dir.path().join("shake_latest.md");
+    fs::write(&art_file, "md").unwrap();
+
+    shake_prune::metadata::write_active_anchor(
+        &art_file,
+        &stats,
+        "manual",
+        "/tmp/master.jsonl",
+        None,
+    )
+    .unwrap();
+
+    let mode_before = fs::metadata(&anchor_path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode_before, 0o600);
+
+    // Consume anchor
+    shake_prune::metadata::consume_anchor(&anchor_path).unwrap();
+
+    let mode_after = fs::metadata(&anchor_path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        mode_after, 0o600,
+        "Anchor file must remain 0600 after consumption"
+    );
+
+    let content: Value =
+        serde_json::from_str(&fs::read_to_string(&anchor_path).unwrap()).unwrap();
+    assert_eq!(content["active"], false);
+    assert_eq!(content["injected"], true);
+}
+
+/// B4: Unindexed or synthetic steps must omit archive and line pointers in receipts.
+#[test]
+fn test_unindexed_step_receipt_omits_archive_pointer() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let logs_dir = tmp_dir
+        .path()
+        .join(".gemini/brain/test-unindexed/.system_generated/logs");
+    fs::create_dir_all(&logs_dir).unwrap();
+    let transcript_path = logs_dir.join("transcript.jsonl");
+
+    {
+        let mut f = File::create(&transcript_path).unwrap();
+        writeln!(
+            f,
+            "{}",
+            json!({"step_index": 1, "type": "USER_INPUT", "content": "hello"})
+        )
+        .unwrap();
+        // Unindexed step (no step_index)
+        writeln!(
+            f,
+            "{}",
+            json!({"type": "RUN_COMMAND", "status": "DONE", "exit_code": 0, "content": "x".repeat(500)})
+        )
+        .unwrap();
+        writeln!(
+            f,
+            "{}",
+            json!({"step_index": 3, "type": "PLANNER_RESPONSE", "content": "done"})
+        )
+        .unwrap();
+    }
+
+    let out = run_shake(&[
+        transcript_path.to_str().unwrap(),
+        "--recent-user-turns",
+        "0",
+        "--recent-window",
+        "0",
+    ]);
+    assert!(out.status.success());
+
+    let compacted = fs::read_to_string(&transcript_path).unwrap();
+    for line in compacted.lines() {
+        if let Ok(v) = serde_json::from_str::<Value>(line) {
+            if v.get("type").and_then(|t| t.as_str()) == Some("RUN_COMMAND") {
+                let content = v["content"].as_str().unwrap();
+                assert!(content.starts_with("[PRUNED tool=RUN_COMMAND"));
+                assert!(
+                    !content.contains("archive="),
+                    "Receipt for unindexed step must NOT contain archive="
+                );
+                assert!(
+                    !content.contains("line="),
+                    "Receipt for unindexed step must NOT contain line="
+                );
+            }
+        }
+    }
+}
+
+/// B5: Master archive retains secrets unredacted (Invariant #10 audit log),
+/// while active transcript redacts them.
+#[test]
+fn test_master_archive_retains_unredacted_secrets() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let logs_dir = tmp_dir
+        .path()
+        .join(".gemini/brain/test-secrets/.system_generated/logs");
+    fs::create_dir_all(&logs_dir).unwrap();
+    let transcript_path = logs_dir.join("transcript.jsonl");
+    let full_path = logs_dir.join("transcript_full.jsonl");
+
+    let secret_key = "ghp_1234567890abcdef1234567890abcdef1234";
+    {
+        let mut f = File::create(&transcript_path).unwrap();
+        writeln!(
+            f,
+            "{}",
+            json!({"step_index": 1, "type": "USER_INPUT", "content": format!("My key is {}", secret_key)})
+        )
+        .unwrap();
+        for i in 1..=25 {
+            writeln!(
+                f,
+                "{}",
+                json!({"step_index": i + 1, "type": "RUN_COMMAND", "status": "DONE", "exit_code": 0, "content": format!("tool output {} {}", i, "x".repeat(500))})
+            )
+            .unwrap();
+        }
+    }
+
+    let out = run_shake(&[transcript_path.to_str().unwrap(), "--redact-secrets"]);
+    assert!(out.status.success());
+
+    let full_content = fs::read_to_string(&full_path).unwrap();
+    assert!(
+        full_content.contains(secret_key),
+        "transcript_full.jsonl MUST retain secrets unredacted"
+    );
+
+    let active_content = fs::read_to_string(&transcript_path).unwrap();
+    assert!(
+        !active_content.contains(secret_key),
+        "Active transcript must redact secret"
+    );
+    assert!(active_content.contains("[REDACTED_GH_TOKEN]"));
+}
+
+/// B6: Milestone Horizon triggers at configurable `deep_after_user_turns` threshold.
+#[test]
+fn test_deep_after_user_turns_config_knob() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let logs_dir = tmp_dir
+        .path()
+        .join(".gemini/brain/test-deep-knob/.system_generated/logs");
+    fs::create_dir_all(&logs_dir).unwrap();
+    let transcript_path = logs_dir.join("transcript.jsonl");
+
+    {
+        let mut f = File::create(&transcript_path).unwrap();
+        for i in 1..=15 {
+            writeln!(
+                f,
+                "{}",
+                json!({"step_index": i * 2 - 1, "type": "USER_INPUT", "content": format!("Turn {}", i)})
+            )
+            .unwrap();
+            writeln!(
+                f,
+                "{}",
+                json!({"step_index": i * 2, "type": "PLANNER_RESPONSE", "thinking": format!("Thought {}", i), "content": format!("Answer {}", i)})
+            )
+            .unwrap();
+        }
+    }
+
+    let options = shake_prune::pruner::CompactionOptions {
+        recent_user_turns: 5,
+        recent_tools_cap: 20,
+        recent_errors_cap: 30,
+        recent_window_steps: 0,
+        thought_window_turns: Some(5),
+        marathon_horizon: true,
+        deep_after_user_turns: 10,
+        in_place: true,
+        dry_run: false,
+        redact_secrets: false,
+        non_blocking_lock: false,
+        deadline: None,
+    };
+
+    let (_jsonl, _md, stats, _arch) =
+        shake_prune::pruner::run_compaction_pipeline(&transcript_path, &options).unwrap();
+    assert_eq!(stats.user_turns, 15);
+
+    let compacted = fs::read_to_string(&transcript_path).unwrap();
+    let lines: Vec<Value> = compacted
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    let first_planner = lines
+        .iter()
+        .find(|v| v.get("type").and_then(|t| t.as_str()) == Some("PLANNER_RESPONSE"))
+        .unwrap();
+    assert_eq!(
+        first_planner.get("thinking").and_then(|t| t.as_str()),
+        Some("Thought 1"),
+        "Turn 1 genesis thought must be preserved by milestone horizon"
+    );
+}
+
+/// B8: Legacy backup timestamp parsing must not panic on malformed or non-ASCII inputs.
+#[test]
+fn test_non_ascii_backup_timestamp_parsing_does_not_panic() {
+    let malformed_names = [
+        "transcript.jsonl.bak.20240905_123456_§±©_invalid",
+        "transcript.jsonl.bak.日本語_20240905",
+        "transcript.jsonl.bak.20240905_short",
+        "transcript.jsonl.bak.abcdefgh_ijklmn",
+    ];
+    for name in &malformed_names {
+        let parsed = shake_prune::metadata::parse_legacy_backup_timestamp(name);
+        assert!(!parsed.0.is_empty());
+    }
+}
+
+/// B9: History timeline formats purged backups gracefully without broken markdown links.
+#[test]
+fn test_timeline_formats_purged_backups() {
+    let event = shake_prune::models::CompactionEvent {
+        timestamp_iso: "2026-09-05T12:00:00Z".to_string(),
+        timestamp_display: "12:00:00".to_string(),
+        trigger: "Manual (/shake)".to_string(),
+        anchored_step: 10,
+        bytes_before: 50_000,
+        bytes_after: 29_000,
+        reduction_pct: 42.0,
+        backup_file: "/nonexistent/purged/path/transcript.jsonl.bak".to_string(),
+        artifact_file: "shake_latest.md".to_string(),
+        duration_ms: Some(15),
+        trigger_detail: Some("manual".to_string()),
+    };
+    let timeline = shake_prune::pruner::format_history_timeline(&[event]);
+    assert!(
+        timeline.contains("Archive #1 (purged)"),
+        "Purged backup must render as '(purged)'"
+    );
+}
+
+/// B11: Compaction watchdog deadline aborts execution if budget is exceeded.
+#[test]
+fn test_compaction_watchdog_deadline_aborts() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let logs_dir = tmp_dir
+        .path()
+        .join(".gemini/brain/test-deadline/.system_generated/logs");
+    fs::create_dir_all(&logs_dir).unwrap();
+    let transcript_path = logs_dir.join("transcript.jsonl");
+
+    {
+        let mut f = File::create(&transcript_path).unwrap();
+        writeln!(
+            f,
+            "{}",
+            json!({"step_index": 1, "type": "USER_INPUT", "content": "task"})
+        )
+        .unwrap();
+        for i in 1..=200 {
+            writeln!(
+                f,
+                "{}",
+                json!({"step_index": i + 1, "type": "RUN_COMMAND", "status": "DONE", "exit_code": 0, "content": "output"})
+            )
+            .unwrap();
+        }
+    }
+
+    let options = shake_prune::pruner::CompactionOptions {
+        recent_user_turns: 5,
+        recent_tools_cap: 20,
+        recent_errors_cap: 30,
+        recent_window_steps: 0,
+        thought_window_turns: None,
+        marathon_horizon: false,
+        deep_after_user_turns: 30,
+        in_place: true,
+        dry_run: false,
+        redact_secrets: false,
+        non_blocking_lock: false,
+        deadline: Some(std::time::Instant::now() - std::time::Duration::from_millis(10)),
+    };
+
+    let res = shake_prune::pruner::run_compaction_pipeline(&transcript_path, &options);
+    assert!(res.is_err(), "Must abort when watchdog deadline is exceeded");
+    let err_msg = res.err().unwrap().to_string();
+    assert!(
+        err_msg.contains("watchdog budget exceeded") || err_msg.contains("budget exceeded"),
+        "Error message should mention watchdog budget exceeded: {}",
+        err_msg
+    );
+}
+
+/// B12b: CLI strictly rejects unknown flags and subcommands.
+#[test]
+fn test_cli_rejects_unknown_flags_and_subcommands() {
+    let bin = bin();
+    let out1 = std::process::Command::new(&bin)
+        .arg("--bogus-flag-12345")
+        .output()
+        .unwrap();
+    assert!(
+        !out1.status.success(),
+        "Unknown flag must fail with exit code != 0"
+    );
+
+    let out2 = std::process::Command::new(&bin)
+        .arg("bogus_subcommand_12345")
+        .output()
+        .unwrap();
+    assert!(
+        !out2.status.success(),
+        "Unknown subcommand must fail with exit code != 0"
+    );
+
+    let out3 = std::process::Command::new(&bin)
+        .arg("run")
+        .arg("/tmp/nonexistent.jsonl")
+        .arg("--bogus-run-flag")
+        .output()
+        .unwrap();
+    assert!(
+        !out3.status.success(),
+        "Unknown run flag must fail with exit code != 0"
+    );
+}
+

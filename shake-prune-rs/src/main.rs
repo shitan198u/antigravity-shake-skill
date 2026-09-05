@@ -14,7 +14,8 @@ use shake_prune::metadata::{
 use shake_prune::mode::{resolve_mode, CompactionMode, ResolvedMode};
 use shake_prune::pruner::{estimate_tokens, run_compaction_pipeline, CompactionOptions};
 use shake_prune::{
-    format_bytes, validate_output_path_allowlist, validate_transcript_path, VERSION,
+    format_bytes, format_prompt_tokens, validate_output_path_allowlist, validate_transcript_path,
+    VERSION,
 };
 
 fn handle_restore(target: &Path, force: bool) {
@@ -193,16 +194,22 @@ fn handle_doctor(json_output: bool) {
     };
 
     let stale_markers = if gemini_exists {
-        let brain_dir = Path::new(&home).join(".gemini/antigravity-ide/brain");
+        let brain_candidates = [
+            Path::new(&home).join(".gemini/antigravity-ide/brain"),
+            Path::new(&home).join(".gemini/antigravity/brain"),
+            Path::new(&home).join(".gemini/antigravity-cli/brain"),
+        ];
         let mut markers = Vec::new();
-        if brain_dir.exists() {
-            if let Ok(entries) = fs::read_dir(&brain_dir) {
-                for entry in entries.flatten() {
-                    let marker = entry
-                        .path()
-                        .join(".system_generated/logs/.shake_in_progress");
-                    if marker.exists() {
-                        markers.push(marker);
+        for b_dir in &brain_candidates {
+            if b_dir.exists() {
+                if let Ok(entries) = fs::read_dir(b_dir) {
+                    for entry in entries.flatten() {
+                        let marker = entry
+                            .path()
+                            .join(".system_generated/logs/.shake_in_progress");
+                        if marker.exists() {
+                            markers.push(marker);
+                        }
                     }
                 }
             }
@@ -323,22 +330,9 @@ fn handle_preview(transcript_path: &Path, requested_mode: CompactionMode, json_o
     let config = ShakeConfig::load();
     let resolved_mode = resolve_mode(requested_mode, &analysis, config.deep_after_user_turns);
 
-    let mut options = CompactionOptions {
-        recent_user_turns: config.retention.recent_user_turns,
-        recent_tools_cap: config.retention.recent_tools_cap,
-        recent_errors_cap: config.retention.recent_errors_cap,
-        recent_window_steps: config.retention.recent_window_steps,
-        thought_window_turns: None,
-        marathon_horizon: false,
-        in_place: false,
-        dry_run: true,
-        redact_secrets: config.privacy.redact_secrets,
-        non_blocking_lock: false,
-    };
-
+    let mut options = CompactionOptions::from_config(&config, false, true, false);
     if resolved_mode == ResolvedMode::Deep {
-        options.marathon_horizon = true;
-        options.thought_window_turns = Some(20);
+        options.apply_deep(20);
     }
 
     let (_compacted_jsonl, _pruned_md, stats, master_archive_abs_str) =
@@ -379,15 +373,7 @@ fn handle_preview(transcript_path: &Path, requested_mode: CompactionMode, json_o
         return;
     }
 
-    let format_prompt_tokens = |tokens: usize| -> String {
-        if tokens >= 1_000_000 {
-            format!("~{:.1}M", tokens as f64 / 1_000_000.0)
-        } else if tokens >= 1_000 {
-            format!("~{}k", (tokens + 500) / 1000)
-        } else {
-            format!("~{}", tokens)
-        }
-    };
+
 
     let display_topic: String = stats
         .topic_slug
@@ -859,18 +845,7 @@ fn handle_run(args: &[String]) {
     let mut requested_mode = CompactionMode::Auto;
     let mut timestamped_artifact = false;
 
-    let mut options = CompactionOptions {
-        recent_user_turns: config.retention.recent_user_turns,
-        recent_tools_cap: config.retention.recent_tools_cap,
-        recent_errors_cap: config.retention.recent_errors_cap,
-        recent_window_steps: config.retention.recent_window_steps,
-        thought_window_turns: None,
-        marathon_horizon: false,
-        in_place: true,
-        dry_run: false,
-        redact_secrets: config.privacy.redact_secrets,
-        non_blocking_lock: false,
-    };
+    let mut options = CompactionOptions::from_config(&config, true, false, false);
     let mut json_output = false;
     let mut force = false;
 
@@ -931,7 +906,8 @@ fn handle_run(args: &[String]) {
             raw_target = args[i].clone();
             i += 1;
         } else {
-            i += 1;
+            eprintln!("Error: Unknown or unexpected option '{}'", args[i]);
+            process::exit(1);
         }
     }
 
@@ -946,10 +922,7 @@ fn handle_run(args: &[String]) {
     };
 
     if resolved_mode == ResolvedMode::Deep {
-        options.marathon_horizon = true;
-        if options.thought_window_turns.is_none() {
-            options.thought_window_turns = Some(20);
-        }
+        options.apply_deep(20);
     }
 
     let (_compacted_jsonl, pruned_markdown, stats, master_archive_abs_str) =
@@ -1013,17 +986,22 @@ fn handle_run(args: &[String]) {
     };
 
     if !options.dry_run {
-        if let Err(e) =
-            File::create(&abs_output_path).and_then(|mut f| f.write_all(pruned_markdown.as_bytes()))
-        {
+        if let Ok(mut f) = shake_prune::atomic::create_user_only_file(&abs_output_path) {
+            if let Err(e) = f.write_all(pruned_markdown.as_bytes()) {
+                eprintln!(
+                    "Failed to write output file '{}': {}",
+                    abs_output_path.display(),
+                    e
+                );
+                process::exit(1);
+            }
+        } else {
             eprintln!(
-                "Failed to write output file '{}': {}",
-                abs_output_path.display(),
-                e
+                "Failed to create output file '{}'",
+                abs_output_path.display()
             );
             process::exit(1);
         }
-        shake_prune::atomic::set_user_only_permissions(&abs_output_path);
 
         let trigger_label = match resolved_mode {
             ResolvedMode::Deep => "Manual (/shake deep)",
@@ -1037,6 +1015,13 @@ fn handle_run(args: &[String]) {
             &master_archive_abs_str,
             continuity_card.as_ref(),
         );
+
+        if let Some(art_dir) = abs_output_path.parent() {
+            let _ = shake_prune::metadata::prune_old_artifacts(
+                art_dir,
+                config.retention.artifact_retention_count,
+            );
+        }
     }
 
     if json_output {
@@ -1074,15 +1059,7 @@ fn handle_run(args: &[String]) {
     let est_prompt_tokens_before = estimate_tokens(stats.this_run_before_bytes);
     let est_prompt_tokens_after = estimate_tokens(stats.this_run_after_bytes);
 
-    let format_prompt_tokens = |tokens: usize| -> String {
-        if tokens >= 1_000_000 {
-            format!("~{:.1}M", tokens as f64 / 1_000_000.0)
-        } else if tokens >= 1_000 {
-            format!("~{}k", (tokens + 500) / 1000)
-        } else {
-            format!("~{}", tokens)
-        }
-    };
+
 
     let display_topic: String = stats
         .topic_slug
@@ -1259,7 +1236,7 @@ fn main() {
                 eprintln!("Usage: shake-prune preview <path/to/transcript.jsonl> [--mode auto|standard|deep] [--json]");
                 process::exit(1);
             }
-            let json_flag = args.iter().any(|a| a == "--json");
+            let mut json_flag = false;
             let mut requested_mode = CompactionMode::Auto;
             let mut target_str = None;
             let mut i = 2;
@@ -1267,15 +1244,20 @@ fn main() {
                 if args[i] == "--mode" && i + 1 < args.len() {
                     if let Ok(m) = args[i + 1].parse::<CompactionMode>() {
                         requested_mode = m;
+                    } else {
+                        eprintln!("Error: Invalid mode '{}'. Supported: auto, standard, deep.", args[i + 1]);
+                        process::exit(1);
                     }
                     i += 2;
                 } else if args[i] == "--json" {
+                    json_flag = true;
                     i += 1;
                 } else if !args[i].starts_with('-') && target_str.is_none() {
                     target_str = Some(&args[i]);
                     i += 1;
                 } else {
-                    i += 1;
+                    eprintln!("Error: Unknown or unexpected option '{}' for preview", args[i]);
+                    process::exit(1);
                 }
             }
             if let Some(t) = target_str {
@@ -1291,9 +1273,9 @@ fn main() {
                 eprintln!("Usage: shake-prune show <path/to/transcript.jsonl> (--step <N> | --line <N> | step=N | line=N) [--pretty] [--json] [--full]");
                 process::exit(1);
             }
-            let json_flag = args.iter().any(|a| a == "--json");
-            let pretty_flag = args.iter().any(|a| a == "--pretty");
-            let full_flag = args.iter().any(|a| a == "--full");
+            let mut json_flag = false;
+            let mut pretty_flag = false;
+            let mut full_flag = false;
             let mut step_opt = None;
             let mut line_opt = None;
             let mut target_str = None;
@@ -1311,13 +1293,21 @@ fn main() {
                 } else if args[i].starts_with("line=") {
                     line_opt = args[i].trim_start_matches("line=").parse::<usize>().ok();
                     i += 1;
-                } else if args[i] == "--json" || args[i] == "--pretty" || args[i] == "--full" {
+                } else if args[i] == "--json" {
+                    json_flag = true;
+                    i += 1;
+                } else if args[i] == "--pretty" {
+                    pretty_flag = true;
+                    i += 1;
+                } else if args[i] == "--full" {
+                    full_flag = true;
                     i += 1;
                 } else if !args[i].starts_with('-') && target_str.is_none() {
                     target_str = Some(&args[i]);
                     i += 1;
                 } else {
-                    i += 1;
+                    eprintln!("Error: Unknown or unexpected option '{}' for show", args[i]);
+                    process::exit(1);
                 }
             }
             if let Some(t) = target_str {
@@ -1346,10 +1336,20 @@ fn main() {
             handle_run(&run_args);
             process::exit(0);
         }
-        _ => {
-            let run_args: Vec<String> = args.iter().skip(1).cloned().collect();
-            handle_run(&run_args);
-            process::exit(0);
+        other => {
+            if other.starts_with('-') {
+                eprintln!("Error: Unknown option '{}'. Run 'shake-prune --help' for usage.", other);
+                process::exit(1);
+            }
+            let p = Path::new(other);
+            if p.exists() || other.ends_with(".jsonl") {
+                let run_args: Vec<String> = args.iter().skip(1).cloned().collect();
+                handle_run(&run_args);
+                process::exit(0);
+            } else {
+                eprintln!("Error: Unknown subcommand or file '{}'. Run 'shake-prune --help' for usage.", other);
+                process::exit(1);
+            }
         }
     }
 }

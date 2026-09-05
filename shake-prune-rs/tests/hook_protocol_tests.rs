@@ -452,6 +452,18 @@ fn test_hook_stop_event_compacts_in_background_silently() {
         anchor_file.exists(),
         "Anchor file must be created by Stop hook"
     );
+    let anchor_data: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&anchor_file).unwrap()).unwrap();
+    assert_eq!(
+        anchor_data.get("active").and_then(|v| v.as_bool()),
+        Some(true),
+        "Anchor must remain active after Stop event so PreInvocation can inject it"
+    );
+    assert_eq!(
+        anchor_data.get("injected").and_then(|v| v.as_bool()),
+        Some(false),
+        "Anchor must NOT be marked injected during Stop event"
+    );
 }
 
 /// P0: Lock contention must fail open with exit 0 + {} and leave transcript intact.

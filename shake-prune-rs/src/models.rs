@@ -19,7 +19,7 @@ pub struct CompactionEvent {
     pub trigger_detail: Option<String>,
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Default, Debug, Clone)]
 pub struct PruningStats {
     pub conv_id: String,
     pub raw_bytes: usize,

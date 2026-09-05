@@ -129,7 +129,7 @@ pub fn analyze_transcript(
                                     let clean = path_str.trim_matches('"').trim();
                                     if !clean.is_empty()
                                         && !recent_files_set.contains(clean)
-                                        && clean.contains('/')
+                                        && (clean.contains('/') || clean.contains('\\'))
                                     {
                                         recent_files_set.insert(clean.to_string());
                                         recent_files.push(clean.to_string());
@@ -143,7 +143,7 @@ pub fn analyze_transcript(
                     }
                 }
             }
-            "RUN_COMMAND" | "VIEW_FILE" | "SEARCH_WEB" | "GREP_SEARCH" | "CODE_ACTION" => {
+            stype if crate::receipts::is_tool_step_type(stype) => {
                 total_tool_steps += 1;
                 let content_str = val.get("content").and_then(|v| v.as_str()).unwrap_or("");
                 let status = val
@@ -171,9 +171,15 @@ pub fn analyze_transcript(
                     }
                 }
 
-                let is_pruned = content_str.starts_with("[PRUNED");
+                let is_pruned = crate::receipts::is_pruned_receipt(content_str);
                 if !is_pruned {
                     unpruned_tool_count += 1;
+                    if let Some(thresh) = _options.unpruned_tools_threshold {
+                        if unpruned_tool_count >= thresh {
+                            // If threshold reached and only checking unpruned count, stop scanning
+                            break;
+                        }
+                    }
                 }
             }
             _ => {}
