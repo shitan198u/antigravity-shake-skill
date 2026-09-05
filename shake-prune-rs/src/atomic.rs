@@ -160,8 +160,11 @@ pub fn remove_intent_marker(transcript_path: &Path) {
 
 /// Checks if an interrupted compaction left the transcript corrupted or empty,
 /// and automatically recovers from `transcript.jsonl.bak` (P0-2).
-pub fn recover_if_interrupted(
+/// In hook contexts, `non_blocking = true` ensures we fail open if the transcript
+/// is currently locked by another process (P0-3).
+pub fn recover_if_interrupted_with_options(
     transcript_path: &Path,
+    non_blocking: bool,
 ) -> Result<Option<String>, Box<dyn std::error::Error>> {
     let marker = intent_marker_path(transcript_path);
     let marker_exists = marker.exists();
@@ -201,7 +204,19 @@ pub fn recover_if_interrupted(
             .read(true)
             .write(true)
             .open(transcript_path)?;
-        fs2::FileExt::lock_exclusive(&file)?;
+
+        if non_blocking {
+            match fs2::FileExt::try_lock_exclusive(&file) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    return Ok(None);
+                }
+                Err(e) => return Err(e.into()),
+            }
+        } else {
+            fs2::FileExt::lock_exclusive(&file)?;
+        }
+
         let restored = restore_from_backup(&mut file, &backup_path)?;
         set_user_only_permissions(transcript_path);
         remove_intent_marker(transcript_path);
@@ -217,6 +232,13 @@ pub fn recover_if_interrupted(
         remove_intent_marker(transcript_path);
     }
     Ok(None)
+}
+
+/// Convenience wrapper for standard blocking recovery.
+pub fn recover_if_interrupted(
+    transcript_path: &Path,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    recover_if_interrupted_with_options(transcript_path, false)
 }
 
 /// Restore `file` (rewound) from `backup_path` and verify the restored byte

@@ -60,15 +60,17 @@ impl CompactionOptions {
             deep_after_user_turns: config.deep_after_user_turns,
             in_place,
             dry_run,
-            redact_secrets: config.privacy.redact_secrets,
+            redact_secrets: config.privacy.is_redact_secrets(),
             non_blocking_lock,
             deadline: None,
         }
     }
 
-    pub fn apply_deep(&mut self, thought_window: usize) {
+    pub fn apply_deep(&mut self, default_thought_window: usize) {
         self.marathon_horizon = true;
-        self.thought_window_turns = Some(thought_window);
+        if self.thought_window_turns.is_none() {
+            self.thought_window_turns = Some(default_thought_window);
+        }
     }
 }
 
@@ -290,8 +292,13 @@ static RE_AWS: OnceLock<regex::Regex> = OnceLock::new();
 static RE_BEARER: OnceLock<regex::Regex> = OnceLock::new();
 static RE_AUTH: OnceLock<regex::Regex> = OnceLock::new();
 static RE_KEY: OnceLock<regex::Regex> = OnceLock::new();
+static RE_OAI: OnceLock<regex::Regex> = OnceLock::new();
+static RE_GOOGLE: OnceLock<regex::Regex> = OnceLock::new();
+static RE_SLACK: OnceLock<regex::Regex> = OnceLock::new();
+static RE_GENERIC_KEY: OnceLock<regex::Regex> = OnceLock::new();
 
-/// Redacts sensitive credentials (GitHub tokens, AWS keys, Bearer tokens, private keys) from text (P1-3).
+/// Redacts sensitive credentials (GitHub tokens, AWS keys, OpenAI keys, Google keys,
+/// Slack tokens, Bearer tokens, private keys, generic API assignments) from text (P1-3, P0-6).
 pub fn redact_secrets(text: &str) -> String {
     let pat_gh = RE_GH
         .get_or_init(|| regex::Regex::new(r"(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36}").unwrap());
@@ -309,6 +316,19 @@ pub fn redact_secrets(text: &str) -> String {
         )
         .unwrap()
     });
+    let pat_oai = RE_OAI.get_or_init(|| {
+        regex::Regex::new(r"\bsk-(?:live|proj|test)?[A-Za-z0-9_-]{20,}\b").unwrap()
+    });
+    let pat_google =
+        RE_GOOGLE.get_or_init(|| regex::Regex::new(r"\bAIza[0-9A-Za-z\-_]{35}\b").unwrap());
+    let pat_slack =
+        RE_SLACK.get_or_init(|| regex::Regex::new(r"\bxox[baprs]-[0-9A-Za-z]{10,48}\b").unwrap());
+    let pat_generic = RE_GENERIC_KEY.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?i)\b(api_key|apikey|secret_key|client_secret)(\s*[:=]\s*["']?)[A-Za-z0-9_\-\.]{16,}(["']?)"#,
+        )
+        .unwrap()
+    });
 
     let s1 = pat_gh.replace_all(text, "[REDACTED_GH_TOKEN]");
     let s2 = pat_gh_pat.replace_all(&s1, "[REDACTED_GH_PAT]");
@@ -316,7 +336,11 @@ pub fn redact_secrets(text: &str) -> String {
     let s4 = pat_bearer.replace_all(&s3, "Bearer [REDACTED]");
     let s5 = pat_auth.replace_all(&s4, "Authorization: [REDACTED]");
     let s6 = pat_key.replace_all(&s5, "[REDACTED_PRIVATE_KEY]");
-    s6.to_string()
+    let s7 = pat_oai.replace_all(&s6, "[REDACTED_OPENAI_KEY]");
+    let s8 = pat_google.replace_all(&s7, "[REDACTED_GOOGLE_KEY]");
+    let s9 = pat_slack.replace_all(&s8, "[REDACTED_SLACK_TOKEN]");
+    let s10 = pat_generic.replace_all(&s9, "${1}${2}[REDACTED_SECRET]${3}");
+    s10.to_string()
 }
 
 /// Builds an O(1) step_index -> 1-indexed line number lookup map for `transcript_full.jsonl`.
@@ -733,11 +757,25 @@ fn sync_master_full_transcript(
     Ok(step_map)
 }
 
+#[inline]
+fn check_deadline(
+    deadline: Option<Instant>,
+    phase: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(dl) = deadline {
+        if Instant::now() > dl {
+            return Err(format!("Hook watchdog budget exceeded during {}", phase).into());
+        }
+    }
+    Ok(())
+}
+
 pub fn run_compaction_pipeline(
     transcript_path: &Path,
     options: &CompactionOptions,
 ) -> Result<(String, String, PruningStats, String), Box<dyn std::error::Error>> {
     let pipeline_start = Instant::now();
+    check_deadline(options.deadline, "pipeline initialization")?;
 
     // P0-2: Auto-recover from any previous interrupted compaction before checking existence
     match recover_if_interrupted(transcript_path) {
@@ -784,12 +822,14 @@ pub fn run_compaction_pipeline(
             } else {
                 file.lock_exclusive()?;
             }
+            check_deadline(options.deadline, "lock acquisition")?;
 
             // P0-3: Record snapshot fingerprint while holding exclusive lock before reading
             let snap = SnapshotFingerprint::from_file(&file)?;
 
             // P0-1: Guarantee permanent master archive synchronization under exclusive lock
             let step_map = sync_master_full_transcript(&mut file, &full_transcript_path)?;
+            check_deadline(options.deadline, "master archive synchronization")?;
 
             // Mandatory fail-closed crash fallback while holding the exclusive lock
             copy_from_locked_file(&mut file, &backup_latest).map_err(|e| {
@@ -877,6 +917,7 @@ pub fn run_compaction_pipeline(
     }
 
     let total_user_turns = user_turn_positions.len();
+    check_deadline(options.deadline, "transcript read")?;
 
     // ⚡ MILESTONE HORIZON (For Marathon Threads > deep_after_user_turns)
     let mut effective_lines: Vec<(usize, String)> = Vec::with_capacity(lines_buffer.len());
@@ -1027,12 +1068,8 @@ pub fn run_compaction_pipeline(
     let mut pending_tool_calls: Vec<PendingToolCall> = Vec::new();
 
     for (i, (_orig_line_no, line_str)) in effective_lines.into_iter().enumerate() {
-        if i % 100 == 0 {
-            if let Some(deadline) = options.deadline {
-                if Instant::now() > deadline {
-                    return Err("Hook watchdog budget exceeded during compaction pipeline".into());
-                }
-            }
+        if i % 50 == 0 {
+            check_deadline(options.deadline, "compaction pipeline")?;
         }
 
         let mut step_val: Value = match serde_json::from_str(&line_str) {
@@ -1398,6 +1435,7 @@ pub fn run_compaction_pipeline(
         // P0-3 near-atomic path: stage + verify BEFORE touching the original
         // inode, then commit in place with verified rollback (P0-1 / P0-2).
         // Any error below leaves `transcript.jsonl.bak` intact for restore.
+        check_deadline(options.deadline, "pre-commit verification")?;
         let staged = stage_compacted_output(&abs_target, &compacted_output)?;
         match commit_staged_in_place_with_snapshot(
             &mut file,

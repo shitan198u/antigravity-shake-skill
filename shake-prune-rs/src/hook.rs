@@ -244,7 +244,7 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
 
     // P0-2: Auto-recover if a previous compaction crashed or was interrupted
     if let Some(t_path) = &resolved_transcript {
-        match crate::atomic::recover_if_interrupted(t_path) {
+        match crate::atomic::recover_if_interrupted_with_options(t_path, true) {
             Ok(Some(recovery_msg)) => {
                 log_with_level("INFO", &recovery_msg);
             }
@@ -389,6 +389,24 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
                 let mut options = CompactionOptions::from_config(&config, true, false, true);
                 options.deadline = Some(hook_start + hook_deadline);
 
+                // P0-1: Adaptive deep compaction for marathon threads (>30 user turns) in auto-hook
+                let pre_analysis = crate::analysis::analyze_transcript(
+                    t_path,
+                    &crate::analysis::AnalysisOptions::default(),
+                );
+                let resolved_mode = if let Ok(ref analysis) = pre_analysis {
+                    crate::mode::resolve_mode(
+                        crate::mode::CompactionMode::Auto,
+                        analysis,
+                        config.deep_after_user_turns,
+                    )
+                } else {
+                    crate::mode::ResolvedMode::Standard
+                };
+                if resolved_mode == crate::mode::ResolvedMode::Deep {
+                    options.apply_deep(20);
+                }
+
                 let auto_start = std::time::Instant::now();
                 match run_compaction_pipeline(t_path, &options) {
                     Ok((_compacted_jsonl, pruned_md, mut stats, master_archive_str)) => {
@@ -406,14 +424,25 @@ fn run_hook_safely() -> Result<(), Box<dyn std::error::Error>> {
                                 master_archive_str,
                             ),
                         );
-                        let output_path = art_dir.join(&stats.suggested_filename);
-                        if let Ok(mut f) = crate::atomic::create_user_only_file(&output_path) {
+                        // P0-2: Always update canonical shake_latest.md for reliable anchor links
+                        let canonical_path = art_dir.join("shake_latest.md");
+                        if let Ok(mut f) = crate::atomic::create_user_only_file(&canonical_path) {
                             let _ = f.write_all(pruned_md.as_bytes());
+                        }
+
+                        if config.retention.artifact_retention_count > 0 {
+                            let timestamped_path = art_dir.join(&stats.suggested_filename);
+                            if let Ok(mut f) =
+                                crate::atomic::create_user_only_file(&timestamped_path)
+                            {
+                                let _ = f.write_all(pruned_md.as_bytes());
+                            }
                         }
                         let _ = crate::metadata::prune_old_artifacts(
                             art_dir,
                             config.retention.artifact_retention_count,
                         );
+                        let output_path = canonical_path;
 
                         let trigger_label = if trigger == "size" {
                             "Auto (80k Threshold)"
