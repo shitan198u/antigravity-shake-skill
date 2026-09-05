@@ -7,29 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.2.0] - 2026-09-05
+## [0.2.0] - 2026-09-06
+
+### Highlights
+- **Unified Adaptive `/shake`**: Consolidated multiple skill variations into a single, intelligent `/shake` command that automatically selects Standard or Deep compaction based on conversation depth and token bloat.
+- **Zero-Dependency Native Rust Engine**: Replaced Python prototype scripts with a standalone, memory-safe native Rust binary (`shake-prune`) featuring sub-millisecond execution.
+- **Cross-Platform Prebuilt Distribution**: Automated multi-platform GitHub Releases with cryptographically verified binaries for Linux (x86_64, aarch64 musl), macOS (Apple Silicon, Intel), and Windows (x86_64).
+- **Streamlined Installers & Clean Git Tree**: Removed bundled binaries from git tracking, reducing repository bloat, while updating `install.sh` and `install.ps1` to download release assets with SHA-256 verification and CI override support.
 
 ### Added
-- **Complete Rust Engine Rewrite**: Ported Python implementation to a zero-runtime-dependency, memory-safe Rust binary (`shake-prune`).
-- **Atomic Operations**: Inode-preserving truncate-and-write with advisory file locking via `fs2`.
-- **Pre-Commit Fingerprint Validation**: Detects uncooperative concurrent writes prior to file truncation.
-- **Intent Journaling & Crash Recovery**: `.shake_in_progress` journal enables atomic crash recovery with non-blocking lock acquisition in hook contexts.
-- **Master Archive**: Automatic appending of unpruned steps to `transcript_full.jsonl` prior to compaction for complete auditability.
-- **Adaptive Compaction Engine**: Standard (10 turns / 20 tools / 30 errors) and Deep (Milestone Horizon + scratchpad retention) modes. Auto-hook triggers deep mode dynamically past 30 user turns.
-- **Unified CLI Suite**: `run`, `preview`, `status`, `undo`, `show` (with `--redact`), and `doctor` subcommands.
-- **Fail-Open Hook Architecture**: `--hook` exits with code 0 and `{}` on any error or lock timeout, ensuring zero agent interruption.
-- **Multi-Phase Watchdog**: Hook watchdog deadline checks occur across initialization, locking, master archive sync, transcript parsing, compaction loops (every 50 steps), and pre-commit snapshot validation.
-- **Extended Secret Redaction Patterns**: Added regex patterns covering OpenAI API keys (`sk-...`), Google API keys (`AIza...`), Slack tokens (`xox...`), and generic credential assignments (`api_key = ...`).
-- **Anchor Invalidation on Undo**: `shake-prune undo` cleans up or deactivates `active_shake_anchor.json` in the artifact directory.
-- **Canonical Configuration Template**: Added `shake.example.toml` documenting modern config tables (`[shake]`, `[auto]`, `[privacy]`, `[retention]`, `[diagnostics]`).
-- **Security Policy**: Added `SECURITY.md` detailing advisory file locking, pre-commit snapshot fingerprints, platform permissions, and audit log guarantees.
-- **Omitted Files Documentation**: Updated `scripts/bundle_repo.py` with an explicit list of intentionally omitted binary and build cache artifacts.
-- **Comprehensive CI/CD**: Cross-platform matrix testing on Linux, macOS, and Windows with automated binary releases.
+- **Native Rust Engine (`shake-prune`)**:
+  - High-throughput streaming JSONL parser and in-place compaction engine.
+  - Advisory file locking via `fs2` preventing concurrent writer corruption.
+  - Inode-preserving atomic truncate-and-write pattern.
+  - Pre-commit fingerprint validation to detect uncooperative concurrent writes prior to truncation.
+  - Intent journaling via `.shake_in_progress` enabling automatic crash recovery.
+  - Multi-phase watchdog deadline enforcement across initialization, locking, archive sync, parsing, compaction loops, and commit phases.
+  - Fail-open hook architecture: `--hook` exits with status `0` and `{}` upon any error or lock contention, ensuring zero agent interruption.
+- **Unified CLI Utility Suite**:
+  - `shake-prune run <transcript> [output] [--mode auto|standard|deep]`: Adaptive transcript compaction.
+  - `shake-prune preview <transcript> [--json]`: Non-destructive dry-run showing reduction metrics and continuity anchors.
+  - `shake-prune status <transcript> [--json]`: Real-time inspection of token volume, archive health, and compaction recommendations.
+  - `shake-prune undo <transcript> [--force]`: Instant rollback from `.jsonl.bak` with `.pre_restore` backup snapshots and anchor cache invalidation.
+  - `shake-prune show <transcript> --step N|--line N [--redact] [--pretty]`: Terminal inspection of historical tool runs from `transcript_full.jsonl`.
+  - `shake-prune doctor [--json]`: Comprehensive diagnostics verifying hooks, configuration, storage paths, permissions, and binary integrity.
+- **Privacy, Security & Retention**:
+  - Configurable regex secret redaction covering OpenAI API keys (`sk-...`), Google API keys (`AIza...`), Slack tokens (`xox...`), and generic credential patterns.
+  - Strict path traversal guardrails forbidding arbitrary filesystem access outside workspace and configuration roots.
+  - Restrictive file permissions (`0600` on Unix) on metadata, journals, and archives.
+  - Master archive (`transcript_full.jsonl`) preservation ensuring an unpruned audit trail is always maintained on disk.
+- **Configuration & Documentation**:
+  - Multi-tiered configuration support via `shake.toml` and environment variable overrides (`SHAKE_*`).
+  - Added canonical configuration template `shake.example.toml` documenting all configuration options.
+  - Added `SECURITY.md` detailing threat models, file locking, permissions, and vulnerability reporting.
+- **Automated CI/CD Release Pipeline**:
+  - GitHub Actions matrix workflow building release binaries across 5 platforms.
+  - Automated SHA-256 checksum generation (`SHA256SUMS.txt`) and release asset publishing.
+
+### Changed
+- **Installer Simplification**:
+  - `install.sh` and `install.ps1` now download prebuilt binaries with SHA-256 integrity verification by default, eliminating local Rust toolchain requirements for end users.
+  - Retained local binary detection (`bin/` and `target/release/`) for seamless development and CI testing.
+  - Removed committed binaries from repository tracking and added `bin/` to `.gitignore`.
+- **Skill Definitions**:
+  - Consolidated skill into a single, clean `/shake` definition in `skills/shake/SKILL.md` and repository root `SKILL.md`.
+  - Updated `AGENTS.md` and documentation to guide agents on using the unified CLI suite.
 
 ### Fixed
-- **Windows Lock Contention**: Resolved mandatory lock contention in `count_unpruned_tools` and `run_compaction_pipeline` on Windows.
-- **Config Boolean Normalization**: Fixed `ShakePrivacyConfig.redact_secrets` deserialization (`Option<bool>`) so explicit `false` values in `[privacy]` are not overwritten by legacy `[shake]` defaults.
-- **Subcommand Path Validation**: Enforced strict path traversal and sensitive directory validation on `undo` and `show` subcommands.
-- **Deep Compaction Thought Window**: User-specified `--thought-window` arguments are now preserved in `apply_deep` rather than unconditionally overridden to 20.
+- **Windows Concurrency**: Resolved mandatory file lock contention in `count_unpruned_tools` and `run_compaction_pipeline` on Windows.
+- **Config Precedence**: Fixed `ShakePrivacyConfig.redact_secrets` deserialization (`Option<bool>`) so explicit `false` values in `[privacy]` are not overwritten by legacy `[shake]` defaults.
+- **Deep Compaction Thought Window**: User-specified `--thought-window` arguments are now preserved in `apply_deep` rather than unconditionally falling back to 20.
 - **Hook Artifact Link Integrity**: Hook mode now writes canonical `shake_latest.md` (and maintains timestamped archives when retention > 0), ensuring continuity anchor links never 404.
-- **Documentation Parity**: Aligned `README.md` configuration tables, CLI subcommand documentation (including `doctor` and `--redact`), and environment variable lists.
+- **Uninstall Flow**: Fixed unclosed uninstall block in `install.ps1` and silenced non-Unix warnings on Windows.
+
+---
+
+## [0.1.10] - 2026-09-04
+- Baseline release of context compaction tooling with initial Python scripts and experimental hook handlers.
