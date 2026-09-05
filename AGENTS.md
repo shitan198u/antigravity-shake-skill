@@ -70,6 +70,9 @@ Ensure the `PreInvocation` and `Stop` hooks are configured in `<Global Config Di
 }
 ```
 
+> [!NOTE]
+> **PATH Resolution**: If `<Global Binary Directory>` (`~/.gemini/bin`) is not in your system `PATH`, configure the absolute path to the binary (e.g. `~/.gemini/bin/shake-prune --hook` or `%USERPROFILE%\.gemini\bin\shake-prune.exe --hook`). The self-contained `./install.sh` and `install.ps1` installers automatically configure the absolute path.
+
 ---
 
 ### 5. Configuration Subsystem (`shake.toml` & Env Overrides)
