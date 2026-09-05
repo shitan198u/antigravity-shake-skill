@@ -256,8 +256,12 @@ pub fn prune_old_artifacts(artifact_dir: &Path, keep_count: usize) -> std::io::R
         for entry in entries.flatten() {
             let path = entry.path();
             if let Some(fname) = path.file_name().and_then(|s| s.to_str()) {
-                if fname.starts_with("shake_") && fname.ends_with(".md") && fname != "shake_latest.md" {
-                    let mtime = entry.metadata()
+                if fname.starts_with("shake_")
+                    && fname.ends_with(".md")
+                    && fname != "shake_latest.md"
+                {
+                    let mtime = entry
+                        .metadata()
                         .and_then(|m| m.modified())
                         .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
                     timestamped_artifacts.push((mtime, path));

@@ -1068,7 +1068,10 @@ fn test_artifact_retention_pruning() {
     fs::write(art_dir.join("shake_latest.md"), "latest").unwrap();
 
     let pruned = shake_prune::metadata::prune_old_artifacts(art_dir, 5).unwrap();
-    assert_eq!(pruned, 10, "Should prune 10 oldest artifacts down to limit of 5");
+    assert_eq!(
+        pruned, 10,
+        "Should prune 10 oldest artifacts down to limit of 5"
+    );
     assert!(
         art_dir.join("shake_latest.md").exists(),
         "shake_latest.md must never be pruned"
@@ -1112,8 +1115,7 @@ fn test_anchor_permissions_stay_0600_after_consumption() {
         "Anchor file must remain 0600 after consumption"
     );
 
-    let content: Value =
-        serde_json::from_str(&fs::read_to_string(&anchor_path).unwrap()).unwrap();
+    let content: Value = serde_json::from_str(&fs::read_to_string(&anchor_path).unwrap()).unwrap();
     assert_eq!(content["active"], false);
     assert_eq!(content["injected"], true);
 }
@@ -1372,7 +1374,10 @@ fn test_compaction_watchdog_deadline_aborts() {
     };
 
     let res = shake_prune::pruner::run_compaction_pipeline(&transcript_path, &options);
-    assert!(res.is_err(), "Must abort when watchdog deadline is exceeded");
+    assert!(
+        res.is_err(),
+        "Must abort when watchdog deadline is exceeded"
+    );
     let err_msg = res.err().unwrap().to_string();
     assert!(
         err_msg.contains("watchdog budget exceeded") || err_msg.contains("budget exceeded"),
@@ -1414,4 +1419,3 @@ fn test_cli_rejects_unknown_flags_and_subcommands() {
         "Unknown run flag must fail with exit code != 0"
     );
 }
-

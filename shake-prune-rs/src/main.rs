@@ -373,8 +373,6 @@ fn handle_preview(transcript_path: &Path, requested_mode: CompactionMode, json_o
         return;
     }
 
-
-
     let display_topic: String = stats
         .topic_slug
         .split('_')
@@ -1059,8 +1057,6 @@ fn handle_run(args: &[String]) {
     let est_prompt_tokens_before = estimate_tokens(stats.this_run_before_bytes);
     let est_prompt_tokens_after = estimate_tokens(stats.this_run_after_bytes);
 
-
-
     let display_topic: String = stats
         .topic_slug
         .split('_')
@@ -1245,7 +1241,10 @@ fn main() {
                     if let Ok(m) = args[i + 1].parse::<CompactionMode>() {
                         requested_mode = m;
                     } else {
-                        eprintln!("Error: Invalid mode '{}'. Supported: auto, standard, deep.", args[i + 1]);
+                        eprintln!(
+                            "Error: Invalid mode '{}'. Supported: auto, standard, deep.",
+                            args[i + 1]
+                        );
                         process::exit(1);
                     }
                     i += 2;
@@ -1256,7 +1255,10 @@ fn main() {
                     target_str = Some(&args[i]);
                     i += 1;
                 } else {
-                    eprintln!("Error: Unknown or unexpected option '{}' for preview", args[i]);
+                    eprintln!(
+                        "Error: Unknown or unexpected option '{}' for preview",
+                        args[i]
+                    );
                     process::exit(1);
                 }
             }
@@ -1338,7 +1340,10 @@ fn main() {
         }
         other => {
             if other.starts_with('-') {
-                eprintln!("Error: Unknown option '{}'. Run 'shake-prune --help' for usage.", other);
+                eprintln!(
+                    "Error: Unknown option '{}'. Run 'shake-prune --help' for usage.",
+                    other
+                );
                 process::exit(1);
             }
             let p = Path::new(other);
@@ -1347,7 +1352,10 @@ fn main() {
                 handle_run(&run_args);
                 process::exit(0);
             } else {
-                eprintln!("Error: Unknown subcommand or file '{}'. Run 'shake-prune --help' for usage.", other);
+                eprintln!(
+                    "Error: Unknown subcommand or file '{}'. Run 'shake-prune --help' for usage.",
+                    other
+                );
                 process::exit(1);
             }
         }

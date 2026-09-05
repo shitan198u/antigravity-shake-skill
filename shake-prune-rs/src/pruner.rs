@@ -789,10 +789,7 @@ pub fn run_compaction_pipeline(
             let snap = SnapshotFingerprint::from_file(&file)?;
 
             // P0-1: Guarantee permanent master archive synchronization under exclusive lock
-            let step_map = sync_master_full_transcript(
-                &mut file,
-                &full_transcript_path,
-            )?;
+            let step_map = sync_master_full_transcript(&mut file, &full_transcript_path)?;
 
             // Mandatory fail-closed crash fallback while holding the exclusive lock
             copy_from_locked_file(&mut file, &backup_latest).map_err(|e| {
@@ -1223,13 +1220,7 @@ pub fn run_compaction_pipeline(
                         if let Some(args_map) = tc.get_mut("args").and_then(|v| v.as_object_mut()) {
                             if !is_recent_tool {
                                 if let Some((arch, line)) = resolved_archive {
-                                    compact_tool_call_args(
-                                        &name,
-                                        args_map,
-                                        step_idx,
-                                        arch,
-                                        line,
-                                    );
+                                    compact_tool_call_args(&name, args_map, step_idx, arch, line);
                                 }
                             }
                             let mut arg_items = Vec::new();
@@ -1361,7 +1352,10 @@ pub fn run_compaction_pipeline(
                         } else {
                             "0".to_string()
                         };
-                        (Some(line_count), Some(format!("exit={}{}", exit_str, warn_tag)))
+                        (
+                            Some(line_count),
+                            Some(format!("exit={}{}", exit_str, warn_tag)),
+                        )
                     } else if stype == "VIEW_FILE" {
                         (Some(line_count), None)
                     } else {
