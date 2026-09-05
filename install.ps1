@@ -174,22 +174,15 @@ if (-not $InstalledBinary) {
         Copy-Item $TempExe (Join-Path $GlobalSkillsDir "bin\shake-prune.exe") -Force
         $InstalledBinary = $true
     } catch {
-        Write-Warning "Precompiled binary verification failed: $_"
+        Write-Warning "Precompiled binary download/verification failed: $_"
+        Write-Host "   If you have Rust installed, you can build from source: cargo build --release --manifest-path shake-prune-rs\Cargo.toml" -ForegroundColor Yellow
     } finally {
         Remove-Item -Recurse -Force $TempDir -ErrorAction SilentlyContinue
-    }
-
-    if (-not $InstalledBinary -and (Get-Command "cargo" -ErrorAction SilentlyContinue)) {
-        Write-Host "- Building native Rust binary from source via Cargo..."
-        cargo build --release --manifest-path (Join-Path $ScriptDir "shake-prune-rs\Cargo.toml")
-        Copy-Item (Join-Path $ScriptDir "shake-prune-rs\target\release\shake-prune.exe") $TargetExe -Force
-        Copy-Item (Join-Path $ScriptDir "shake-prune-rs\target\release\shake-prune.exe") (Join-Path $GlobalSkillsDir "bin\shake-prune.exe") -Force
-        $InstalledBinary = $true
     }
 }
 
 if (-not $InstalledBinary) {
-    Write-Error "Installation Failed: shake-prune binary could not be installed. Release download failed and local Cargo is not available. Please install Rust or check internet connectivity."
+    Write-Error "Installation Failed: shake-prune binary could not be installed. Release download failed. Please check internet connectivity or build from source with: cargo build --release --manifest-path shake-prune-rs\Cargo.toml"
     exit 1
 }
 
