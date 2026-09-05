@@ -47,36 +47,26 @@ Figures above are from a single representative fixture; your savings vary by too
 
 ---
 
-## 📦 Quick Installation
+## ⚡ Quick Start & Installation
 
-### Linux & macOS (curl / bash)
+Install `/shake` into your global Antigravity environment with a single self-contained command:
+
+### Linux / macOS:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/shitan198u/antigravity-shake-skill/main/install.sh | bash
 ```
 
-### Windows (PowerShell)
+### Windows (PowerShell):
 ```powershell
 irm https://raw.githubusercontent.com/shitan198u/antigravity-shake-skill/main/install.ps1 | iex
 ```
 
-### Build from Local Source
-```bash
-cargo build --release --manifest-path shake-prune-rs/Cargo.toml
-cp shake-prune-rs/target/release/shake-prune ~/.gemini/bin/shake-prune
-```
-
 ---
 
-## 💡 How to Use
+## 🚀 How to Use
 
-### 1. In Any Antigravity Chat
-Simply type `/shake` in any chat session:
-
-```text
-/shake
-```
-
-The pruner runs in under 15ms, prints a streamlined scorecard, updates `@shake_latest.md`, and pins your active working state in the exact same conversation window.
+### 1. In Antigravity Chat (Slash Command)
+Simply type `/shake` whenever context fills up, responses become laggy, or before starting a complex task.
 
 ---
 
@@ -95,8 +85,8 @@ shake-prune status /path/to/transcript.jsonl
 # 4. Safely undo / rollback from atomic backup
 shake-prune undo /path/to/transcript.jsonl
 
-# 5. Inspect archived tool execution from permanent master log
-shake-prune show /path/to/transcript.jsonl --step 42 --pretty
+# 5. Inspect archived tool execution from permanent master log (supports --redact)
+shake-prune show /path/to/transcript.jsonl --step 42 --pretty --redact
 shake-prune show /path/to/transcript.jsonl --line 128
 
 # 6. Verify environment, hooks, and permissions
@@ -117,13 +107,17 @@ keep_recent_errors = 30         # Keep un-clamped error traces for last N tools
 deep_after_user_turns = 30      # Automatically switch to deep compaction past 30 turns
 redact_secrets = false          # Redact API keys, tokens, and bearer secrets
 
-[advanced]
-auto_enabled = true             # Set to false to disable auto-shake hook completely
-token_threshold_bytes = 264000  # ~80k tokens
+[auto]
+enabled = true                  # Set to false to disable auto-shake hook completely
+size_threshold_bytes = 264000   # ~80k tokens
 tool_burst_threshold = 20       # Autonomous tool burst trigger
 cooldown_seconds = 180          # 3-minute cooldown between compactions
 growth_delta_bytes = 25600      # 25 KB transcript growth required
+
+[retention]
 artifact_retention_count = 20   # Maximum historical artifacts retained
+
+[diagnostics]
 log_level = "info"
 ```
 

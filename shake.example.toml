@@ -1,0 +1,31 @@
+# ==============================================================================
+# Antigravity /shake Global Configuration Template (shake.toml)
+# Place at: ~/.gemini/config/shake.toml
+# ==============================================================================
+
+[shake]
+keep_recent_turns = 10          # Keep last N human user turns verbatim (dialogue + code)
+keep_recent_tools = 20          # Keep last N tool outputs unpruned in active working memory
+keep_recent_errors = 30         # Keep un-clamped error traces for last N tools
+deep_after_user_turns = 30      # Automatically switch to deep compaction past 30 turns
+redact_secrets = false          # Redact API keys, tokens, and bearer secrets from prompts
+
+[auto]
+enabled = true                  # Set to false to disable auto-shake hook completely
+size_threshold_bytes = 264000   # ~80k tokens trigger threshold
+tool_burst_threshold = 20       # Autonomous tool burst trigger (>= 20 unpruned tools)
+cooldown_seconds = 180          # 3-minute cooldown between auto-compactions
+growth_delta_bytes = 25600      # 25 KB transcript growth required between runs
+
+[retention]
+recent_user_turns = 10          # Active conversational dialogue window
+recent_tools_cap = 20           # Raw tool execution retention cap
+recent_errors_cap = 30          # Full error trace retention cap
+recent_window_steps = 6         # Fallback step window when user turns == 0
+artifact_retention_count = 20   # Maximum historical timestamped artifacts retained
+
+[privacy]
+redact_secrets = false          # Best-effort credential redaction on prompt payload transmission
+
+[diagnostics]
+log_level = "info"              # Hook log level: "debug", "info", "warn", "error"
