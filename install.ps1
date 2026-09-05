@@ -72,6 +72,7 @@ if ($Uninstall) {
     Write-Host "[DONE] Antigravity /shake binaries, skills, and hooks removed." -ForegroundColor Green
     Write-Host "Retained (delete manually if desired): shake.toml, logs, transcript_full.jsonl archives, and .bak files."
     exit 0
+}
 
 # ==============================================================================
 # INSTALL MODE

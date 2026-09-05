@@ -42,6 +42,10 @@ pub fn set_user_only_permissions(path: &Path) {
             let _ = std::fs::set_permissions(path, perms);
         }
     }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
 }
 
 /// Atomically creates or truncates a file with restrictive permissions (0600: user read/write only) on Unix (S1).
