@@ -112,7 +112,7 @@ case "${OS}" in
         ;;
 esac
 
-# Check for local pre-built binary first
+# Binary acquisition: local override (CI) or download from GitHub Releases (users)
 if [ -f "${SCRIPT_DIR}/bin/${BIN_NAME}" ]; then
     echo "📦 Using local pre-built binary..."
     cp "${SCRIPT_DIR}/bin/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}"
@@ -121,13 +121,8 @@ elif [ -f "${SCRIPT_DIR}/shake-prune-rs/target/release/${BIN_NAME}" ]; then
     echo "📦 Using local cargo release binary..."
     cp "${SCRIPT_DIR}/shake-prune-rs/target/release/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}"
     chmod 755 "${INSTALL_DIR}/${BIN_NAME}"
-elif command -v cargo >/dev/null 2>&1 && [ -f "${SCRIPT_DIR}/shake-prune-rs/Cargo.toml" ]; then
-    echo "⚙️ Building from local source via Cargo..."
-    cargo build --release --manifest-path "${SCRIPT_DIR}/shake-prune-rs/Cargo.toml"
-    cp "${SCRIPT_DIR}/shake-prune-rs/target/release/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}"
-    chmod 755 "${INSTALL_DIR}/${BIN_NAME}"
 else
-    # Determine release URL (pinned tag via SHAKE_VERSION; explicit "latest" opts into floating)
+    # Download prebuilt binary from GitHub Releases
     SHAKE_VERSION="${SHAKE_VERSION:-v0.2.0}"
     if [ "${SHAKE_VERSION}" = "latest" ]; then
         BASE_RELEASE_URL="https://github.com/${REPO}/releases/latest/download"
@@ -144,6 +139,7 @@ else
     echo "🌐 Downloading precompiled binary (${BIN_NAME}-${TARGET}) from ${BASE_RELEASE_URL}..."
     if ! curl -fsSL "${DOWNLOAD_URL}" -o "${TMP_DIR}/${BIN_NAME}"; then
         echo "❌ Error: Failed to download precompiled binary from ${DOWNLOAD_URL}" >&2
+        echo "   If you have Rust installed, you can build from source: cargo build --release --manifest-path shake-prune-rs/Cargo.toml" >&2
         exit 1
     fi
 
