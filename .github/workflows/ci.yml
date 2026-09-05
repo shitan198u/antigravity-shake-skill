@@ -90,9 +90,13 @@ jobs:
           mkdir -p bin
           cp shake-prune-rs/target/release/shake-prune bin/shake-prune
           chmod +x bin/shake-prune install.sh
-          ./install.sh
+          SHAKE_LOCAL_DEV=1 ./install.sh
           ~/.gemini/bin/shake-prune --version
           ~/.gemini/bin/shake-prune doctor --json
+          test -x ~/.gemini/bin/shake-uninstall
+          ~/.gemini/bin/shake-uninstall
+          # Verify ./install.sh --uninstall as well
+          SHAKE_LOCAL_DEV=1 ./install.sh
           ./install.sh --uninstall
       - name: Test Native Release Build & Local Installer (Windows)
         if: runner.os == 'Windows'
@@ -101,9 +105,14 @@ jobs:
           cargo build --release --manifest-path shake-prune-rs/Cargo.toml
           if (!(Test-Path "bin")) { New-Item -ItemType Directory -Path "bin" -Force }
           Copy-Item shake-prune-rs\target\release\shake-prune.exe bin\shake-prune.exe -Force
+          $env:SHAKE_LOCAL_DEV = "1"
           powershell -ExecutionPolicy Bypass -File .\install.ps1
           & "$env:USERPROFILE\.gemini\bin\shake-prune.exe" --version
           & "$env:USERPROFILE\.gemini\bin\shake-prune.exe" doctor --json
+          if (!(Test-Path "$env:USERPROFILE\.gemini\bin\shake-uninstall.cmd")) { throw "shake-uninstall.cmd missing" }
+          & "$env:USERPROFILE\.gemini\bin\shake-uninstall.cmd"
+          # Verify .\install.ps1 -Uninstall as well
+          powershell -ExecutionPolicy Bypass -File .\install.ps1
           powershell -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall
 
   # 4. PR Dependency Review
