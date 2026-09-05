@@ -1,6 +1,7 @@
 # Rust build artifacts
 shake-prune-rs/target/
 target/
+bin/
 **/*.rs.bk
 
 # Python cache

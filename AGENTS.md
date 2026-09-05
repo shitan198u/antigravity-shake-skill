@@ -31,8 +31,7 @@ Check the current OS and CPU architecture:
 
 ### 2. Binary Installation Strategy (Cascade)
 1. **Prebuilt Binary Check**:
-   - On **Linux x86_64**: Use `bin/shake-prune` directly from this repo.
-   - On other platforms: If a prebuilt binary matching the target OS/Arch is available (from GitHub Releases or `bin/`), copy it directly to `<Global Binary Directory>`.
+   - Check [GitHub Releases](https://github.com/shitan198u/antigravity-shake-skill/releases) for a prebuilt binary matching the target OS/Arch and copy it directly to `<Global Binary Directory>`.
 2. **Local Compilation (If `cargo` is installed)**:
    - Run:
      ```bash
