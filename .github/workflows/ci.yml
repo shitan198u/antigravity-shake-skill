@@ -59,6 +59,7 @@ jobs:
       - name: Install cargo-audit (Precompiled via install-action)
         uses: taiki-e/install-action@v2
         with:
+          tool: cargo-audit
       - name: Dependency Security Audit
         run: cargo audit --file shake-prune-rs/Cargo.lock
 
