@@ -165,9 +165,13 @@ jobs:
           tool: cargo-cyclonedx
       - name: Build SBOM Asset
         run: |
-          cargo cyclonedx --manifest-path shake-prune-rs/Cargo.toml --format json --override-filename sbom.cdx.json
-          test -f shake-prune-rs/sbom.cdx.json
-          cp shake-prune-rs/sbom.cdx.json final_assets/sbom.cdx.json
+          cargo cyclonedx --manifest-path shake-prune-rs/Cargo.toml --format json --override-filename sbom.cdx
+          if [ -f shake-prune-rs/sbom.cdx.json ]; then
+            cp shake-prune-rs/sbom.cdx.json final_assets/sbom.cdx.json
+          elif [ -f shake-prune-rs/sbom.cdx.json.json ]; then
+            cp shake-prune-rs/sbom.cdx.json.json final_assets/sbom.cdx.json
+          fi
+          test -f final_assets/sbom.cdx.json
       - name: Keyless Cryptographic Signing via Sigstore/Cosign (Free OIDC)
         uses: sigstore/cosign-installer@v3
       - name: Sign Checksums
