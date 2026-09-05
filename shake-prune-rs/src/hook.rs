@@ -117,11 +117,19 @@ fn is_trusted_storage_path(p: &Path) -> bool {
     }
 
     if let Ok(extra) = std::env::var("SHAKE_TRUSTED_STORAGE_ROOTS") {
-        for root in extra.split([':', ';', ',']) {
+        #[cfg(windows)]
+        const ROOT_SEPARATORS: [char; 2] = [';', ','];
+        #[cfg(not(windows))]
+        const ROOT_SEPARATORS: [char; 3] = [':', ';', ','];
+        for root in extra.split(ROOT_SEPARATORS) {
             let r = root.trim();
             if !r.is_empty() {
-                if let Ok(c) = Path::new(r).canonicalize() {
-                    trusted_roots.push(c);
+                match Path::new(r).canonicalize() {
+                    Ok(c) => trusted_roots.push(c),
+                    Err(e) => log_with_level(
+                        "WARN",
+                        &format!("Ignoring unresolvable trusted root '{}': {}", r, e),
+                    ),
                 }
             }
         }
@@ -605,10 +613,19 @@ fn emit_anchor_or_empty(
                 _ => "recent".to_string(),
             };
 
-            let ephemeral_msg = format!(
-                "[Context compacted via /shake. Active state anchored in @{} (Step {}+). Treat prior raw tool stdout as archived.]",
-                shaken_file, anchored_step
-            );
+            let ephemeral_msg = if let Some(card) = &anchor.continuity {
+                let step_num = match &anchor.anchored_at_step {
+                    Some(serde_json::Value::Number(n)) => n.as_u64().unwrap_or(1),
+                    Some(serde_json::Value::String(s)) => s.parse::<u64>().unwrap_or(1),
+                    _ => 1,
+                };
+                card.to_ephemeral_notice("Context compacted via /shake", &shaken_file, step_num)
+            } else {
+                format!(
+                    "[Context compacted via /shake. Active state anchored in @{} (Step {}+). Treat prior raw tool stdout as archived.]",
+                    shaken_file, anchored_step
+                )
+            };
 
             let response = json!({
                 "injectSteps": [

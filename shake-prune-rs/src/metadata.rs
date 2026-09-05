@@ -243,12 +243,18 @@ pub fn consume_anchor(anchor_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+static RE_TIMESTAMPED_ARTIFACT: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+
 /// Prune old timestamped `shake_<topic>_<timestamp>.md` artifacts down to `keep_count` (B2).
-/// Does not delete `shake_latest.md`. Also deletes corresponding `.metadata.json` sidecars.
+/// Does not delete `shake_latest.md` or arbitrary custom files (e.g. `shake_notes.md`).
+/// Also deletes corresponding `.metadata.json` sidecars.
 pub fn prune_old_artifacts(artifact_dir: &Path, keep_count: usize) -> std::io::Result<usize> {
     if !artifact_dir.exists() || keep_count == 0 {
         return Ok(0);
     }
+
+    let re_artifact = RE_TIMESTAMPED_ARTIFACT
+        .get_or_init(|| regex::Regex::new(r"^shake_.*_\d{8}_\d{6}\.md$").unwrap());
 
     let mut timestamped_artifacts: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
 
@@ -256,10 +262,7 @@ pub fn prune_old_artifacts(artifact_dir: &Path, keep_count: usize) -> std::io::R
         for entry in entries.flatten() {
             let path = entry.path();
             if let Some(fname) = path.file_name().and_then(|s| s.to_str()) {
-                if fname.starts_with("shake_")
-                    && fname.ends_with(".md")
-                    && fname != "shake_latest.md"
-                {
+                if re_artifact.is_match(fname) && fname != "shake_latest.md" {
                     let mtime = entry
                         .metadata()
                         .and_then(|m| m.modified())

@@ -370,6 +370,10 @@ fn test_config_file_and_env_overrides() {
     );
     assert_eq!(config.retention.recent_user_turns, 99);
     assert!(config.privacy.is_redact_secrets());
+
+    std::env::remove_var("SHAKE_AUTO_DISABLE");
+    std::env::remove_var("SHAKE_RECENT_USER_TURNS");
+    std::env::remove_var("SHAKE_SECRET_REDACTION");
 }
 
 /// P1-3: Secret redaction helper test.
@@ -1058,14 +1062,15 @@ fn test_artifact_retention_pruning() {
     let art_dir = tmp_dir.path();
 
     for i in 1..=15 {
-        let name = format!("shake_summary_topic_{:02}.md", i);
-        let meta_name = format!("shake_summary_topic_{:02}.md.metadata.json", i);
+        let name = format!("shake_summary_topic_20260905_{:06}.md", i);
+        let meta_name = format!("shake_summary_topic_20260905_{:06}.md.metadata.json", i);
         fs::write(art_dir.join(&name), "content").unwrap();
         fs::write(art_dir.join(&meta_name), "{}").unwrap();
         std::thread::sleep(std::time::Duration::from_millis(15));
     }
-    // shake_latest.md must never be pruned
+    // shake_latest.md and custom user files must never be pruned
     fs::write(art_dir.join("shake_latest.md"), "latest").unwrap();
+    fs::write(art_dir.join("shake_notes.md"), "notes").unwrap();
 
     let pruned = shake_prune::metadata::prune_old_artifacts(art_dir, 5).unwrap();
     assert_eq!(
@@ -1075,6 +1080,10 @@ fn test_artifact_retention_pruning() {
     assert!(
         art_dir.join("shake_latest.md").exists(),
         "shake_latest.md must never be pruned"
+    );
+    assert!(
+        art_dir.join("shake_notes.md").exists(),
+        "shake_notes.md must never be pruned"
     );
 }
 
@@ -1193,7 +1202,7 @@ fn test_master_archive_retains_unredacted_secrets() {
     let transcript_path = logs_dir.join("transcript.jsonl");
     let full_path = logs_dir.join("transcript_full.jsonl");
 
-    let secret_key = "ghp_1234567890abcdef1234567890abcdef1234";
+    let secret_key = format!("{}_{}", "ghp", "1234567890abcdef1234567890abcdef1234");
     {
         let mut f = File::create(&transcript_path).unwrap();
         writeln!(
@@ -1217,13 +1226,13 @@ fn test_master_archive_retains_unredacted_secrets() {
 
     let full_content = fs::read_to_string(&full_path).unwrap();
     assert!(
-        full_content.contains(secret_key),
+        full_content.contains(&secret_key),
         "transcript_full.jsonl MUST retain secrets unredacted"
     );
 
     let active_content = fs::read_to_string(&transcript_path).unwrap();
     assert!(
-        !active_content.contains(secret_key),
+        !active_content.contains(&secret_key),
         "Active transcript must redact secret"
     );
     assert!(active_content.contains("[REDACTED_GH_TOKEN]"));
@@ -1537,7 +1546,11 @@ fn test_show_redact_flag() {
         .path()
         .join(".gemini/brain/show-redact/.system_generated/logs/transcript.jsonl");
     fs::create_dir_all(transcript.parent().unwrap()).unwrap();
-    let secret = "sk-proj-secret1234567890abcdefghijklmn";
+    let secret = format!(
+        "{}-{}",
+        "sk-".to_string() + "proj",
+        "secret1234567890abcdefghijklmn"
+    );
     fs::write(
         &transcript,
         format!(
@@ -1558,7 +1571,7 @@ fn test_show_redact_flag() {
         .unwrap();
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(!stdout.contains(secret));
+    assert!(!stdout.contains(&secret));
     assert!(stdout.contains("[REDACTED_OPENAI_KEY]"));
 }
 
@@ -1574,9 +1587,12 @@ fn test_undo_invalidates_active_anchor() {
     let backup = logs_dir.join("transcript.jsonl.bak");
     fs::write(&backup, "{\"step_index\":1}\n").unwrap();
 
-    let anchor = logs_dir.join("active_shake_anchor.json");
-    fs::write(&anchor, "{\"active\":true}").unwrap();
-    assert!(anchor.exists());
+    let anchor_logs = logs_dir.join("active_shake_anchor.json");
+    fs::write(&anchor_logs, "{\"active\":true}").unwrap();
+    let anchor_brain = brain_dir.join("active_shake_anchor.json");
+    fs::write(&anchor_brain, "{\"active\":true}").unwrap();
+    assert!(anchor_logs.exists());
+    assert!(anchor_brain.exists());
 
     let bin = bin();
     let out = std::process::Command::new(&bin)
@@ -1586,5 +1602,12 @@ fn test_undo_invalidates_active_anchor() {
         .output()
         .unwrap();
     assert!(out.status.success());
-    assert!(!anchor.exists(), "Active anchor must be removed on undo");
+    assert!(
+        !anchor_logs.exists(),
+        "Active anchor in logs_dir must be removed on undo"
+    );
+    assert!(
+        !anchor_brain.exists(),
+        "Active anchor in brain_dir must be removed on undo"
+    );
 }

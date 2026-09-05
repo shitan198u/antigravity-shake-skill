@@ -33,6 +33,10 @@ jobs:
         run: |
           mkdir -p dist
           cp shake-prune-rs/target/release/shake-prune dist/shake-prune-linux-x86_64
+      - uses: actions/upload-artifact@v7
+        with:
+          name: shake-prune-linux-x86_64
+          path: dist/shake-prune-linux-x86_64
 
   # 2. Build Linux aarch64 (ARM64 musl) via cross
   build-linux-arm64:
@@ -58,6 +62,10 @@ jobs:
           mkdir -p dist
           cp shake-prune-rs/target/aarch64-unknown-linux-musl/release/shake-prune dist/shake-prune-linux-aarch64
           file dist/shake-prune-linux-aarch64
+      - uses: actions/upload-artifact@v7
+        with:
+          name: shake-prune-linux-aarch64
+          path: dist/shake-prune-linux-aarch64
 
   # 3. Build macOS Universal (Apple Silicon + Intel via lipo)
   build-macos:
@@ -110,8 +118,8 @@ jobs:
         run: cargo build --release --manifest-path shake-prune-rs/Cargo.toml
       - name: Smoke-Test Windows Binary
         run: |
-          shake-prune-rs\target\release\shake-prune.exe --version
-          shake-prune-rs\target\release\shake-prune.exe doctor --json
+          .\shake-prune-rs\target\release\shake-prune.exe --version
+          .\shake-prune-rs\target\release\shake-prune.exe doctor --json
       - name: Package Asset
         shell: bash
         run: |

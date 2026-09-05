@@ -121,12 +121,12 @@ fn handle_restore(target: &Path, force: bool) {
         if meta.len() > 0 {
             use std::io::{Seek, SeekFrom};
             let pre_restore_path = abs_target.with_extension("jsonl.pre_restore");
-            if let Ok(mut pre_file) = File::create(&pre_restore_path) {
+            if let Ok(mut pre_file) = shake_prune::atomic::create_user_only_file(&pre_restore_path)
+            {
                 let _ = target_file.seek(SeekFrom::Start(0));
                 let _ = std::io::copy(&mut target_file, &mut pre_file);
                 let _ = pre_file.flush();
                 let _ = target_file.seek(SeekFrom::Start(0));
-                shake_prune::atomic::set_user_only_permissions(&pre_restore_path);
             }
         }
     }
@@ -138,11 +138,17 @@ fn handle_restore(target: &Path, force: bool) {
             shake_prune::atomic::remove_intent_marker(&abs_target);
             let _ = fs2::FileExt::unlock(&target_file);
 
-            // Invalidate active anchor in artifact directory so ghost notifications are not injected
+            // Invalidate active anchor in artifact directory and logs directory so ghost notifications are not injected
             if let Some(parent) = abs_target.parent() {
-                let anchor_file = parent.join("active_shake_anchor.json");
-                if anchor_file.exists() {
-                    let _ = fs::remove_file(&anchor_file);
+                let direct_anchor = parent.join("active_shake_anchor.json");
+                if direct_anchor.exists() {
+                    let _ = fs::remove_file(&direct_anchor);
+                }
+                if let Some(artifact_dir) = parent.parent().and_then(|p| p.parent()) {
+                    let art_anchor = artifact_dir.join("active_shake_anchor.json");
+                    if art_anchor.exists() {
+                        let _ = fs::remove_file(&art_anchor);
+                    }
                 }
             }
 
@@ -198,7 +204,20 @@ fn handle_doctor(json_output: bool) {
                 active = content.contains("shake-prune");
             }
         }
-        let writable = fs::create_dir_all(&logs_dir).is_ok();
+        let writable = if fs::create_dir_all(&logs_dir).is_ok() {
+            let probe_file = logs_dir.join(format!(".doctor_probe_{}", std::process::id()));
+            if let Ok(mut f) = fs::File::create(&probe_file) {
+                use std::io::Write;
+                let _ = f.write_all(b"probe");
+                drop(f);
+                let _ = fs::remove_file(&probe_file);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
         (
             gemini_dir.exists(),
             active,
@@ -1035,7 +1054,17 @@ fn handle_run(args: &[String]) {
             ResolvedMode::Deep => "Manual (/shake deep)",
             ResolvedMode::Standard => "Manual (/shake)",
         };
-        let _ = write_artifact_metadata(&abs_output_path, &stats.topic_slug);
+        let summary_text = format!(
+            "Context compacted via /shake ({} mode): {} -> {} bytes ({:.1}% reduction). Active window and recent decisions preserved.",
+            match resolved_mode {
+                ResolvedMode::Deep => "deep",
+                ResolvedMode::Standard => "standard",
+            },
+            stats.this_run_before_bytes,
+            stats.this_run_after_bytes,
+            stats.this_run_savings_pct
+        );
+        let _ = write_artifact_metadata(&abs_output_path, &summary_text);
         let _ = write_active_anchor(
             &abs_output_path,
             &stats,
@@ -1150,7 +1179,7 @@ fn handle_run(args: &[String]) {
         options.recent_user_turns
     );
 
-    println!("### [Open Summary Artifact](file://{})", abs_str);
+    println!("### [Open Summary Artifact]({})", format_file_url(&abs_str));
     println!(
         "*Click above to open the executive summary in the artifact viewer or copy milestones.*\n"
     );
@@ -1158,8 +1187,8 @@ fn handle_run(args: &[String]) {
     println!("<details>");
     println!("<summary>⚙️ Archive & Working Tools</summary>\n");
     println!(
-        "- **Master Archive**: [transcript_full.jsonl](file://{})",
-        master_archive_abs_str
+        "- **Master Archive**: [transcript_full.jsonl]({})",
+        format_file_url(&master_archive_abs_str)
     );
     println!(
         "- **Active Working Tools**: Kept last {} tool outputs and {} un-clamped error traces in active memory.",
@@ -1167,6 +1196,15 @@ fn handle_run(args: &[String]) {
         stats.retained_errors
     );
     println!("</details>\n");
+}
+
+fn format_file_url(path_str: &str) -> String {
+    let normalized = path_str.replace('\\', "/");
+    if normalized.starts_with('/') {
+        format!("file://{}", normalized)
+    } else {
+        format!("file:///{}", normalized)
+    }
 }
 
 fn print_usage() {

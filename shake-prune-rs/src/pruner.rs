@@ -312,7 +312,7 @@ pub fn redact_secrets(text: &str) -> String {
     let pat_bearer = RE_BEARER
         .get_or_init(|| regex::Regex::new(r"(?i)\bBearer\s+[A-Za-z0-9_\-\.]{20,}").unwrap());
     let pat_auth =
-        RE_AUTH.get_or_init(|| regex::Regex::new(r"(?i)Authorization:\s*[^\r\n]+").unwrap());
+        RE_AUTH.get_or_init(|| regex::Regex::new(r#"(?i)Authorization:\s*[^"\r\n]+"#).unwrap());
     let pat_key = RE_KEY.get_or_init(|| {
         regex::Regex::new(
             r"-----BEGIN (?:[A-Z ]+) PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z ]+) PRIVATE KEY-----",
@@ -945,7 +945,10 @@ pub fn run_compaction_pipeline(
             1
         };
 
-        let horizon_turn_idx = total_user_turns.saturating_sub(25).max(1);
+        let horizon_turn_idx = total_user_turns
+            .saturating_sub(25)
+            .max(1)
+            .min(total_user_turns.saturating_sub(1));
         let horizon_start_idx = user_turn_positions[horizon_turn_idx].1;
 
         // 1. Genesis Turn 1
@@ -1164,7 +1167,7 @@ pub fn run_compaction_pipeline(
             } else {
                 match m.get(&step_idx).copied() {
                     Some(l) => Some((master_archive_abs_str.as_str(), l)),
-                    None if options.dry_run => None,
+                    None if options.dry_run || !options.in_place => None,
                     None => {
                         return Err(format!(
                             "Critical integrity failure: step {} cannot be resolved in master archive '{}'. Refusing to emit unresolvable receipt.",
@@ -1348,9 +1351,14 @@ pub fn run_compaction_pipeline(
                         content_str,
                         ACTIVE_TOOL_SNIPPET_CHARS,
                     ));
+                    let exit_label = match exit_code {
+                        Some(code) => format!("exit {}", code),
+                        None if is_error => "failed".to_string(),
+                        None => "exit 0".to_string(),
+                    };
                     output_blocks.push(format!(
-                        "<details>\n<summary>⚙️ <b>{}</b>{} — <b>Active Memory (exit 0)</b></summary>\n\n{}- **Output**:\n```\n{}\n```\n\n</details>\n\n",
-                        tool_name, summary_code, param_line, snippet
+                        "<details>\n<summary>⚙️ <b>{}</b>{} — <b>Active Memory ({})</b></summary>\n\n{}- **Output**:\n```\n{}\n```\n\n</details>\n\n",
+                        tool_name, summary_code, exit_label, param_line, snippet
                     ));
                 } else if is_recent_error {
                     retained_errors_count += 1;

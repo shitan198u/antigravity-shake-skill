@@ -36,7 +36,7 @@ Run the native binary using `run_command`. Quote paths with spaces:
 
 ```powershell
 # Windows
-%USERPROFILE%\.gemini\bin\shake-prune.exe run "<appDataDir>\brain\<conversation-id>\.system_generated\logs\transcript.jsonl"
+& "$env:USERPROFILE\.gemini\bin\shake-prune.exe" run "<appDataDir>\brain\<conversation-id>\.system_generated\logs\transcript.jsonl"
 ```
 
 *Pruned outputs include exact `line=N` pointers to `transcript_full.jsonl`. If you ever need to inspect historical commands or file contents from earlier turns, invoke `shake-prune show` or `view_file`.*

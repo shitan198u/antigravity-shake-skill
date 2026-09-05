@@ -173,12 +173,12 @@ pub fn analyze_transcript(
 
                 let is_pruned = crate::receipts::is_pruned_receipt(content_str);
                 if !is_pruned {
-                    unpruned_tool_count += 1;
                     if let Some(thresh) = _options.unpruned_tools_threshold {
-                        if unpruned_tool_count >= thresh {
-                            // If threshold reached and only checking unpruned count, stop scanning
-                            break;
+                        if unpruned_tool_count < thresh {
+                            unpruned_tool_count += 1;
                         }
+                    } else {
+                        unpruned_tool_count += 1;
                     }
                 }
             }
