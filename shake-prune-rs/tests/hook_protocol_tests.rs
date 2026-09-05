@@ -504,6 +504,7 @@ fn test_hook_lock_contention_fails_open() {
     let output = child.wait_with_output().unwrap();
     assert!(output.status.success(), "contended hook must exit 0");
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "{}");
+    drop(_guard);
     let after = std::fs::read(&transcript).unwrap();
     assert_eq!(before, after, "contended hook must not modify transcript");
 }
