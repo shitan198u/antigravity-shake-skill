@@ -369,7 +369,7 @@ fn test_config_file_and_env_overrides() {
         "SHAKE_AUTO_DISABLE=1 must disable auto-shake"
     );
     assert_eq!(config.retention.recent_user_turns, 99);
-    assert!(config.privacy.redact_secrets);
+    assert!(config.privacy.is_redact_secrets());
 }
 
 /// P1-3: Secret redaction helper test.
@@ -1418,4 +1418,160 @@ fn test_cli_rejects_unknown_flags_and_subcommands() {
         !out3.status.success(),
         "Unknown run flag must fail with exit code != 0"
     );
+}
+
+/// P0-13: Thought window preservation with explicit CLI flag in deep mode.
+#[test]
+fn test_thought_window_preserved_with_explicit_flag() {
+    let mut options = shake_prune::pruner::CompactionOptions {
+        thought_window_turns: Some(5),
+        ..Default::default()
+    };
+    options.apply_deep(20);
+    assert!(options.marathon_horizon);
+    assert_eq!(
+        options.thought_window_turns,
+        Some(5),
+        "Explicit thought window must not be overwritten by apply_deep"
+    );
+}
+
+/// P0-6: Extended secret redaction patterns (OpenAI, Google, Slack, generic assignment).
+#[test]
+fn test_extended_secret_redaction() {
+    let oai = format!("{}-{}", "sk-".to_string() + "proj", "1234567890abcdefghijklmnopqrstuvwxyz1234");
+    let google = format!("{}{}", "AI".to_string() + "za", "SyD-1234567890abcdefghijklmnopqr123");
+    let slack = format!(
+        "{}-{}-{}-{}",
+        "xox".to_string() + "b",
+        "1234567890",
+        "123456789012",
+        "abcdefghijklmnopqrstuvwx"
+    );
+    let generic = format!("client_{} = \"{}\"", "secret", "super_secret_token_1234567890");
+
+    let text = format!(
+        "oai: {}, google: {}, slack: {}, generic: {}",
+        oai, google, slack, generic
+    );
+    let redacted = redact_secrets(&text);
+
+    assert!(!redacted.contains(&oai));
+    assert!(redacted.contains("[REDACTED_OPENAI_KEY]"));
+    assert!(!redacted.contains(&google));
+    assert!(redacted.contains("[REDACTED_GOOGLE_KEY]"));
+    assert!(!redacted.contains(&slack));
+    assert!(redacted.contains("[REDACTED_SLACK_TOKEN]"));
+    assert!(!redacted.contains("super_secret_token_1234567890"));
+    assert!(redacted.contains("[REDACTED_SECRET]"));
+}
+
+/// P0-5: Subcommands reject sensitive paths (e.g. /etc/shadow).
+#[test]
+fn test_subcommands_reject_sensitive_paths() {
+    let bin = bin();
+    let out_undo = std::process::Command::new(&bin)
+        .arg("undo")
+        .arg("/etc/shadow")
+        .output()
+        .unwrap();
+    assert!(!out_undo.status.success(), "undo on /etc/shadow must fail");
+
+    let out_show = std::process::Command::new(&bin)
+        .arg("show")
+        .arg("/etc/shadow")
+        .arg("--line")
+        .arg("1")
+        .output()
+        .unwrap();
+    assert!(!out_show.status.success(), "show on /etc/shadow must fail");
+}
+
+/// P0-3: Non-blocking recovery in hook context returns Ok(None) on contention without blocking.
+#[test]
+fn test_hook_recovery_non_blocking_on_contention() {
+    use fs2::FileExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let transcript = tmp.path().join("transcript.jsonl");
+    fs::write(&transcript, "{\"step_index\":1}\n").unwrap();
+    let backup = tmp.path().join("transcript.jsonl.bak");
+    fs::write(&backup, "{\"step_index\":1}\n").unwrap();
+    let marker = tmp.path().join(".shake_in_progress");
+    fs::write(&marker, "{\"backup_path\":\"test\"}\n").unwrap();
+
+    let guard_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&transcript)
+        .unwrap();
+    guard_file.lock_exclusive().unwrap();
+
+    // Call non-blocking recovery while file is locked
+    let res = shake_prune::atomic::recover_if_interrupted_with_options(&transcript, true).unwrap();
+    assert!(
+        res.is_none(),
+        "Non-blocking recovery must return None when locked without blocking"
+    );
+
+    drop(guard_file);
+}
+
+/// P0-5 / P0-6: shake-prune show --redact filters secrets.
+#[test]
+fn test_show_redact_flag() {
+    let tmp = tempfile::tempdir().unwrap();
+    let transcript = tmp
+        .path()
+        .join(".gemini/brain/show-redact/.system_generated/logs/transcript.jsonl");
+    fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    let secret = "sk-proj-secret1234567890abcdefghijklmn";
+    fs::write(
+        &transcript,
+        format!(
+            "{{\"step_index\":1,\"type\":\"PLANNER_RESPONSE\",\"content\":\"key is {}\"}}\n",
+            secret
+        ),
+    )
+    .unwrap();
+
+    let bin = bin();
+    let out = std::process::Command::new(&bin)
+        .arg("show")
+        .arg(&transcript)
+        .arg("--line")
+        .arg("1")
+        .arg("--redact")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains(secret));
+    assert!(stdout.contains("[REDACTED_OPENAI_KEY]"));
+}
+
+/// P0-5: shake-prune undo invalidates active anchor so ghost notices are not injected.
+#[test]
+fn test_undo_invalidates_active_anchor() {
+    let tmp = tempfile::tempdir().unwrap();
+    let brain_dir = tmp.path().join(".gemini/brain/undo-anchor");
+    let logs_dir = brain_dir.join(".system_generated/logs");
+    fs::create_dir_all(&logs_dir).unwrap();
+    let transcript = logs_dir.join("transcript.jsonl");
+    fs::write(&transcript, "{\"step_index\":1}\n").unwrap();
+    let backup = logs_dir.join("transcript.jsonl.bak");
+    fs::write(&backup, "{\"step_index\":1}\n").unwrap();
+
+    let anchor = logs_dir.join("active_shake_anchor.json");
+    fs::write(&anchor, "{\"active\":true}").unwrap();
+    assert!(anchor.exists());
+
+    let bin = bin();
+    let out = std::process::Command::new(&bin)
+        .arg("undo")
+        .arg(&transcript)
+        .arg("--force")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(!anchor.exists(), "Active anchor must be removed on undo");
 }
