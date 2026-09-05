@@ -64,31 +64,6 @@ if [ "${1:-}" = "--uninstall" ] || [ "${1:-}" = "-u" ]; then
                 else . end
             ' "${HOOKS_CONFIG}" > "${HOOKS_CONFIG}.tmp" && mv "${HOOKS_CONFIG}.tmp" "${HOOKS_CONFIG}"
             echo "  ✓ Cleaned PreInvocation and Stop hooks from ${HOOKS_CONFIG}"
-        elif command -v python3 >/dev/null 2>&1; then
-            python3 -c '
-import json, os
-config_path = os.path.expanduser("'"${HOOKS_CONFIG}"'")
-if os.path.exists(config_path):
-    try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if "hooks" in data:
-            if "PreInvocation" in data["hooks"]:
-                data["hooks"]["PreInvocation"] = [
-                    h for h in data["hooks"]["PreInvocation"]
-                    if not ("shake-prune" in str(h.get("command", "")))
-                ]
-            if "Stop" in data["hooks"]:
-                data["hooks"]["Stop"] = [
-                    h for h in data["hooks"]["Stop"]
-                    if not ("shake-prune" in str(h.get("command", "")))
-                ]
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-        print("  ✓ Cleaned PreInvocation hook via python3")
-    except Exception as e:
-        print(f"  ⚠️ Could not clean hooks: {e}")
-'
         fi
     fi
 
@@ -252,31 +227,6 @@ if [ -f "${HOOKS_CONFIG}" ]; then
             else . end
         ' "${HOOKS_CONFIG}" > "${HOOKS_CONFIG}.tmp" && mv "${HOOKS_CONFIG}.tmp" "${HOOKS_CONFIG}"
         echo "  ✓ Cleaned PreInvocation and Stop hooks from ${HOOKS_CONFIG}"
-    elif command -v python3 >/dev/null 2>&1; then
-        python3 -c '
-import json, os
-config_path = os.path.expanduser("'"${HOOKS_CONFIG}"'")
-if os.path.exists(config_path):
-    try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if "hooks" in data:
-            if "PreInvocation" in data["hooks"]:
-                data["hooks"]["PreInvocation"] = [
-                    h for h in data["hooks"]["PreInvocation"]
-                    if not ("shake-prune" in str(h.get("command", "")))
-                ]
-            if "Stop" in data["hooks"]:
-                data["hooks"]["Stop"] = [
-                    h for h in data["hooks"]["Stop"]
-                    if not ("shake-prune" in str(h.get("command", "")))
-                ]
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-        print("  ✓ Cleaned PreInvocation and Stop hooks via python3")
-    except Exception as e:
-        print(f"  ⚠️ Could not clean hooks: {e}")
-'
     fi
 fi
 
@@ -372,45 +322,9 @@ if command -v jq >/dev/null 2>&1; then
         )
     ' > "${HOOKS_CONFIG}.tmp"
     mv "${HOOKS_CONFIG}.tmp" "${HOOKS_CONFIG}"
-elif command -v python3 >/dev/null 2>&1; then
-    python3 -c '
-import json, os
-
-config_path = os.path.expanduser("'"${HOOKS_CONFIG}"'")
-hook_cmd = "'"${HOOK_BIN}"' --hook"
-
-data = {}
-if os.path.exists(config_path):
-    try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception:
-        data = {}
-
-# Remove legacy shake-anchor property if present
-if "shake-anchor" in data:
-    del data["shake-anchor"]
-
-if "hooks" not in data or not isinstance(data["hooks"], dict):
-    data["hooks"] = {}
-
-for hook_name in ["PreInvocation", "Stop"]:
-    hook_list = data["hooks"].get(hook_name, [])
-    if not isinstance(hook_list, list):
-        hook_list = []
-    filtered = [
-        h for h in hook_list
-        if isinstance(h, dict) and not ("shake-prune" in str(h.get("command", "")))
-    ]
-    filtered.append({"command": hook_cmd})
-    data["hooks"][hook_name] = filtered
-
-with open(config_path, "w", encoding="utf-8") as f:
-    json.dump(data, f, indent=2)
-'
 else
-    echo "❌ Error: Neither jq nor python3 was found; cannot merge hooks into ${HOOKS_CONFIG}." >&2
-    echo "   Install jq or python3, then re-run ./install.sh (your existing hooks were backed up, nothing was removed)." >&2
+    echo "❌ Error: jq was not found; cannot configure hooks in ${HOOKS_CONFIG}." >&2
+    echo "   Install jq, then re-run ./install.sh (your existing hooks were backed up, nothing was removed)." >&2
     HOOK_MERGED=0
 fi
 
