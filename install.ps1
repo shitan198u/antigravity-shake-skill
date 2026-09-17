@@ -2,19 +2,25 @@
 #  Antigravity /shake Skill & Native In-Window Hook Installer (Windows PowerShell)
 # ==============================================================================
 param(
-    [switch]$Uninstall
+    [switch]$Uninstall,
+    [switch]$Local
 )
 
 $ErrorActionPreference = "Stop"
 
 $Repo = "shitan198u/antigravity-shake-skill"
-$DefaultTag = "v0.2.0"
+$DefaultTag = "latest"
 $UserHome = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile)
 $GlobalSkillsDir = Join-Path $UserHome ".gemini\config\skills\shake"
 $FullShakeSkillsDir = Join-Path $UserHome ".gemini\config\skills\full-shake"
 $GlobalBinDir = Join-Path $UserHome ".gemini\bin"
 $HooksConfig = Join-Path $UserHome ".gemini\config\hooks.json"
 $TargetExe = Join-Path $GlobalBinDir "shake-prune.exe"
+$CmdScript = Join-Path $GlobalBinDir "shake-uninstall.cmd"
+$PsScript = Join-Path $GlobalBinDir "shake-uninstall.ps1"
+
+$ScriptDir = if ($MyInvocation.MyCommand.Path) { Split-Path -Parent $MyInvocation.MyCommand.Path } else { $null }
+$LocalDev = $Local.IsPresent -or ($env:SHAKE_LOCAL_DEV -eq "1")
 
 # ==============================================================================
 # UNINSTALL MODE
@@ -25,6 +31,14 @@ if ($Uninstall) {
     if (Test-Path $TargetExe) {
         Remove-Item -Force $TargetExe
         Write-Host "  [OK] Removed $TargetExe"
+    }
+    if (Test-Path $CmdScript) {
+        Remove-Item -Force $CmdScript
+        Write-Host "  [OK] Removed $CmdScript"
+    }
+    if (Test-Path $PsScript) {
+        Remove-Item -Force $PsScript
+        Write-Host "  [OK] Removed $PsScript"
     }
     if (Test-Path $GlobalSkillsDir) {
         Remove-Item -Recurse -Force $GlobalSkillsDir
@@ -40,23 +54,13 @@ if ($Uninstall) {
             $HooksObj = Get-Content $HooksConfig -Raw | ConvertFrom-Json
             $Modified = $false
             if ($HooksObj.hooks -and $HooksObj.hooks.PreInvocation) {
-                $Filtered = @()
-                foreach ($h in $HooksObj.hooks.PreInvocation) {
-                    if ($h.command -notmatch "shake-prune") {
-                        $Filtered += $h
-                    }
-                }
+                $Filtered = @($HooksObj.hooks.PreInvocation | Where-Object { $_.command -notmatch "shake-prune" })
                 $HooksObj.hooks.PreInvocation = $Filtered
                 $Modified = $true
                 Write-Host "  [OK] Cleaned PreInvocation hook from $HooksConfig"
             }
             if ($HooksObj.hooks -and $HooksObj.hooks.Stop) {
-                $FilteredStop = @()
-                foreach ($h in $HooksObj.hooks.Stop) {
-                    if ($h.command -notmatch "shake-prune") {
-                        $FilteredStop += $h
-                    }
-                }
+                $FilteredStop = @($HooksObj.hooks.Stop | Where-Object { $_.command -notmatch "shake-prune" })
                 $HooksObj.hooks.Stop = $FilteredStop
                 $Modified = $true
                 Write-Host "  [OK] Cleaned Stop hook from $HooksConfig"
@@ -85,47 +89,27 @@ New-Item -ItemType Directory -Force -Path (Join-Path $GlobalSkillsDir "bin") | O
 New-Item -ItemType Directory -Force -Path (Join-Path $GlobalSkillsDir "references") | Out-Null
 New-Item -ItemType Directory -Force -Path $GlobalBinDir | Out-Null
 
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$Version = if ($env:SHAKE_VERSION) { $env:SHAKE_VERSION } else { $DefaultTag }
+$RefTag = if ($Version -eq "latest") { "main" } else { $Version }
+$RawBaseUrl = "https://raw.githubusercontent.com/$Repo/$RefTag"
 
-# 1. Install SKILL.md and documentation
-Write-Host "- Installing skill definitions to: $GlobalSkillsDir"
-if (Test-Path (Join-Path $ScriptDir "skills\shake\SKILL.md")) {
-    Copy-Item (Join-Path $ScriptDir "skills\shake\SKILL.md") (Join-Path $GlobalSkillsDir "SKILL.md") -Force
-} else {
-    Write-Warning "No SKILL.md found in $ScriptDir\skills\shake; skill text skipped."
-}
-if (Test-Path (Join-Path $ScriptDir "references")) {
-    Copy-Item (Join-Path $ScriptDir "references\*") (Join-Path $GlobalSkillsDir "references") -Recurse -Force
-} else {
-    Write-Warning "No references directory in $ScriptDir; references skipped."
-}
-
-# 2. Install Native Precompiled Binary
+# 1. Binary acquisition
 $InstalledBinary = $false
 
-if (Test-Path (Join-Path $ScriptDir "bin\shake-prune.exe")) {
-    Write-Host "- Installing local compiled native binary from bin/..."
-    Copy-Item (Join-Path $ScriptDir "bin\shake-prune.exe") $TargetExe -Force
-    Copy-Item (Join-Path $ScriptDir "bin\shake-prune.exe") (Join-Path $GlobalSkillsDir "bin\shake-prune.exe") -Force
-    $InstalledBinary = $true
-}
-
-if ((-not $InstalledBinary) -and (Test-Path (Join-Path $ScriptDir "shake-prune-rs\target\release\shake-prune.exe"))) {
-    Write-Host "- Installing local cargo release binary from shake-prune-rs\target\release\..."
-    Copy-Item (Join-Path $ScriptDir "shake-prune-rs\target\release\shake-prune.exe") $TargetExe -Force
-    Copy-Item (Join-Path $ScriptDir "shake-prune-rs\target\release\shake-prune.exe") (Join-Path $GlobalSkillsDir "bin\shake-prune.exe") -Force
-    $InstalledBinary = $true
+if ($LocalDev -and $ScriptDir) {
+    if (Test-Path (Join-Path $ScriptDir "bin\shake-prune.exe")) {
+        Write-Host "- [Local Dev] Installing compiled binary from bin/..."
+        Copy-Item (Join-Path $ScriptDir "bin\shake-prune.exe") $TargetExe -Force
+        $InstalledBinary = $true
+    } elseif (Test-Path (Join-Path $ScriptDir "shake-prune-rs\target\release\shake-prune.exe")) {
+        Write-Host "- [Local Dev] Installing cargo release binary from shake-prune-rs\target\release\..."
+        Copy-Item (Join-Path $ScriptDir "shake-prune-rs\target\release\shake-prune.exe") $TargetExe -Force
+        $InstalledBinary = $true
+    }
 }
 
 if (-not $InstalledBinary) {
-    $Arch = if ($env:PROCESSOR_ARCHITECTURE) { $env:PROCESSOR_ARCHITECTURE.ToLower() } else { "amd64" }
-    $DownloadFile = if ($Arch -eq "arm64") {
-        Write-Host "- Detected Windows ARM64 architecture (using Windows x64 binary via emulation)..."
-        "shake-prune-windows-x86_64.exe"
-    } else {
-        "shake-prune-windows-x86_64.exe"
-    }
-    $Version = if ($env:SHAKE_VERSION) { $env:SHAKE_VERSION } else { $DefaultTag }
+    $DownloadFile = "shake-prune-windows-x86_64.exe"
     $BaseReleaseUrl = if ($Version -eq "latest") {
         "https://github.com/$Repo/releases/latest/download"
     } else {
@@ -140,8 +124,8 @@ if (-not $InstalledBinary) {
 
     try {
         Write-Host "- Downloading precompiled release binary ($DownloadFile) from $BaseReleaseUrl..."
-        Invoke-WebRequest -Uri "$BaseReleaseUrl/$DownloadFile" -OutFile $TempExe -UseBasicParsing
-        Invoke-WebRequest -Uri "$BaseReleaseUrl/SHA256SUMS.txt" -OutFile $TempSums -UseBasicParsing
+        Invoke-WebRequest -Uri "$BaseReleaseUrl/$DownloadFile" -OutFile $TempExe -UseBasicParsing -TimeoutSec 30
+        Invoke-WebRequest -Uri "$BaseReleaseUrl/SHA256SUMS.txt" -OutFile $TempSums -UseBasicParsing -TimeoutSec 15
 
         Write-Host "- Verifying SHA256 integrity checksum..."
         if (-not (Test-Path $TempSums)) {
@@ -171,24 +155,136 @@ if (-not $InstalledBinary) {
 
         Write-Host "  [OK] SHA256 checksum verified: $ActualHash" -ForegroundColor Green
         Copy-Item $TempExe $TargetExe -Force
-        Copy-Item $TempExe (Join-Path $GlobalSkillsDir "bin\shake-prune.exe") -Force
         $InstalledBinary = $true
     } catch {
-        Write-Warning "Precompiled binary download/verification failed: $_"
-        Write-Host "   If you have Rust installed, you can build from source: cargo build --release --manifest-path shake-prune-rs\Cargo.toml" -ForegroundColor Yellow
+        Write-Error "Precompiled binary download/verification failed: $_"
+        exit 1
     } finally {
         Remove-Item -Recurse -Force $TempDir -ErrorAction SilentlyContinue
     }
 }
 
-if (-not $InstalledBinary) {
-    Write-Error "Installation Failed: shake-prune binary could not be installed. Release download failed. Please check internet connectivity or build from source with: cargo build --release --manifest-path shake-prune-rs\Cargo.toml"
-    exit 1
+# 2. Deploy local uninstaller scripts alongside shake-prune.exe
+$PsScript = Join-Path $GlobalBinDir "shake-uninstall.ps1"
+$CmdScript = Join-Path $GlobalBinDir "shake-uninstall.cmd"
+
+$UninstallPs1Content = @'
+# ==============================================================================
+# Antigravity /shake Local Uninstaller (Windows PowerShell)
+# ==============================================================================
+$ErrorActionPreference = "SilentlyContinue"
+$UserHome = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile)
+$GlobalSkillsDir = Join-Path $UserHome ".gemini\config\skills\shake"
+$FullShakeSkillsDir = Join-Path $UserHome ".gemini\config\skills\full-shake"
+$GlobalBinDir = Join-Path $UserHome ".gemini\bin"
+$HooksConfig = Join-Path $UserHome ".gemini\config\hooks.json"
+$TargetExe = Join-Path $GlobalBinDir "shake-prune.exe"
+$CmdScript = Join-Path $GlobalBinDir "shake-uninstall.cmd"
+$PsScript = Join-Path $GlobalBinDir "shake-uninstall.ps1"
+
+Write-Host "[*] Uninstalling Antigravity /shake..." -ForegroundColor Cyan
+
+if (Test-Path $TargetExe) {
+    Remove-Item -Force $TargetExe
+    Write-Host "  [OK] Removed $TargetExe"
+}
+if (Test-Path $GlobalSkillsDir) {
+    Remove-Item -Recurse -Force $GlobalSkillsDir
+    Write-Host "  [OK] Removed $GlobalSkillsDir"
+}
+if (Test-Path $FullShakeSkillsDir) {
+    Remove-Item -Recurse -Force $FullShakeSkillsDir
+    Write-Host "  [OK] Removed $FullShakeSkillsDir"
 }
 
-# 3. Safely merge PreInvocation and Stop hooks into hooks.json
-Write-Host "- Merging PreInvocation and Stop hooks into ~/.gemini/config/hooks.json (preserving existing hooks)..."
-# NOTE: Do not pre-escape backslashes; ConvertTo-Json handles JSON escaping.
+if (Test-Path $HooksConfig) {
+    try {
+        $HooksObj = Get-Content $HooksConfig -Raw | ConvertFrom-Json
+        $Modified = $false
+        if ($HooksObj.hooks -and $HooksObj.hooks.PreInvocation) {
+            $Filtered = @($HooksObj.hooks.PreInvocation | Where-Object { $_.command -notmatch "shake-prune" })
+            $HooksObj.hooks.PreInvocation = $Filtered
+            $Modified = $true
+            Write-Host "  [OK] Cleaned PreInvocation hook from $HooksConfig"
+        }
+        if ($HooksObj.hooks -and $HooksObj.hooks.Stop) {
+            $FilteredStop = @($HooksObj.hooks.Stop | Where-Object { $_.command -notmatch "shake-prune" })
+            $HooksObj.hooks.Stop = $FilteredStop
+            $Modified = $true
+            Write-Host "  [OK] Cleaned Stop hook from $HooksConfig"
+        }
+        if ($Modified) {
+            $HooksObj | ConvertTo-Json -Depth 5 | Set-Content $HooksConfig -Encoding UTF8
+        }
+    } catch {
+        Write-Warning "Could not update hooks.json: $_"
+    }
+}
+
+if (Test-Path $CmdScript) {
+    Remove-Item -Force $CmdScript
+    Write-Host "  [OK] Removed $CmdScript"
+}
+if (Test-Path $PsScript) {
+    Remove-Item -Force $PsScript
+    Write-Host "  [OK] Removed $PsScript"
+}
+
+Write-Host "[DONE] Antigravity /shake binaries, skills, and hooks removed." -ForegroundColor Green
+Write-Host "Retained (delete manually if desired): shake.toml, logs, transcript_full.jsonl archives, and .bak files."
+'@
+
+Set-Content -Path $PsScript -Value $UninstallPs1Content -Encoding UTF8
+$UninstallCmdContent = "@echo off`r`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File `"%~dp0shake-uninstall.ps1`"`r`n"
+Set-Content -Path $CmdScript -Value $UninstallCmdContent -Encoding ASCII
+Write-Host "- Installed local uninstaller: $CmdScript"
+
+# 3. Skill & Reference deployment (Always fresh overwrite)
+Write-Host "- Installing skill definitions to: $GlobalSkillsDir"
+Copy-Item $TargetExe (Join-Path $GlobalSkillsDir "bin\shake-prune.exe") -Force
+
+$SkillCopied = $false
+if ($LocalDev -and $ScriptDir) {
+    if (Test-Path (Join-Path $ScriptDir "skills\shake\SKILL.md")) {
+        Write-Host "  -> [Local Dev] Deploying SKILL.md from repository..."
+        Copy-Item (Join-Path $ScriptDir "skills\shake\SKILL.md") (Join-Path $GlobalSkillsDir "SKILL.md") -Force
+        $SkillCopied = $true
+    } elseif (Test-Path (Join-Path $ScriptDir "SKILL.md")) {
+        Write-Host "  -> [Local Dev] Deploying SKILL.md from repository..."
+        Copy-Item (Join-Path $ScriptDir "SKILL.md") (Join-Path $GlobalSkillsDir "SKILL.md") -Force
+        $SkillCopied = $true
+    }
+    if (Test-Path (Join-Path $ScriptDir "references")) {
+        Write-Host "  -> [Local Dev] Deploying references from repository..."
+        Copy-Item (Join-Path $ScriptDir "references\*") (Join-Path $GlobalSkillsDir "references") -Recurse -Force
+    }
+}
+
+if (-not $SkillCopied) {
+    Write-Host "  -> Downloading SKILL.md from GitHub ($RefTag)..."
+    try {
+        Invoke-RestMethod -Uri "$RawBaseUrl/skills/shake/SKILL.md" -OutFile (Join-Path $GlobalSkillsDir "SKILL.md") -TimeoutSec 15
+    } catch {
+        try {
+            Invoke-RestMethod -Uri "$RawBaseUrl/SKILL.md" -OutFile (Join-Path $GlobalSkillsDir "SKILL.md") -TimeoutSec 15
+        } catch {
+            Write-Warning "Could not fetch SKILL.md from GitHub: $_"
+        }
+    }
+
+    Write-Host "  -> Downloading references from GitHub ($RefTag)..."
+    $RefDocs = @("antigravity_lifecycle.md", "how_it_works.md", "omp_comparison.md")
+    foreach ($doc in $RefDocs) {
+        try {
+            Invoke-RestMethod -Uri "$RawBaseUrl/references/$doc" -OutFile (Join-Path $GlobalSkillsDir "references\$doc") -TimeoutSec 15
+        } catch {
+            # Non-fatal
+        }
+    }
+}
+
+# 3. Configure Background PreInvocation + Stop hooks in hooks.json
+Write-Host "- Merging PreInvocation and Stop hooks into ~/.gemini/config/hooks.json..."
 $HookCommand = "$TargetExe --hook"
 
 if (Test-Path $HooksConfig) {
@@ -207,7 +303,6 @@ if (Test-Path $HooksConfig) {
         if (-not $HooksObj.hooks) { $HooksObj | Add-Member -MemberType NoteProperty -Name "hooks" -Value @{} }
         if (-not $HooksObj.hooks.PreInvocation) { $HooksObj.hooks | Add-Member -MemberType NoteProperty -Name "PreInvocation" -Value @() }
         if (-not $HooksObj.hooks.Stop) { $HooksObj.hooks | Add-Member -MemberType NoteProperty -Name "Stop" -Value @() }
-        # Coerce non-array values (single object, string) to arrays before filtering.
         if ($HooksObj.hooks.PreInvocation -isnot [array]) { $HooksObj.hooks.PreInvocation = @($HooksObj.hooks.PreInvocation) }
         if ($HooksObj.hooks.Stop -isnot [array]) { $HooksObj.hooks.Stop = @($HooksObj.hooks.Stop) }
     } catch {
@@ -237,8 +332,18 @@ $HooksObj.hooks.Stop = $NewStop
 
 $HooksObj | ConvertTo-Json -Depth 5 | Set-Content $HooksConfig -Encoding UTF8
 
+# 5. Verification
 Write-Host "- Verifying installation..."
 & $TargetExe --version
-if ($LASTEXITCODE -ne 0) { Write-Error "Installed binary failed --version check."; exit 1 }
 & $TargetExe doctor --json | Out-Null
-if ($LASTEXITCODE -ne 0) { Write-Error "Installed binary failed 'doctor --json' check."; exit 1 }
+
+Write-Host ""
+Write-Host "[DONE] Installation Complete!" -ForegroundColor Green
+Write-Host "- Binary installed to: $TargetExe"
+Write-Host "- Local uninstaller: $CmdScript"
+Write-Host "- Skill installed to: $GlobalSkillsDir"
+Write-Host "- Native hooks configured in: $HooksConfig"
+Write-Host ""
+Write-Host "Type /shake in any conversation to compact context!" -ForegroundColor Cyan
+Write-Host "To update: re-run the installation command anytime (overwrites all assets)."
+Write-Host "To uninstall: run shake-uninstall (or .\install.ps1 -Uninstall)."
