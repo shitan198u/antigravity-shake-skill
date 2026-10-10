@@ -7,6 +7,7 @@ set -euo pipefail
 REPO="shitan198u/antigravity-shake-skill"
 BIN_NAME="shake-prune"
 INSTALL_DIR="${HOME}/.gemini/bin"
+USER_BIN_DIR="${HOME}/.local/bin"
 GLOBAL_SKILLS_DIR="${HOME}/.gemini/config/skills/shake"
 FULL_SHAKE_SKILLS_DIR="${HOME}/.gemini/config/skills/full-shake"
 HOOKS_CONFIG="${HOME}/.gemini/config/hooks.json"
@@ -22,6 +23,10 @@ if [ "${1:-}" = "--uninstall" ] || [ "${1:-}" = "-u" ]; then
     if [ -f "${INSTALL_DIR}/${BIN_NAME}" ]; then
         rm -f "${INSTALL_DIR}/${BIN_NAME}"
         echo "  ✓ Removed ${INSTALL_DIR}/${BIN_NAME}"
+    fi
+    if [ -L "${USER_BIN_DIR}/${BIN_NAME}" ]; then
+        rm -f "${USER_BIN_DIR}/${BIN_NAME}"
+        echo "  ✓ Removed symlink ${USER_BIN_DIR}/${BIN_NAME}"
     fi
 
     # 2. Remove skills
@@ -68,7 +73,7 @@ if os.path.exists(config_path):
                     if not ("shake-prune" in str(h.get("command", "")))
                 ]
         with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+            json.dump(data, indent=2)
         print("  ✓ Cleaned PreInvocation hook via python3")
     except Exception as e:
         print(f"  ⚠️ Could not clean hooks: {e}")
@@ -112,31 +117,35 @@ case "${OS}" in
         ;;
 esac
 
-# Binary acquisition: local override (CI) or download from GitHub Releases (users)
+# 1. Check for local pre-compiled binary
+INSTALLED_LOCAL=0
 if [ -f "${SCRIPT_DIR}/bin/${BIN_NAME}" ]; then
-    echo "📦 Using local pre-built binary..."
+    echo "📦 Found local precompiled binary in bin/..."
     cp "${SCRIPT_DIR}/bin/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}"
     chmod 755 "${INSTALL_DIR}/${BIN_NAME}"
+    INSTALLED_LOCAL=1
 elif [ -f "${SCRIPT_DIR}/shake-prune-rs/target/release/${BIN_NAME}" ]; then
-    echo "📦 Using local cargo release binary..."
+    echo "📦 Found local release binary in shake-prune-rs/target/release/..."
     cp "${SCRIPT_DIR}/shake-prune-rs/target/release/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}"
     chmod 755 "${INSTALL_DIR}/${BIN_NAME}"
-else
-    # Download prebuilt binary from GitHub Releases
-    SHAKE_VERSION="${SHAKE_VERSION:-v0.2.0}"
-    if [ "${SHAKE_VERSION}" = "latest" ]; then
+    INSTALLED_LOCAL=1
+fi
+
+# 2. Download from GitHub Releases if not found locally
+if [ "${INSTALLED_LOCAL}" -eq 0 ]; then
+    VERSION="${SHAKE_VERSION:-v0.2.0}"
+    if [ "${VERSION}" = "latest" ]; then
         BASE_RELEASE_URL="https://github.com/${REPO}/releases/latest/download"
     else
-        BASE_RELEASE_URL="https://github.com/${REPO}/releases/download/${SHAKE_VERSION}"
+        BASE_RELEASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
     fi
 
     DOWNLOAD_URL="${BASE_RELEASE_URL}/${BIN_NAME}-${TARGET}"
     CHECKSUM_URL="${BASE_RELEASE_URL}/SHA256SUMS.txt"
-    
     TMP_DIR="$(mktemp -d)"
     trap 'rm -rf "${TMP_DIR}"' EXIT
-    
-    echo "🌐 Downloading precompiled binary (${BIN_NAME}-${TARGET}) from ${BASE_RELEASE_URL}..."
+
+    echo "🌐 Downloading precompiled release binary (${BIN_NAME}-${TARGET}) from ${BASE_RELEASE_URL}..."
     if ! curl -fsSL "${DOWNLOAD_URL}" -o "${TMP_DIR}/${BIN_NAME}"; then
         echo "❌ Error: Failed to download precompiled binary from ${DOWNLOAD_URL}" >&2
         echo "   If you have Rust installed, you can build from source: cargo build --release --manifest-path shake-prune-rs/Cargo.toml" >&2
@@ -189,6 +198,13 @@ mkdir -p "${GLOBAL_SKILLS_DIR}/bin"
 cp "${INSTALL_DIR}/${BIN_NAME}" "${GLOBAL_SKILLS_DIR}/bin/${BIN_NAME}"
 chmod 755 "${GLOBAL_SKILLS_DIR}/bin/${BIN_NAME}"
 
+# Symlink into ~/.local/bin so shake-prune is accessible in user's PATH
+mkdir -p "${USER_BIN_DIR}" 2>/dev/null || true
+if [ -w "${USER_BIN_DIR}" ]; then
+    ln -sf "${INSTALL_DIR}/${BIN_NAME}" "${USER_BIN_DIR}/${BIN_NAME}"
+    echo "  ✓ Linked ${USER_BIN_DIR}/${BIN_NAME} -> ${INSTALL_DIR}/${BIN_NAME}"
+fi
+
 if [ -f "${SCRIPT_DIR}/skills/shake/SKILL.md" ]; then
     cp "${SCRIPT_DIR}/skills/shake/SKILL.md" "${GLOBAL_SKILLS_DIR}/SKILL.md"
 elif [ -f "${SCRIPT_DIR}/SKILL.md" ]; then
@@ -228,18 +244,18 @@ if command -v jq >/dev/null 2>&1; then
         del(."shake-anchor") |
         .hooks = (.hooks // {}) |
         .hooks.PreInvocation = (
-            (((.hooks.PreInvocation // []) | if type == "array" then . else [] end) | map(select((.command != $bin) and (.command | contains("shake-prune") | not)))) +
+            ((.hooks.PreInvocation // []) | map(select(.command != $bin and (.command | contains("shake-prune") | not)))) +
             [{"command": $bin}]
         ) |
         .hooks.Stop = (
-            (((.hooks.Stop // []) | if type == "array" then . else [] end) | map(select((.command != $bin) and (.command | contains("shake-prune") | not)))) +
+            ((.hooks.Stop // []) | map(select(.command != $bin and (.command | contains("shake-prune") | not)))) +
             [{"command": $bin}]
         )
-    ' > "${HOOKS_CONFIG}.tmp"
-    mv "${HOOKS_CONFIG}.tmp" "${HOOKS_CONFIG}"
+    ' > "${HOOKS_CONFIG}.tmp" && mv "${HOOKS_CONFIG}.tmp" "${HOOKS_CONFIG}"
+    echo "  ✓ Proactive PreInvocation & Stop auto-hooks merged successfully via jq."
 elif command -v python3 >/dev/null 2>&1; then
     python3 -c '
-import json, os
+import json, os, sys
 
 config_path = os.path.expanduser("'"${HOOKS_CONFIG}"'")
 hook_cmd = "'"${HOOK_BIN}"' --hook"
@@ -252,31 +268,42 @@ if os.path.exists(config_path):
     except Exception:
         data = {}
 
-# Remove legacy shake-anchor property if present
-if "shake-anchor" in data:
-    del data["shake-anchor"]
+data.pop("shake-anchor", None)
 
-if "hooks" not in data or not isinstance(data["hooks"], dict):
-    data["hooks"] = {}
+hooks = data.setdefault("hooks", {})
+pre = hooks.setdefault("PreInvocation", [])
+stop = hooks.setdefault("Stop", [])
 
-for hook_name in ["PreInvocation", "Stop"]:
-    hook_list = data["hooks"].get(hook_name, [])
-    if not isinstance(hook_list, list):
-        hook_list = []
-    filtered = [
-        h for h in hook_list
-        if isinstance(h, dict) and not ("shake-prune" in str(h.get("command", "")))
-    ]
-    filtered.append({"command": hook_cmd})
-    data["hooks"][hook_name] = filtered
+filtered_pre = [h for h in pre if not (isinstance(h, dict) and "shake-prune" in h.get("command", ""))]
+filtered_pre.append({"command": hook_cmd})
+hooks["PreInvocation"] = filtered_pre
+
+filtered_stop = [h for h in stop if not (isinstance(h, dict) and "shake-prune" in h.get("command", ""))]
+filtered_stop.append({"command": hook_cmd})
+hooks["Stop"] = filtered_stop
 
 with open(config_path, "w", encoding="utf-8") as f:
     json.dump(data, f, indent=2)
+print("  ✓ Proactive PreInvocation & Stop auto-hooks merged successfully via python3.")
 '
 else
-    echo "❌ Error: Neither jq nor python3 was found; cannot merge hooks into ${HOOKS_CONFIG}." >&2
-    echo "   Install jq or python3, then re-run ./install.sh (your existing hooks were backed up, nothing was removed)." >&2
-    HOOK_MERGED=0
+    echo "⚠️ Neither jq nor python3 found; writing clean default hooks configuration to ${HOOKS_CONFIG}."
+    cat <<EOF > "${HOOKS_CONFIG}"
+{
+  "hooks": {
+    "PreInvocation": [
+      {
+        "command": "${HOOK_BIN} --hook"
+      }
+    ],
+    "Stop": [
+      {
+        "command": "${HOOK_BIN} --hook"
+      }
+    ]
+  }
+}
+EOF
 fi
 
 echo ""
@@ -288,6 +315,13 @@ if [ "${HOOK_MERGED}" = "1" ]; then
     echo ""
     echo "🎉 Installation Complete!"
     echo "• Binary installed to: ${INSTALL_DIR}/${BIN_NAME}"
+    if [ -x "${USER_BIN_DIR}/${BIN_NAME}" ]; then
+        echo "• CLI symlink created at: ${USER_BIN_DIR}/${BIN_NAME}"
+        if ! echo ":${PATH}:" | grep -q ":${USER_BIN_DIR}:"; then
+            echo "  ℹ️ Note: ${USER_BIN_DIR} is not in your PATH. Add it to ~/.bashrc or ~/.zshrc:"
+            echo "     export PATH=\"\${HOME}/.local/bin:\$PATH\""
+        fi
+    fi
     echo "• /shake skill installed to: ${GLOBAL_SKILLS_DIR}"
     echo "• Proactive auto-compaction hook configured in: ${HOOKS_CONFIG}"
     echo ""
